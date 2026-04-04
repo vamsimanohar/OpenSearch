@@ -14,13 +14,14 @@ import org.apache.calcite.schema.impl.AbstractTable;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.types.Types;
+import org.opensearch.analytics.schema.ExternalTable;
 
 /**
  * A Calcite {@link AbstractTable} backed by an Apache Iceberg table.
  * The constructor pins the current snapshot so that every query operator
  * sees a consistent view of the table.
  */
-public class IcebergCalciteTable extends AbstractTable {
+public class IcebergCalciteTable extends AbstractTable implements ExternalTable {
     private final Table icebergTable;
     private final long pinnedSnapshotId;
 
