@@ -1,0 +1,48 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+apply plugin: 'opensearch.internal-cluster-test'
+
+opensearchplugin {
+    name = 'lakehouse-iceberg'
+    description = 'Read external Apache Iceberg tables via PPL and SQL'
+    classname = 'org.opensearch.lakehouse.LakehousePlugin'
+    extendedPlugins = ['analytics-engine']
+}
+
+dependencies {
+    // Iceberg SDK
+    implementation "org.apache.iceberg:iceberg-core:1.7.1"
+    implementation "org.apache.iceberg:iceberg-aws:1.7.1"
+    implementation "org.apache.iceberg:iceberg-bundled-guava:1.7.1"
+    implementation "org.apache.iceberg:iceberg-parquet:1.7.1"
+
+    // Substrait (Java)
+    implementation "io.substrait:core:0.31.0"
+
+    // AWS SDK
+    implementation "software.amazon.awssdk:glue:${versions.aws}"
+    implementation "software.amazon.awssdk:s3:${versions.aws}"
+    implementation "software.amazon.awssdk:sts:${versions.aws}"
+
+    // Analytics engine (compile-only, provided at runtime)
+    compileOnly project(':sandbox:plugins:analytics-engine')
+    compileOnly project(':sandbox:plugins:analytics-backend-datafusion')
+    compileOnly project(':sandbox:libs:analytics-framework')
+}
+
+configurations.all {
+    resolutionStrategy {
+        force "com.google.guava:guava:33.4.0-jre"
+        force "com.google.guava:failureaccess:1.0.2"
+        force "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
+        force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+        force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+        force "org.slf4j:slf4j-api:${versions.slf4j}"
+    }
+}
