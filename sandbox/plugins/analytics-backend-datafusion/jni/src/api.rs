@@ -166,6 +166,7 @@ use futures::TryStreamExt;
 
 use crate::cross_rt_stream::CrossRtStream;
 use crate::runtime_manager::RuntimeManager;
+use crate::s3_store::S3Config;
 use crate::util::create_object_metas;
 
 /// Opaque runtime handle returned to the caller.
@@ -338,6 +339,48 @@ pub unsafe fn stream_close(stream_ptr: i64) {
     if stream_ptr != 0 {
         let _ = Box::from_raw(stream_ptr as *mut RecordBatchStreamAdapter<CrossRtStream>);
     }
+}
+
+/// Executes an Iceberg query against S3-backed Parquet files.
+///
+/// Returns a heap-allocated pointer (as i64) to the result stream.
+/// Caller must call `stream_close` exactly once to free it.
+///
+/// This is an async function -- the bridge layer decides how to run it
+/// (`block_on` for synchronous JNI, `spawn` for async delivery).
+pub async fn execute_iceberg_query(
+    s3_region: &str,
+    s3_bucket: &str,
+    s3_access_key_id: Option<&str>,
+    s3_secret_access_key: Option<&str>,
+    s3_session_token: Option<&str>,
+    s3_endpoint: Option<&str>,
+    file_paths: Vec<String>,
+    table_name: &str,
+    plan_bytes: &[u8],
+    manager: &RuntimeManager,
+) -> Result<i64, DataFusionError> {
+    let s3_config = S3Config {
+        region: s3_region.to_string(),
+        bucket: s3_bucket.to_string(),
+        access_key_id: s3_access_key_id.map(|s| s.to_string()),
+        secret_access_key: s3_secret_access_key.map(|s| s.to_string()),
+        session_token: s3_session_token.map(|s| s.to_string()),
+        endpoint: s3_endpoint.map(|s| s.to_string()),
+    };
+
+    let cpu_executor = manager.cpu_executor();
+
+    let result = crate::iceberg_executor::execute_iceberg_query(
+        s3_config,
+        file_paths,
+        table_name.to_string(),
+        plan_bytes.to_vec(),
+        cpu_executor,
+    )
+    .await?;
+
+    Ok(result)
 }
 
 /// Converts SQL to Substrait plan bytes (test only).

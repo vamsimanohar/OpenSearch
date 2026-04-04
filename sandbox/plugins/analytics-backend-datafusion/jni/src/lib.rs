@@ -28,6 +28,7 @@ use log::error;
 pub mod api;
 pub mod cross_rt_stream;
 pub mod executor;
+pub mod iceberg_executor;
 pub mod io;
 pub mod query_executor;
 pub mod runtime_manager;
@@ -234,6 +235,132 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_execut
         Ok(stream_ptr) => set_action_listener_ok_global(env, &listener_ref, stream_ptr as jlong),
         Err(e) => {
             error!("Query execution failed: {}", e);
+            set_action_listener_error_global(env, &listener_ref, &e);
+        }
+    });
+}
+
+// Executes an Iceberg query against S3-backed Parquet files and returns a stream handle to listener
+#[jni_safe]
+#[no_mangle]
+pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_executeIcebergQueryAsync(
+    mut env: JNIEnv,
+    _class: JClass,
+    s3_region: JString,
+    s3_bucket: JString,
+    s3_access_key_id: JString,
+    s3_secret_access_key: JString,
+    s3_session_token: JString,
+    s3_endpoint: JString,
+    file_paths: JObjectArray,
+    table_name: JString,
+    substrait_bytes: JObject,
+    listener: JObject,
+) {
+    let tokio_rt_mgr = match get_tokio_rt_manager() {
+        Ok(m) => m,
+        Err(e) => {
+            set_action_listener_error(env, listener, &e);
+            return;
+        }
+    };
+
+    let region: String = match env.get_string(&s3_region) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Invalid S3 region: {}", e)));
+            return;
+        }
+    };
+    let bucket: String = match env.get_string(&s3_bucket) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Invalid S3 bucket: {}", e)));
+            return;
+        }
+    };
+
+    // Optional S3 credentials — null JStrings become None
+    let access_key_id: Option<String> = if s3_access_key_id.is_null() {
+        None
+    } else {
+        match env.get_string(&s3_access_key_id) {
+            Ok(s) => Some(s.into()),
+            Err(_) => None,
+        }
+    };
+    let secret_access_key: Option<String> = if s3_secret_access_key.is_null() {
+        None
+    } else {
+        match env.get_string(&s3_secret_access_key) {
+            Ok(s) => Some(s.into()),
+            Err(_) => None,
+        }
+    };
+    let session_token: Option<String> = if s3_session_token.is_null() {
+        None
+    } else {
+        match env.get_string(&s3_session_token) {
+            Ok(s) => Some(s.into()),
+            Err(_) => None,
+        }
+    };
+    let endpoint: Option<String> = if s3_endpoint.is_null() {
+        None
+    } else {
+        match env.get_string(&s3_endpoint) {
+            Ok(s) => Some(s.into()),
+            Err(_) => None,
+        }
+    };
+
+    let paths = match parse_string_arr(env, file_paths) {
+        Ok(f) => f,
+        Err(e) => {
+            set_action_listener_error(env, listener, &e);
+            return;
+        }
+    };
+    let table_name_str: String = match env.get_string(&JString::from(table_name)) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Invalid table name: {}", e)));
+            return;
+        }
+    };
+    let plan_bytes_obj = unsafe { JByteArray::from_raw(substrait_bytes.as_raw()) };
+    let plan_bytes = match env.convert_byte_array(plan_bytes_obj) {
+        Ok(b) => b,
+        Err(e) => {
+            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Failed to convert plan bytes: {}", e)));
+            return;
+        }
+    };
+    let listener_ref = match env.new_global_ref(&listener) {
+        Ok(r) => r,
+        Err(e) => {
+            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Failed to create global ref: {}", e)));
+            return;
+        }
+    };
+
+    let result = tokio_rt_mgr.io_runtime.block_on(api::execute_iceberg_query(
+        &region,
+        &bucket,
+        access_key_id.as_deref(),
+        secret_access_key.as_deref(),
+        session_token.as_deref(),
+        endpoint.as_deref(),
+        paths,
+        &table_name_str,
+        &plan_bytes,
+        tokio_rt_mgr,
+    ));
+
+    with_jni_env(|env| match result {
+        Ok(stream_ptr) => set_action_listener_ok_global(env, &listener_ref, stream_ptr as jlong),
+        Err(e) => {
+            error!("Iceberg query execution failed: {}", e);
             set_action_listener_error_global(env, &listener_ref, &e);
         }
     });
