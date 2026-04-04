@@ -39,6 +39,12 @@ dependencies {
     implementation "software.amazon.awssdk:glue:${versions.aws}"
     implementation "software.amazon.awssdk:s3:${versions.aws}"
     implementation "software.amazon.awssdk:sts:${versions.aws}"
+    implementation "software.amazon.awssdk:auth:${versions.aws}"
+    implementation "software.amazon.awssdk:regions:${versions.aws}"
+    implementation "software.amazon.awssdk:identity-spi:${versions.aws}"
+    implementation "software.amazon.awssdk:utils:${versions.aws}"
+    implementation "software.amazon.awssdk:aws-core:${versions.aws}"
+    implementation "software.amazon.awssdk:sdk-core:${versions.aws}"
 
     // Analytics engine (compile-only, provided at runtime)
     compileOnly project(':sandbox:plugins:analytics-engine')
