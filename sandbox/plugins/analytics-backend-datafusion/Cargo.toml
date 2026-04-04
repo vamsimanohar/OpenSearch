@@ -15,7 +15,7 @@ arrow-array = "57.3.0"
 arrow-schema = "57.3.0"
 
 parquet = "57.3.0"
-object_store = "0.12.5"
+object_store = { version = "0.12.5", features = ["aws"] }
 url = "2.0"
 
 prost = "0.14"

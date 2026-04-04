@@ -31,6 +31,7 @@ pub mod executor;
 pub mod io;
 pub mod query_executor;
 pub mod runtime_manager;
+pub mod s3_store;
 pub mod util;
 
 use jni_macros::jni_safe;
