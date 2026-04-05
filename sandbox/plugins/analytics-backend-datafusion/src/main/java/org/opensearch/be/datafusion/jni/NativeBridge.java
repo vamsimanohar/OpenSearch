@@ -8,6 +8,14 @@
 
 package org.opensearch.be.datafusion.jni;
 
+import org.opensearch.common.SuppressForbidden;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+
 /**
  * Core JNI bridge to native DataFusion library.
  * All native method declarations are centralized here.
@@ -22,8 +30,27 @@ public final class NativeBridge {
 
     private NativeBridge() {}
 
+    @SuppressForbidden(reason = "Needs temp directory to extract native library from classpath")
     private static synchronized void loadNativeLibrary() {
         if (loaded) return;
+        String libFileName = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("mac")
+            ? "libopensearch_datafusion_jni.dylib"
+            : "libopensearch_datafusion_jni.so";
+        // Try extracting from classpath resource first (bundled in plugin jar)
+        try (InputStream is = NativeBridge.class.getResourceAsStream("/native/" + libFileName)) {
+            if (is != null) {
+                Path tempDir = Files.createTempDirectory("opensearch-datafusion-native-");
+                Path tempLib = tempDir.resolve(libFileName);
+                Files.copy(is, tempLib, StandardCopyOption.REPLACE_EXISTING);
+                System.load(tempLib.toAbsolutePath().toString());
+                tempLib.toFile().deleteOnExit();
+                tempDir.toFile().deleteOnExit();
+                loaded = true;
+                return;
+            }
+        } catch (IOException e) {
+            // Fall through to System.loadLibrary
+        }
         try {
             System.loadLibrary("opensearch_datafusion_jni");
             loaded = true;
