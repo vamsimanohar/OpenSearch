@@ -18,6 +18,7 @@ import org.opensearch.analytics.exec.DefaultPlanExecutor;
 import org.opensearch.analytics.exec.ExternalTableExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
+import org.opensearch.analytics.schema.SchemaContributor;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
@@ -57,13 +58,20 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
 
     private final List<AnalyticsSearchBackendPlugin> backEnds = new ArrayList<>();
     private final List<ExternalTableExecutor> externalTableExecutors = new ArrayList<>();
+    private final List<SchemaContributor> schemaContributors = new ArrayList<>();
     private SqlOperatorTable operatorTable;
 
     @SuppressWarnings("rawtypes")
     @Override
     public void loadExtensions(ExtensionLoader loader) {
-        backEnds.addAll(loader.loadExtensions(AnalyticsSearchBackendPlugin.class));
-        externalTableExecutors.addAll(loader.loadExtensions(ExternalTableExecutor.class));
+        List<AnalyticsSearchBackendPlugin> loadedBackends = loader.loadExtensions(AnalyticsSearchBackendPlugin.class);
+        List<ExternalTableExecutor> loadedExecutors = loader.loadExtensions(ExternalTableExecutor.class);
+        List<SchemaContributor> loadedContributors = loader.loadExtensions(SchemaContributor.class);
+        logger.info("[AnalyticsPlugin] loadExtensions: backends={}, externalExecutors={}, schemaContributors={}",
+            loadedBackends.size(), loadedExecutors.size(), loadedContributors.size());
+        backEnds.addAll(loadedBackends);
+        externalTableExecutors.addAll(loadedExecutors);
+        schemaContributors.addAll(loadedContributors);
         operatorTable = aggregateOperatorTables();
     }
 
@@ -84,7 +92,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
         ExternalTableExecutor externalExecutor = externalTableExecutors.isEmpty() ? null : externalTableExecutors.get(0);
         return List.of(
             new DefaultPlanExecutor(backEnds, null/* TODO: pass indices service */, clusterService, externalExecutor),
-            new DefaultEngineContext(clusterService, operatorTable)
+            new DefaultEngineContext(clusterService, operatorTable, schemaContributors)
         );
     }
 
@@ -106,11 +114,19 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     /**
      * Default implementation of {@link EngineContext}.
      */
-    static record DefaultEngineContext(ClusterService clusterService, SqlOperatorTable operatorTable) implements EngineContext {
+    static record DefaultEngineContext(ClusterService clusterService, SqlOperatorTable operatorTable, List<SchemaContributor> schemaContributors)
+        implements EngineContext {
 
         @Override
         public SchemaPlus getSchema() {
-            return OpenSearchSchemaBuilder.buildSchema(clusterService.state());
+            SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterService.state());
+            logger.info("[DefaultEngineContext] Building schema with {} contributors, {} OS tables",
+                schemaContributors.size(), schema.getTableNames().size());
+            for (SchemaContributor contributor : schemaContributors) {
+                contributor.contributeSchema(schema, clusterService.state());
+            }
+            logger.info("[DefaultEngineContext] Final schema tables: {}", schema.getTableNames());
+            return schema;
         }
     }
 }

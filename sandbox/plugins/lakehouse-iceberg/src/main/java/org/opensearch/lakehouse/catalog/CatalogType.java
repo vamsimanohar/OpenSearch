@@ -14,6 +14,8 @@ package org.opensearch.lakehouse.catalog;
 public enum CatalogType {
     /** AWS Glue Data Catalog. */
     GLUE,
+    /** Local Hadoop-based catalog (for testing). */
+    HADOOP,
     /** Apache Hive Metastore. */
     HIVE,
     /** Iceberg REST Catalog. */

@@ -10,7 +10,6 @@ package org.opensearch.dsl;
 
 import org.opensearch.action.support.ActionFilter;
 import org.opensearch.dsl.action.DslExecuteAction;
-import org.opensearch.dsl.action.SearchActionFilter;
 import org.opensearch.dsl.action.TransportDslExecuteAction;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.test.OpenSearchTestCase;
@@ -39,9 +38,9 @@ public class DslQueryExecutorPluginTests extends OpenSearchTestCase {
     public void testGetActionFiltersAfterCreateComponents() {
         plugin.createComponents(mock(NodeClient.class), null, null, null, null, null, null, null, null, null, null);
 
+        // Phase 1: SearchActionFilter is disabled — _search requests go through the standard pipeline
         List<ActionFilter> filters = plugin.getActionFilters();
-        assertEquals(1, filters.size());
-        assertTrue(filters.get(0) instanceof SearchActionFilter);
+        assertTrue(filters.isEmpty());
     }
 
     public void testRegistersTransportAction() {

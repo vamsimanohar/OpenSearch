@@ -21,6 +21,7 @@ import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.inject.Inject;
 import org.opensearch.index.IndexService;
 import org.opensearch.index.engine.DataFormatAwareEngine;
 import org.opensearch.index.shard.IndexShard;
@@ -43,7 +44,7 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
 
     private static final Logger logger = LogManager.getLogger(DefaultPlanExecutor.class);
     private final Map<String, AnalyticsSearchBackendPlugin> backEnds;
-    private final IndicesService indicesService;
+    private volatile IndicesService indicesService;
     private final ClusterService clusterService;
     private final ExternalTableExecutor externalTableExecutor;
 
@@ -68,6 +69,15 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
         this.indicesService = indicesService;
         this.clusterService = clusterService;
         this.externalTableExecutor = externalTableExecutor;
+    }
+
+    /**
+     * Guice member injection — IndicesService is not available during createComponents(),
+     * so it's injected after the Guice injector is built.
+     */
+    @Inject
+    public void setIndicesService(IndicesService indicesService) {
+        this.indicesService = indicesService;
     }
 
     @Override

@@ -61,26 +61,23 @@ public class IcebergCatalogConnectorTests extends OpenSearchTestCase {
         assertTrue(ex.getMessage().contains("s3://"));
     }
 
+    public void testWarehousePrefixValidationAcceptsFile() {
+        // file:// is allowed for Hadoop catalogs (local testing)
+        IcebergCatalogConnector.validateWarehouseUri("file:///tmp/warehouse");
+    }
+
     public void testWarehousePrefixValidationRejectsNull() {
         IllegalArgumentException ex = expectThrows(
             IllegalArgumentException.class,
             () -> IcebergCatalogConnector.validateWarehouseUri(null)
         );
-        assertTrue(ex.getMessage().contains("s3://"));
+        assertTrue(ex.getMessage().contains("null"));
     }
 
     public void testWarehousePrefixValidationRejectsEmptyString() {
         IllegalArgumentException ex = expectThrows(
             IllegalArgumentException.class,
             () -> IcebergCatalogConnector.validateWarehouseUri("")
-        );
-        assertTrue(ex.getMessage().contains("s3://"));
-    }
-
-    public void testWarehousePrefixValidationRejectsFileScheme() {
-        IllegalArgumentException ex = expectThrows(
-            IllegalArgumentException.class,
-            () -> IcebergCatalogConnector.validateWarehouseUri("file:///tmp/warehouse")
         );
         assertTrue(ex.getMessage().contains("s3://"));
     }
@@ -103,6 +100,11 @@ public class IcebergCatalogConnectorTests extends OpenSearchTestCase {
     public void testRestCatalogTypeAllowed() {
         // Should not throw
         IcebergCatalogConnector.validateCatalogType(CatalogType.REST);
+    }
+
+    public void testHadoopCatalogTypeAllowed() {
+        // Should not throw
+        IcebergCatalogConnector.validateCatalogType(CatalogType.HADOOP);
     }
 
     // --- Register duplicate name throws ---
