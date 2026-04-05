@@ -272,11 +272,15 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_execut
             return;
         }
     };
-    let bucket: String = match env.get_string(&s3_bucket) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Invalid S3 bucket: {}", e)));
-            return;
+    let bucket: String = if s3_bucket.is_null() {
+        String::new()
+    } else {
+        match env.get_string(&s3_bucket) {
+            Ok(s) => s.into(),
+            Err(e) => {
+                set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Invalid S3 bucket: {}", e)));
+                return;
+            }
         }
     };
 

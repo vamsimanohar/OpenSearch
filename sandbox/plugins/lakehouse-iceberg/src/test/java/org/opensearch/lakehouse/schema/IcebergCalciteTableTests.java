@@ -34,7 +34,7 @@ public class IcebergCalciteTableTests extends OpenSearchTestCase {
         );
         when(mockTable.schema()).thenReturn(schema);
 
-        IcebergCalciteTable table = new IcebergCalciteTable(mockTable);
+        IcebergCalciteTable table = new IcebergCalciteTable(mockTable, null);
         RelDataType rowType = table.getRowType(new JavaTypeFactoryImpl());
 
         assertEquals(3, rowType.getFieldCount());
@@ -50,7 +50,7 @@ public class IcebergCalciteTableTests extends OpenSearchTestCase {
         when(mockTable.currentSnapshot()).thenReturn(mockSnapshot);
         when(mockTable.schema()).thenReturn(new Schema());
 
-        IcebergCalciteTable table = new IcebergCalciteTable(mockTable);
+        IcebergCalciteTable table = new IcebergCalciteTable(mockTable, null);
         assertEquals(12345L, table.getPinnedSnapshotId());
     }
 
@@ -59,7 +59,7 @@ public class IcebergCalciteTableTests extends OpenSearchTestCase {
         when(mockTable.currentSnapshot()).thenReturn(null);
         when(mockTable.schema()).thenReturn(new Schema());
 
-        IcebergCalciteTable table = new IcebergCalciteTable(mockTable);
+        IcebergCalciteTable table = new IcebergCalciteTable(mockTable, null);
         assertEquals(-1L, table.getPinnedSnapshotId());
     }
 }

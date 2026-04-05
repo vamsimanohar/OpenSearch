@@ -10,14 +10,19 @@ package org.opensearch.be.datafusion;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
+import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.be.datafusion.jni.NativeBridge;
+import org.opensearch.be.datafusion.jni.StreamHandle;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
@@ -25,6 +30,7 @@ import org.opensearch.env.NodeEnvironment;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.shard.ShardPath;
+import org.apache.arrow.memory.BufferAllocator;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.SearchBackEndPlugin;
 import org.opensearch.repositories.RepositoriesService;
@@ -34,9 +40,13 @@ import org.opensearch.transport.client.Client;
 import org.opensearch.watcher.ResourceWatcherService;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
 /**
@@ -72,6 +82,33 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
      * Creates the DataFusion plugin.
      */
     public DataFusionPlugin() {}
+
+    /**
+     * Ensures DataFusionService is initialized. When this plugin is loaded via SPI
+     * (ExtensiblePlugin.loadExtensions), createComponents() is never called, so we
+     * lazy-initialize with sensible defaults on first use.
+     */
+    private DataFusionService ensureDataFusionService() {
+        DataFusionService svc = dataFusionService;
+        if (svc != null) {
+            return svc;
+        }
+        synchronized (this) {
+            if (dataFusionService == null) {
+                long memPool = Runtime.getRuntime().maxMemory() / 4;
+                long spillLimit = Runtime.getRuntime().maxMemory() / 8;
+                String spillDir = System.getProperty("java.io.tmpdir");
+                dataFusionService = DataFusionService.builder()
+                    .memoryPoolLimit(memPool)
+                    .spillMemoryLimit(spillLimit)
+                    .spillDirectory(spillDir)
+                    .build();
+                dataFusionService.start();
+                logger.info("DataFusion service lazy-initialized (SPI path) — memory pool {}B, spill limit {}B", memPool, spillLimit);
+            }
+            return dataFusionService;
+        }
+    }
 
     @Override
     public Collection<Object> createComponents(
@@ -140,6 +177,75 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         DatafusionSearchExecEngine engine = new DatafusionSearchExecEngine(context, dataFusionService::newChildAllocator);
         engine.prepare(ctx);
         return engine;
+    }
+
+    @Override
+    public Iterable<Object[]> executeRemoteQuery(ExternalScanContext scanContext) {
+        DataFusionService dfService = ensureDataFusionService();
+
+        Map<String, String> config = scanContext.getStorageConfig();
+        String s3Region = config.getOrDefault("s3Region", "us-east-1");
+        String s3Bucket = config.get("s3Bucket");
+        String s3AccessKeyId = config.get("s3AccessKeyId");
+        String s3SecretAccessKey = config.get("s3SecretAccessKey");
+        String s3SessionToken = config.get("s3SessionToken");
+        String s3Endpoint = config.get("s3Endpoint");
+
+        String[] filePaths = scanContext.getDataFilePaths().toArray(new String[0]);
+        String tableName = scanContext.getTableName();
+        byte[] substraitPlan = scanContext.getSubstraitPlan();
+
+        // Call DataFusion via JNI — returns a stream pointer
+        CompletableFuture<Long> future = new CompletableFuture<>();
+        NativeBridge.executeIcebergQueryAsync(
+            s3Region, s3Bucket,
+            s3AccessKeyId, s3SecretAccessKey, s3SessionToken, s3Endpoint,
+            filePaths, tableName, substraitPlan,
+            new ActionListener<>() {
+                @Override
+                public void onResponse(Long streamPtr) { future.complete(streamPtr); }
+                @Override
+                public void onFailure(Exception e) { future.completeExceptionally(e); }
+            }
+        );
+
+        long streamPtr;
+        try {
+            streamPtr = future.join();
+        } catch (Exception e) {
+            throw new RuntimeException("Iceberg query execution failed via DataFusion", e);
+        }
+
+        // Stream Arrow batches and convert to Object[] rows
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        StreamHandle streamHandle = new StreamHandle(streamPtr, runtimeHandle);
+        BufferAllocator allocator = dfService.newChildAllocator();
+        DatafusionResultStream resultStream = new DatafusionResultStream(streamHandle, allocator);
+
+        List<Object[]> rows = new ArrayList<>();
+        try {
+            Iterator<EngineResultBatch> batchIterator = resultStream.iterator();
+            while (batchIterator.hasNext()) {
+                EngineResultBatch batch = batchIterator.next();
+                List<String> fieldNames = batch.getFieldNames();
+                for (int row = 0; row < batch.getRowCount(); row++) {
+                    Object[] rowValues = new Object[fieldNames.size()];
+                    for (int col = 0; col < fieldNames.size(); col++) {
+                        Object val = batch.getFieldValue(fieldNames.get(col), row);
+                        // Convert Arrow types to standard Java types for JSON serialization
+                        if (val instanceof org.apache.arrow.vector.util.Text) {
+                            val = val.toString();
+                        }
+                        rowValues[col] = val;
+                    }
+                    rows.add(rowValues);
+                }
+            }
+        } finally {
+            resultStream.close();
+        }
+        logger.info("[DataFusionPlugin] Iceberg query returned {} rows via native execution", rows.size());
+        return rows;
     }
 
     @Override

@@ -10,6 +10,7 @@ package org.opensearch.lakehouse.schema;
 
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.iceberg.Table;
+import org.opensearch.lakehouse.catalog.CatalogConfig;
 
 import java.util.Map;
 
@@ -24,12 +25,13 @@ public final class IcebergSchemaEnricher {
     /**
      * Adds every entry in {@code icebergTables} to the given Calcite schema.
      *
-     * @param schema        the Calcite schema to enrich
-     * @param icebergTables map of table name to Iceberg table
+     * @param schema         the Calcite schema to enrich
+     * @param icebergTables  map of table name to Iceberg table
+     * @param catalogConfigs map of table name to CatalogConfig
      * @throws IllegalArgumentException if a table name collides with an
      *         existing entry (e.g. an OpenSearch index with the same name).
      */
-    public static void enrich(SchemaPlus schema, Map<String, Table> icebergTables) {
+    public static void enrich(SchemaPlus schema, Map<String, Table> icebergTables, Map<String, CatalogConfig> catalogConfigs) {
         for (Map.Entry<String, Table> entry : icebergTables.entrySet()) {
             String tableName = entry.getKey();
             if (schema.getTable(tableName) != null) {
@@ -37,7 +39,8 @@ public final class IcebergSchemaEnricher {
                     "Table name collision: '" + tableName + "' already exists as an OpenSearch index"
                 );
             }
-            schema.add(tableName, new IcebergCalciteTable(entry.getValue()));
+            CatalogConfig config = catalogConfigs.get(tableName);
+            schema.add(tableName, new IcebergCalciteTable(entry.getValue(), config));
         }
     }
 }

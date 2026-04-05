@@ -20,6 +20,7 @@ import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.index.IndexService;
@@ -84,14 +85,23 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
 
     @Override
     public Iterable<Object[]> execute(RelNode logicalFragment, Object context) {
-        // Route external (non-OpenSearch) tables through the external table executor
+        // Route external (non-OpenSearch) tables through the native backend
         ExternalTable externalTable = extractExternalTable(logicalFragment);
         if (externalTable != null) {
             if (externalTableExecutor == null) {
                 throw new IllegalStateException("Query references an external table but no ExternalTableExecutor is registered");
             }
-            logger.info("[DefaultPlanExecutor] Routing to external table executor");
-            return externalTableExecutor.execute(logicalFragment, externalTable);
+
+            ExternalScanContext scanContext = externalTableExecutor.prepareScan(logicalFragment, externalTable);
+            if (scanContext == null) {
+                throw new IllegalStateException("ExternalTableExecutor.prepareScan() returned null for " + externalTable);
+            }
+            AnalyticsSearchBackendPlugin provider = selectBackEnd();
+            if (provider == null) {
+                throw new IllegalStateException("No analytics backend registered for remote query execution");
+            }
+            logger.info("[DefaultPlanExecutor] Routing external table to native backend [{}]", provider.name());
+            return provider.executeRemoteQuery(scanContext);
         }
 
         String tableName = extractTableName(logicalFragment);

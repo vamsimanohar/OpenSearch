@@ -27,7 +27,7 @@ public class IcebergSchemaEnricherTests extends OpenSearchTestCase {
         when(mockTable.currentSnapshot()).thenReturn(null);
         when(mockTable.schema()).thenReturn(new Schema());
 
-        IcebergSchemaEnricher.enrich(schema, Map.of("logs_cold", mockTable));
+        IcebergSchemaEnricher.enrich(schema, Map.of("logs_cold", mockTable), Map.of());
 
         assertNotNull(schema.getTable("logs_cold"));
         assertTrue(schema.getTable("logs_cold") instanceof IcebergCalciteTable);
@@ -40,9 +40,9 @@ public class IcebergSchemaEnricherTests extends OpenSearchTestCase {
         when(mockTable.schema()).thenReturn(new Schema());
 
         // Add first table
-        IcebergSchemaEnricher.enrich(schema, Map.of("logs_cold", mockTable));
+        IcebergSchemaEnricher.enrich(schema, Map.of("logs_cold", mockTable), Map.of());
 
         // Try to add duplicate
-        expectThrows(IllegalArgumentException.class, () -> IcebergSchemaEnricher.enrich(schema, Map.of("logs_cold", mockTable)));
+        expectThrows(IllegalArgumentException.class, () -> IcebergSchemaEnricher.enrich(schema, Map.of("logs_cold", mockTable), Map.of()));
     }
 }

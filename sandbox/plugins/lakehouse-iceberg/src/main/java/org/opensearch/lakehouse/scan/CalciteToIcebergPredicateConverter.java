@@ -236,7 +236,14 @@ public final class CalciteToIcebergPredicateConverter {
 
     private static Object extractLiteralValue(RexNode node) {
         if (node instanceof RexLiteral) {
-            return ((RexLiteral) node).getValueAs(Comparable.class);
+            RexLiteral literal = (RexLiteral) node;
+            // For string types, use getValueAs(String.class) to unwrap NlsString
+            // which Iceberg's Literals.from() cannot handle directly.
+            SqlTypeName typeName = literal.getTypeName();
+            if (typeName == SqlTypeName.CHAR || typeName == SqlTypeName.VARCHAR) {
+                return literal.getValueAs(String.class);
+            }
+            return literal.getValueAs(Comparable.class);
         }
         // Handle CAST(literal) — Calcite wraps literals in CAST when types differ
         // e.g., CAST(20):DOUBLE NOT NULL for integer literal compared to double column

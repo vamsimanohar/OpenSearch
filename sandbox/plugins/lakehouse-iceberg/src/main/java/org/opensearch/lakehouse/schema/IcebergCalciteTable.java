@@ -15,6 +15,7 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.types.Types;
 import org.opensearch.analytics.schema.ExternalTable;
+import org.opensearch.lakehouse.catalog.CatalogConfig;
 
 /**
  * A Calcite {@link AbstractTable} backed by an Apache Iceberg table.
@@ -24,15 +25,18 @@ import org.opensearch.analytics.schema.ExternalTable;
 public class IcebergCalciteTable extends AbstractTable implements ExternalTable {
     private final Table icebergTable;
     private final long pinnedSnapshotId;
+    private final CatalogConfig catalogConfig;
 
     /**
      * Creates a Calcite table backed by the given Iceberg table, pinning the current snapshot.
      *
-     * @param icebergTable the Iceberg table to wrap
+     * @param icebergTable  the Iceberg table to wrap
+     * @param catalogConfig the catalog config for storage access
      */
-    public IcebergCalciteTable(Table icebergTable) {
+    public IcebergCalciteTable(Table icebergTable, CatalogConfig catalogConfig) {
         this.icebergTable = icebergTable;
         this.pinnedSnapshotId = icebergTable.currentSnapshot() != null ? icebergTable.currentSnapshot().snapshotId() : -1L;
+        this.catalogConfig = catalogConfig;
     }
 
     @Override
@@ -54,4 +58,7 @@ public class IcebergCalciteTable extends AbstractTable implements ExternalTable 
     public long getPinnedSnapshotId() {
         return pinnedSnapshotId;
     }
+
+    /** Returns the catalog config for storage access. */
+    public CatalogConfig getCatalogConfig() { return catalogConfig; }
 }

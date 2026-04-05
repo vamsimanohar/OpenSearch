@@ -9,29 +9,22 @@
 package org.opensearch.lakehouse;
 
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.core.Aggregate;
-import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.Filter;
-import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.type.RelDataType;
-import org.apache.calcite.rex.RexInputRef;
-import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.schema.SchemaPlus;
-import org.apache.calcite.sql.SqlKind;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.TableIdentifier;
-import org.apache.iceberg.data.IcebergGenerics;
-import org.apache.iceberg.data.Record;
 import org.apache.iceberg.expressions.Expression;
-import org.apache.iceberg.expressions.Expressions;
-import org.apache.iceberg.io.CloseableIterable;
-import org.apache.iceberg.types.Types;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.lakehouse.scan.CalciteToIcebergPredicateConverter;
+import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.analytics.exec.ExternalTableExecutor;
 import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.analytics.schema.SchemaContributor;
+import org.opensearch.lakehouse.scan.CalciteToIcebergPredicateConverter;
+import org.opensearch.lakehouse.scan.IcebergScanPlan;
+import org.opensearch.lakehouse.scan.IcebergScanPlanner;
+import org.opensearch.lakehouse.substrait.CalciteSubstraitConverter;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.Metadata;
@@ -64,12 +57,12 @@ import org.opensearch.transport.client.Client;
 import org.opensearch.watcher.ResourceWatcherService;
 
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.function.Supplier;
 
 /**
@@ -83,6 +76,9 @@ public class LakehousePlugin extends Plugin implements ActionPlugin, ExternalTab
 
     private ClusterService clusterService;
     private final IcebergCatalogConnector catalogConnector = new IcebergCatalogConnector();
+    private final ExecutorService scanExecutor = java.util.concurrent.Executors.newFixedThreadPool(
+        Math.max(2, Runtime.getRuntime().availableProcessors() / 2));
+    private final IcebergScanPlanner scanPlanner = new IcebergScanPlanner(scanExecutor);
 
     /** Creates a new lakehouse plugin instance. */
     public LakehousePlugin() {}
@@ -106,199 +102,87 @@ public class LakehousePlugin extends Plugin implements ActionPlugin, ExternalTab
     }
 
     @Override
-    public Iterable<Object[]> execute(RelNode logicalPlan, ExternalTable externalTable) {
+    public ExternalScanContext prepareScan(RelNode logicalPlan, ExternalTable externalTable) {
         if (!(externalTable instanceof IcebergCalciteTable)) {
             throw new IllegalArgumentException("Expected IcebergCalciteTable but got: " + externalTable.getClass().getSimpleName());
         }
         IcebergCalciteTable icebergTable = (IcebergCalciteTable) externalTable;
         Table table = icebergTable.getIcebergTable();
-        logger.info("[LakehousePlugin] Executing query against Iceberg table: {}", table.name());
+        logger.info("[LakehousePlugin] Preparing scan for Iceberg table: {}", table.name());
 
-        // Walk the RelNode tree to extract projection and filter
-        List<String> projectedColumns = extractProjectedColumns(logicalPlan, table);
-        Expression filterExpr = extractFilterExpression(logicalPlan);
+        // 1. Extract Iceberg predicates for manifest-level pruning
+        Expression filterExpr = extractIcebergFilter(logicalPlan);
+        List<Expression> predicates = filterExpr != null ? List.of(filterExpr) : List.of();
 
-        logger.info("[LakehousePlugin] Projected columns: {}, Filter: {}", projectedColumns, filterExpr);
+        // 2. Plan scan — resolves manifests to pruned S3 Parquet file paths
+        IcebergScanPlan scanPlan = scanPlanner.planScan(
+            table,
+            icebergTable.getPinnedSnapshotId(),
+            predicates,
+            null  // all columns — DataFusion handles projection from Substrait plan
+        );
+        logger.info("[LakehousePlugin] Scan plan: {} files, {} bytes total",
+            scanPlan.fileCount(), scanPlan.getTotalFileSize());
 
-        // Build Iceberg read with pushdown
-        IcebergGenerics.ScanBuilder scanBuilder = IcebergGenerics.read(table);
-        if (!projectedColumns.isEmpty()) {
-            scanBuilder = scanBuilder.select(projectedColumns.toArray(new String[0]));
-        }
-        if (filterExpr != null) {
-            scanBuilder = scanBuilder.where(filterExpr);
-        }
-
-        // Determine column order for output rows
-        List<String> outputColumns = projectedColumns.isEmpty()
-            ? table.schema().columns().stream().map(Types.NestedField::name).toList()
-            : projectedColumns;
-
-        List<Object[]> results = new ArrayList<>();
-        try (CloseableIterable<Record> records = scanBuilder.build()) {
-            for (Record record : records) {
-                Object[] row = new Object[outputColumns.size()];
-                for (int i = 0; i < outputColumns.size(); i++) {
-                    row[i] = record.getField(outputColumns.get(i));
-                }
-                results.add(row);
-            }
+        // 3. Convert Calcite RelNode to Substrait bytes
+        byte[] substraitBytes;
+        try {
+            substraitBytes = CalciteSubstraitConverter.toSubstrait(logicalPlan);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to read Iceberg table: " + table.name(), e);
-        }
-        logger.info("[LakehousePlugin] Read {} rows from Iceberg table: {}", results.size(), table.name());
-
-        // Apply in-memory aggregation if the plan has a LogicalAggregate
-        Aggregate aggregate = findNode(logicalPlan, Aggregate.class);
-        if (aggregate != null) {
-            results = applyAggregate(aggregate, results);
-            logger.info("[LakehousePlugin] Aggregated to {} rows", results.size());
+            throw new RuntimeException("Failed to convert query plan to Substrait", e);
         }
 
-        return results;
+        // 4. Build storage config from CatalogConfig
+        Map<String, String> storageConfig = buildStorageConfig(icebergTable, scanPlan);
+
+        // 5. Extract table name from the Calcite plan (must match Substrait reference)
+        String tableName = extractTableName(logicalPlan);
+
+        return new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), substraitBytes, storageConfig);
     }
 
-    /**
-     * Applies in-memory aggregation on the scanned rows.
-     * Supports GROUP BY with COUNT, SUM, MIN, MAX.
-     */
-    private List<Object[]> applyAggregate(Aggregate aggregate, List<Object[]> rows) {
-        List<Integer> groupKeys = aggregate.getGroupSet().asList();
-        List<AggregateCall> aggCalls = aggregate.getAggCallList();
-
-        // Group rows by key columns
-        Map<List<Object>, List<Object[]>> groups = new java.util.LinkedHashMap<>();
-        for (Object[] row : rows) {
-            List<Object> key = new ArrayList<>();
-            for (int idx : groupKeys) {
-                key.add(idx < row.length ? row[idx] : null);
-            }
-            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(row);
-        }
-
-        // If no group keys, treat all rows as one group
-        if (groupKeys.isEmpty() && !rows.isEmpty()) {
-            groups.put(Collections.emptyList(), rows);
-        } else if (groupKeys.isEmpty() && rows.isEmpty()) {
-            groups.put(Collections.emptyList(), Collections.emptyList());
-        }
-
-        List<Object[]> result = new ArrayList<>();
-        for (Map.Entry<List<Object>, List<Object[]>> entry : groups.entrySet()) {
-            List<Object> key = entry.getKey();
-            List<Object[]> groupRows = entry.getValue();
-
-            Object[] outputRow = new Object[groupKeys.size() + aggCalls.size()];
-
-            // Copy group key columns
-            for (int i = 0; i < key.size(); i++) {
-                outputRow[i] = key.get(i);
-            }
-
-            // Compute aggregate functions
-            for (int i = 0; i < aggCalls.size(); i++) {
-                outputRow[groupKeys.size() + i] = computeAggregation(aggCalls.get(i), groupRows);
-            }
-
-            result.add(outputRow);
-        }
-
-        return result;
-    }
-
-    /**
-     * Computes a single aggregate function over a group of rows.
-     */
-    private Object computeAggregation(AggregateCall aggCall, List<Object[]> rows) {
-        SqlKind kind = aggCall.getAggregation().getKind();
-        List<Integer> argList = aggCall.getArgList();
-
-        switch (kind) {
-            case COUNT:
-                return (long) rows.size();
-            case SUM:
-            case SUM0: {
-                if (argList.isEmpty()) return 0.0;
-                int col = argList.get(0);
-                double sum = 0;
-                for (Object[] row : rows) {
-                    if (col < row.length && row[col] instanceof Number) {
-                        sum += ((Number) row[col]).doubleValue();
-                    }
-                }
-                return sum;
-            }
-            case MIN: {
-                if (argList.isEmpty()) return null;
-                int col = argList.get(0);
-                return minMax(rows, col, true);
-            }
-            case MAX: {
-                if (argList.isEmpty()) return null;
-                int col = argList.get(0);
-                return minMax(rows, col, false);
-            }
-            default:
-                logger.warn("[LakehousePlugin] Unsupported aggregate function: {}", kind);
-                return null;
-        }
-    }
-
-    @SuppressWarnings({ "rawtypes", "unchecked" })
-    private Object minMax(List<Object[]> rows, int col, boolean isMin) {
-        Comparable result = null;
-        for (Object[] row : rows) {
-            if (col < row.length && row[col] instanceof Comparable) {
-                Comparable val = (Comparable) row[col];
-                if (result == null || (isMin ? val.compareTo(result) < 0 : val.compareTo(result) > 0)) {
-                    result = val;
-                }
-            }
-        }
-        return result;
-    }
-
-    /**
-     * Extracts projected column names from the RelNode tree.
-     * Walks through Project nodes to find column references mapped back to the table schema.
-     */
-    private List<String> extractProjectedColumns(RelNode node, Table table) {
-        List<Types.NestedField> tableColumns = table.schema().columns();
-
-        // Find the outermost Project node
-        Project project = findNode(node, Project.class);
-        if (project == null) {
-            return Collections.emptyList(); // SELECT * — no projection
-        }
-
-        // Get the row type of the TableScan (the input to filter/project)
-        RelDataType scanRowType = findScanRowType(node);
-        if (scanRowType == null) {
-            return Collections.emptyList();
-        }
-
-        List<String> columns = new ArrayList<>();
-        for (RexNode expr : project.getProjects()) {
-            if (expr instanceof RexInputRef) {
-                int index = ((RexInputRef) expr).getIndex();
-                if (index < scanRowType.getFieldCount()) {
-                    columns.add(scanRowType.getFieldList().get(index).getName());
-                }
-            }
-        }
-        return columns.isEmpty() ? Collections.emptyList() : columns;
-    }
-
-    /**
-     * Extracts filter expression from the RelNode tree and converts to Iceberg Expression.
-     */
-    private Expression extractFilterExpression(RelNode node) {
+    private Expression extractIcebergFilter(RelNode node) {
         Filter filter = findNode(node, Filter.class);
         if (filter == null) {
             return null;
         }
         RelDataType inputRowType = filter.getInput().getRowType();
         return CalciteToIcebergPredicateConverter.convert(filter.getCondition(), inputRowType);
+    }
+
+    private String extractTableName(RelNode node) {
+        if (node instanceof org.apache.calcite.rel.core.TableScan) {
+            List<String> qn = node.getTable().getQualifiedName();
+            return qn.get(qn.size() - 1);
+        }
+        for (RelNode input : node.getInputs()) {
+            String name = extractTableName(input);
+            if (name != null) return name;
+        }
+        throw new IllegalArgumentException("No TableScan found in plan");
+    }
+
+    private Map<String, String> buildStorageConfig(IcebergCalciteTable icebergTable, IcebergScanPlan scanPlan) {
+        Map<String, String> config = new HashMap<>();
+        CatalogConfig catalogConfig = icebergTable.getCatalogConfig();
+        if (catalogConfig != null) {
+            if (catalogConfig.region() != null) config.put("s3Region", catalogConfig.region());
+        }
+        // Extract bucket from first file path
+        List<String> paths = scanPlan.getDataFilePaths();
+        if (!paths.isEmpty()) {
+            String firstPath = paths.get(0);
+            if (firstPath.startsWith("s3://")) {
+                String withoutScheme = firstPath.substring(5);
+                int slashIdx = withoutScheme.indexOf('/');
+                if (slashIdx > 0) config.put("s3Bucket", withoutScheme.substring(0, slashIdx));
+            }
+        }
+        // For file:// paths (local testing), set endpoint for local S3
+        if (!paths.isEmpty() && paths.get(0).startsWith("file://")) {
+            config.put("s3Endpoint", "file://");
+        }
+        return config;
     }
 
     /**
@@ -311,22 +195,6 @@ public class LakehousePlugin extends Plugin implements ActionPlugin, ExternalTab
         }
         for (RelNode input : node.getInputs()) {
             T found = findNode(input, clazz);
-            if (found != null) {
-                return found;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Finds the row type of the TableScan at the bottom of the RelNode tree.
-     */
-    private RelDataType findScanRowType(RelNode node) {
-        if (node.getInputs().isEmpty()) {
-            return node.getRowType(); // TableScan
-        }
-        for (RelNode input : node.getInputs()) {
-            RelDataType found = findScanRowType(input);
             if (found != null) {
                 return found;
             }
@@ -367,6 +235,7 @@ public class LakehousePlugin extends Plugin implements ActionPlugin, ExternalTab
 
         // Load and add each registered table
         Map<String, Table> icebergTables = new HashMap<>();
+        Map<String, CatalogConfig> tableCatalogConfigs = new HashMap<>();
         for (Map.Entry<String, Map<String, String>> entry : metadata.tables().entrySet()) {
             String tableName = entry.getKey();
             Map<String, String> binding = entry.getValue();
@@ -377,13 +246,28 @@ public class LakehousePlugin extends Plugin implements ActionPlugin, ExternalTab
             try {
                 Table table = catalogConnector.loadTable(catalogName, TableIdentifier.of(namespace, icebergTableName));
                 icebergTables.put(tableName, table);
+                // Find the CatalogConfig for this table's catalog
+                Map<String, String> catalogConfigMap = metadata.catalogs().get(catalogName);
+                if (catalogConfigMap != null) {
+                    CatalogConfig config = new CatalogConfig(
+                        catalogName,
+                        CatalogType.valueOf(catalogConfigMap.getOrDefault("type", "GLUE").toUpperCase(java.util.Locale.ROOT)),
+                        catalogConfigMap.get("uri"),
+                        catalogConfigMap.get("warehouse"),
+                        catalogConfigMap.get("region"),
+                        catalogConfigMap.get("database"),
+                        catalogConfigMap.getOrDefault("credential_provider", "default"),
+                        Duration.ofMinutes(5)
+                    );
+                    tableCatalogConfigs.put(tableName, config);
+                }
             } catch (Exception e) {
                 logger.warn("[LakehousePlugin] Failed to load table [{}] from catalog [{}]: {}", tableName, catalogName, e.getMessage());
             }
         }
 
         if (!icebergTables.isEmpty()) {
-            IcebergSchemaEnricher.enrich(schema, icebergTables);
+            IcebergSchemaEnricher.enrich(schema, icebergTables, tableCatalogConfigs);
         }
     }
 

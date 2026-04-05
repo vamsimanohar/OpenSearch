@@ -125,6 +125,36 @@ public final class NativeBridge {
         org.opensearch.core.action.ActionListener<Long> listener
     );
 
+    // ---- Iceberg / S3 query execution ----
+
+    /**
+     * Executes a Substrait plan against S3-backed Parquet files via DataFusion.
+     * Used for Iceberg external table queries where files are on S3, not local disk.
+     *
+     * @param s3Region         AWS region
+     * @param s3Bucket         S3 bucket name
+     * @param s3AccessKeyId    AWS access key ID, or null for default credentials
+     * @param s3SecretAccessKey AWS secret access key, or null for default credentials
+     * @param s3SessionToken   AWS session token, or null
+     * @param s3Endpoint       S3 endpoint override, or null (for local testing with MinIO etc.)
+     * @param filePaths        array of S3 Parquet file paths to scan
+     * @param tableName        table name (must match the name in the Substrait plan)
+     * @param substraitPlan    serialized Substrait plan bytes
+     * @param listener         callback receiving the stream pointer (Long) or error
+     */
+    public static native void executeIcebergQueryAsync(
+        String s3Region,
+        String s3Bucket,
+        String s3AccessKeyId,
+        String s3SecretAccessKey,
+        String s3SessionToken,
+        String s3Endpoint,
+        String[] filePaths,
+        String tableName,
+        byte[] substraitPlan,
+        org.opensearch.core.action.ActionListener<Long> listener
+    );
+
     // ---- Stream operations ----
 
     /**

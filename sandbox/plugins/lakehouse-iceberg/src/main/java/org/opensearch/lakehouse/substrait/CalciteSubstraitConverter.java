@@ -176,9 +176,18 @@ public final class CalciteSubstraitConverter {
     private static Rel convertProject(LogicalProject project, ConversionContext ctx) {
         Rel input = convertRel(project.getInput(), ctx);
         RelDataType inputRowType = project.getInput().getRowType();
+        int inputFieldCount = inputRowType.getFieldCount();
+        int projectCount = project.getProjects().size();
+
+        // Substrait ProjectRel output with direct emit = [input_fields..., new_expressions...].
+        // We need an emit mapping to select only the projected expressions (indices after input fields).
+        RelCommon.Emit.Builder emitBuilder = RelCommon.Emit.newBuilder();
+        for (int i = 0; i < projectCount; i++) {
+            emitBuilder.addOutputMapping(inputFieldCount + i);
+        }
 
         ProjectRel.Builder projectBuilder = ProjectRel.newBuilder()
-            .setCommon(directEmit())
+            .setCommon(RelCommon.newBuilder().setEmit(emitBuilder.build()).build())
             .setInput(input);
 
         for (RexNode expr : project.getProjects()) {

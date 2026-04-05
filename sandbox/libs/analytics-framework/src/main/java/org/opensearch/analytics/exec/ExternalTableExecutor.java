@@ -12,24 +12,18 @@ import org.apache.calcite.rel.RelNode;
 import org.opensearch.analytics.schema.ExternalTable;
 
 /**
- * Executes a query plan against an external (non-OpenSearch) table.
- * <p>
- * Implementations are discovered by
- * {@link org.opensearch.plugins.ExtensiblePlugin} and injected into the
- * {@link QueryPlanExecutor} so that Iceberg/Delta/etc. tables bypass the
- * normal shard-based execution path.
- *
- * @opensearch.internal
+ * Prepares a scan context for queries against external (non-OpenSearch) tables.
+ * Implementations are discovered by ExtensiblePlugin and injected into the
+ * QueryPlanExecutor. The actual execution is delegated to the analytics backend.
  */
-@FunctionalInterface
 public interface ExternalTableExecutor {
 
     /**
-     * Executes the given logical plan against an external table.
+     * Prepares a scan context for an external table query.
      *
      * @param logicalPlan   the optimized Calcite plan
      * @param externalTable the external table found in the plan
-     * @return result rows produced by the external engine
+     * @return scan context for native execution
      */
-    Iterable<Object[]> execute(RelNode logicalPlan, ExternalTable externalTable);
+    ExternalScanContext prepareScan(RelNode logicalPlan, ExternalTable externalTable);
 }
