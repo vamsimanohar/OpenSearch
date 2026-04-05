@@ -13,9 +13,11 @@ import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 /**
@@ -99,6 +101,9 @@ public final class CalciteToIcebergPredicateConverter {
             // Flip the comparison direction since operands are swapped
             op = flipOp(op);
         }
+
+        // Coerce BigDecimal to the column's expected Java type
+        value = coerceValue(value, colName, rowType);
 
         switch (op) {
             case EQ:
@@ -198,9 +203,48 @@ public final class CalciteToIcebergPredicateConverter {
         return null;
     }
 
+    /**
+     * Coerces a literal value (typically BigDecimal from Calcite) to the Java type
+     * expected by Iceberg for the given column.
+     */
+    private static Object coerceValue(Object value, String colName, RelDataType rowType) {
+        if (!(value instanceof BigDecimal)) {
+            return value;
+        }
+        BigDecimal bd = (BigDecimal) value;
+        // Find the column's SQL type
+        for (int i = 0; i < rowType.getFieldCount(); i++) {
+            if (rowType.getFieldList().get(i).getName().equals(colName)) {
+                SqlTypeName typeName = rowType.getFieldList().get(i).getType().getSqlTypeName();
+                switch (typeName) {
+                    case INTEGER:
+                        return bd.intValue();
+                    case BIGINT:
+                        return bd.longValue();
+                    case FLOAT:
+                    case REAL:
+                        return bd.floatValue();
+                    case DOUBLE:
+                        return bd.doubleValue();
+                    default:
+                        return value;
+                }
+            }
+        }
+        return value;
+    }
+
     private static Object extractLiteralValue(RexNode node) {
         if (node instanceof RexLiteral) {
             return ((RexLiteral) node).getValueAs(Comparable.class);
+        }
+        // Handle CAST(literal) — Calcite wraps literals in CAST when types differ
+        // e.g., CAST(20):DOUBLE NOT NULL for integer literal compared to double column
+        if (node instanceof RexCall) {
+            RexCall call = (RexCall) node;
+            if (call.getKind() == org.apache.calcite.sql.SqlKind.CAST && call.getOperands().size() == 1) {
+                return extractLiteralValue(call.getOperands().get(0));
+            }
         }
         return null;
     }

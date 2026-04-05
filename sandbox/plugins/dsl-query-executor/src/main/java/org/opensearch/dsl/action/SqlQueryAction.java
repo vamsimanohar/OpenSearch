@@ -182,10 +182,12 @@ public class SqlQueryAction extends BaseRestHandler {
 
                 builder.startArray("rows");
                 int rowCount = 0;
+                int numFields = fields.size();
                 for (Object[] row : rows) {
                     builder.startArray();
-                    for (Object val : row) {
-                        builder.value(val);
+                    int colCount = Math.min(row.length, numFields);
+                    for (int i = 0; i < colCount; i++) {
+                        builder.value(row[i]);
                     }
                     builder.endArray();
                     rowCount++;

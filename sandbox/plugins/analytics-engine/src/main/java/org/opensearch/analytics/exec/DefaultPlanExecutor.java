@@ -74,6 +74,8 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
     /**
      * Guice member injection — IndicesService is not available during createComponents(),
      * so it's injected after the Guice injector is built.
+     *
+     * @param indicesService the indices service to inject
      */
     @Inject
     public void setIndicesService(IndicesService indicesService) {
