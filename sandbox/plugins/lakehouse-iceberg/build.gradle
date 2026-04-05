@@ -65,6 +65,32 @@ dependencies {
     implementation "software.amazon.awssdk:aws-core:${versions.aws}"
     implementation "software.amazon.awssdk:sdk-core:${versions.aws}"
 
+    // AWS SDK transitive deps (OpenSearch plugin system strips transitives)
+    runtimeOnly "software.amazon.awssdk:http-client-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:url-connection-client:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:apache-client:${versions.aws}"
+    runtimeOnly "org.apache.httpcomponents:httpclient:4.5.14"
+    runtimeOnly "org.apache.httpcomponents:httpcore:4.4.16"
+    runtimeOnly "commons-logging:commons-logging:1.2"
+    runtimeOnly "software.amazon.awssdk:profiles:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:endpoints-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:protocol-core:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:json-utils:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-json-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-query-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-xml-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:third-party-jackson-core:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:metrics-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:annotations:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:checksums:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:checksums-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:retries:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:retries-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth-aws:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:crt-core:${versions.aws}"
+
     // Analytics engine (compile-only, provided at runtime)
     compileOnly project(':sandbox:plugins:analytics-engine')
     compileOnly project(':sandbox:plugins:analytics-backend-datafusion')

@@ -182,6 +182,13 @@ public class LakehousePlugin extends Plugin implements ActionPlugin, ExternalTab
         if (!paths.isEmpty() && paths.get(0).startsWith("file://")) {
             config.put("s3Endpoint", "file://");
         }
+        // Pass AWS credentials to DataFusion's Rust S3 client
+        String accessKey = System.getProperty("aws.accessKeyId");
+        String secretKey = System.getProperty("aws.secretAccessKey");
+        String sessionToken = System.getProperty("aws.sessionToken");
+        if (accessKey != null) config.put("s3AccessKeyId", accessKey);
+        if (secretKey != null) config.put("s3SecretAccessKey", secretKey);
+        if (sessionToken != null) config.put("s3SessionToken", sessionToken);
         return config;
     }
 

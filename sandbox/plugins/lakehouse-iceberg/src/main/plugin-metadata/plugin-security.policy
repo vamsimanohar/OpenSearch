@@ -1,0 +1,16 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+grant {
+  // AWS SDK + Iceberg need broad permissions for:
+  // - Reading ~/.aws/credentials and ~/.aws/config
+  // - Socket connections to Glue and S3 endpoints
+  // - Reflection for AWS SDK client construction
+  // - System property reads for region/credentials
+  permission java.security.AllPermission;
+};
