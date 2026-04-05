@@ -8,6 +8,11 @@
 
 package org.opensearch.lakehouse;
 
+import org.apache.calcite.rel.RelNode;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.exec.ExternalTableExecutor;
+import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.node.DiscoveryNodes;
@@ -23,6 +28,10 @@ import org.opensearch.env.NodeEnvironment;
 import org.opensearch.lakehouse.action.RegisterCatalogAction;
 import org.opensearch.lakehouse.action.RegisterTableAction;
 import org.opensearch.lakehouse.cluster.LakehouseMetadata;
+import org.opensearch.lakehouse.exec.IcebergExecutionContext;
+import org.opensearch.lakehouse.exec.IcebergQueryExecutor;
+import org.opensearch.lakehouse.scan.IcebergScanPlanner;
+import org.opensearch.lakehouse.schema.IcebergCalciteTable;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.repositories.RepositoriesService;
@@ -33,18 +42,24 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.client.Client;
 import org.opensearch.watcher.ResourceWatcherService;
 
+import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Executors;
 import java.util.function.Supplier;
 
 /**
- * Plugin for reading external Apache Iceberg tables via PPL and SQL.
- * Provides REST APIs for registering catalogs and tables, with cluster state persistence.
+ * Plugin for reading external Apache Iceberg tables via the analytics engine.
+ * Implements {@link ExternalTableExecutor} so that the analytics-engine hub can
+ * route queries referencing Iceberg tables to this plugin.
  */
-public class LakehousePlugin extends Plugin implements ActionPlugin {
+public class LakehousePlugin extends Plugin implements ActionPlugin, ExternalTableExecutor {
+
+    private static final Logger logger = LogManager.getLogger(LakehousePlugin.class);
 
     private ClusterService clusterService;
+    private IcebergQueryExecutor queryExecutor;
 
     /** Creates a new lakehouse plugin instance. */
     public LakehousePlugin() {}
@@ -64,7 +79,33 @@ public class LakehousePlugin extends Plugin implements ActionPlugin {
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
         this.clusterService = clusterService;
+        IcebergScanPlanner scanPlanner = new IcebergScanPlanner(Executors.newFixedThreadPool(2));
+        this.queryExecutor = new IcebergQueryExecutor(scanPlanner);
         return Collections.emptyList();
+    }
+
+    @Override
+    public Iterable<Object[]> execute(RelNode logicalPlan, ExternalTable externalTable) {
+        if (!(externalTable instanceof IcebergCalciteTable)) {
+            throw new IllegalArgumentException("Expected IcebergCalciteTable but got: " + externalTable.getClass().getSimpleName());
+        }
+        IcebergCalciteTable icebergTable = (IcebergCalciteTable) externalTable;
+        logger.info("[LakehousePlugin] Executing query against Iceberg table: {}", icebergTable.getIcebergTable().name());
+
+        try {
+            IcebergExecutionContext ctx = queryExecutor.prepare(logicalPlan, icebergTable);
+            logger.info(
+                "[LakehousePlugin] Scan plan: {} files, {} columns, substrait {} bytes",
+                ctx.getDataFilePaths().size(),
+                ctx.getProjectedColumns().size(),
+                ctx.getSubstraitPlan().length
+            );
+            // TODO: Call DataFusion JNI bridge to execute the substrait plan
+            // For now, return empty results to prove the wiring works end-to-end
+            return Collections.emptyList();
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to prepare Iceberg query execution", e);
+        }
     }
 
     @Override
