@@ -29,17 +29,31 @@ import java.util.Objects;
  */
 public class LakehouseMetadata extends AbstractNamedDiffable<Metadata.Custom> implements Metadata.Custom {
 
+    /** Custom metadata type identifier. */
     public static final String TYPE = "lakehouse";
+    /** Empty metadata instance with no catalogs or tables. */
     public static final LakehouseMetadata EMPTY = new LakehouseMetadata(Collections.emptyMap(), Collections.emptyMap());
 
     private final Map<String, Map<String, String>> catalogs;  // name -> config map
     private final Map<String, Map<String, String>> tables;    // name -> binding map
 
+    /**
+     * Creates lakehouse metadata with the given catalogs and tables.
+     *
+     * @param catalogs map of catalog name to configuration
+     * @param tables   map of table name to binding configuration
+     */
     public LakehouseMetadata(Map<String, Map<String, String>> catalogs, Map<String, Map<String, String>> tables) {
         this.catalogs = Collections.unmodifiableMap(catalogs);
         this.tables = Collections.unmodifiableMap(tables);
     }
 
+    /**
+     * Deserializes lakehouse metadata from a stream.
+     *
+     * @param in the stream input
+     * @throws IOException if deserialization fails
+     */
     public LakehouseMetadata(StreamInput in) throws IOException {
         this.catalogs = in.readMap(
             StreamInput::readString,
@@ -51,10 +65,12 @@ public class LakehouseMetadata extends AbstractNamedDiffable<Metadata.Custom> im
         );
     }
 
+    /** Returns the registered catalogs as name-to-config map. */
     public Map<String, Map<String, String>> catalogs() {
         return catalogs;
     }
 
+    /** Returns the registered tables as name-to-binding map. */
     public Map<String, Map<String, String>> tables() {
         return tables;
     }
@@ -80,10 +96,24 @@ public class LakehouseMetadata extends AbstractNamedDiffable<Metadata.Custom> im
         out.writeMap(tables, StreamOutput::writeString, (o, m) -> o.writeMap(m, StreamOutput::writeString, StreamOutput::writeString));
     }
 
+    /**
+     * Reads a diff from the given stream input.
+     *
+     * @param in the stream input
+     * @return the named diff
+     * @throws IOException if deserialization fails
+     */
     public static NamedDiff<Metadata.Custom> readDiffFrom(StreamInput in) throws IOException {
         return readDiffFrom(Metadata.Custom.class, TYPE, in);
     }
 
+    /**
+     * Parses lakehouse metadata from XContent.
+     *
+     * @param parser the XContent parser
+     * @return the parsed metadata
+     * @throws IOException if parsing fails
+     */
     public static LakehouseMetadata fromXContent(XContentParser parser) throws IOException {
         Map<String, Map<String, String>> catalogs = new HashMap<>();
         Map<String, Map<String, String>> tables = new HashMap<>();

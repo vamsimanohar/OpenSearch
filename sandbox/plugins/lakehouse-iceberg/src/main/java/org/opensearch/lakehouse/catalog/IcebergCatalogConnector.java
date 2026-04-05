@@ -31,6 +31,9 @@ public class IcebergCatalogConnector {
     private final ConcurrentHashMap<String, Catalog> catalogs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CatalogConfig> configs = new ConcurrentHashMap<>();
 
+    /** Creates a new catalog connector instance. */
+    public IcebergCatalogConnector() {}
+
     /**
      * Registers a new Iceberg catalog connection.
      *

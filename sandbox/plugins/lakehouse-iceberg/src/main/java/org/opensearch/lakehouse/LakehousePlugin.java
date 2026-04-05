@@ -46,6 +46,7 @@ public class LakehousePlugin extends Plugin implements ActionPlugin {
 
     private ClusterService clusterService;
 
+    /** Creates a new lakehouse plugin instance. */
     public LakehousePlugin() {}
 
     @Override

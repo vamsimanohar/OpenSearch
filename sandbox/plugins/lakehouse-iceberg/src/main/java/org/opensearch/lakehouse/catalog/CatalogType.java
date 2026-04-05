@@ -12,7 +12,10 @@ package org.opensearch.lakehouse.catalog;
  * Supported Iceberg catalog types.
  */
 public enum CatalogType {
+    /** AWS Glue Data Catalog. */
     GLUE,
+    /** Apache Hive Metastore. */
     HIVE,
+    /** Iceberg REST Catalog. */
     REST
 }

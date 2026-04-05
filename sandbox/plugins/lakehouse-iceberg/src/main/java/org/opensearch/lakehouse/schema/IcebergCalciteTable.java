@@ -25,6 +25,11 @@ public class IcebergCalciteTable extends AbstractTable implements ExternalTable 
     private final Table icebergTable;
     private final long pinnedSnapshotId;
 
+    /**
+     * Creates a Calcite table backed by the given Iceberg table, pinning the current snapshot.
+     *
+     * @param icebergTable the Iceberg table to wrap
+     */
     public IcebergCalciteTable(Table icebergTable) {
         this.icebergTable = icebergTable;
         this.pinnedSnapshotId = icebergTable.currentSnapshot() != null ? icebergTable.currentSnapshot().snapshotId() : -1L;
@@ -40,10 +45,12 @@ public class IcebergCalciteTable extends AbstractTable implements ExternalTable 
         return builder.build();
     }
 
+    /** Returns the underlying Iceberg table. */
     public Table getIcebergTable() {
         return icebergTable;
     }
 
+    /** Returns the pinned snapshot ID, or {@code -1} if no snapshot exists. */
     public long getPinnedSnapshotId() {
         return pinnedSnapshotId;
     }

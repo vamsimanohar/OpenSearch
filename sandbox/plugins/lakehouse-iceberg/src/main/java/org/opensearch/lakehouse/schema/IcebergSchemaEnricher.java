@@ -24,6 +24,8 @@ public final class IcebergSchemaEnricher {
     /**
      * Adds every entry in {@code icebergTables} to the given Calcite schema.
      *
+     * @param schema        the Calcite schema to enrich
+     * @param icebergTables map of table name to Iceberg table
      * @throws IllegalArgumentException if a table name collides with an
      *         existing entry (e.g. an OpenSearch index with the same name).
      */

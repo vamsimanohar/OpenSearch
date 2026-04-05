@@ -21,6 +21,9 @@ public final class IcebergTypeMapper {
 
     /**
      * Converts an Iceberg {@link Type} to a Calcite {@link SqlTypeName}.
+     *
+     * @param icebergType the Iceberg type to convert
+     * @return the corresponding Calcite SQL type name
      */
     public static SqlTypeName toCalcite(Type icebergType) {
         switch (icebergType.typeId()) {

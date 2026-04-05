@@ -41,6 +41,11 @@ public class RegisterTableAction extends BaseRestHandler {
 
     private final ClusterService clusterService;
 
+    /**
+     * Creates a table registration handler.
+     *
+     * @param clusterService the cluster service for state updates
+     */
     public RegisterTableAction(ClusterService clusterService) {
         this.clusterService = clusterService;
     }

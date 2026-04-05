@@ -28,6 +28,11 @@ public class IcebergScanPlanner {
 
     private final ExecutorService executorService;
 
+    /**
+     * Creates a scan planner with the given executor for parallel manifest fetching.
+     *
+     * @param executorService executor for parallel operations
+     */
     public IcebergScanPlanner(ExecutorService executorService) {
         this.executorService = executorService;
     }

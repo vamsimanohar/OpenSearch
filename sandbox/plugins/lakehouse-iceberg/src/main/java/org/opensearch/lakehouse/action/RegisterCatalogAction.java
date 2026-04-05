@@ -41,6 +41,11 @@ public class RegisterCatalogAction extends BaseRestHandler {
 
     private final ClusterService clusterService;
 
+    /**
+     * Creates a catalog registration handler.
+     *
+     * @param clusterService the cluster service for state updates
+     */
     public RegisterCatalogAction(ClusterService clusterService) {
         this.clusterService = clusterService;
     }

@@ -25,6 +25,11 @@ public class IcebergQueryExecutor {
 
     private final IcebergScanPlanner scanPlanner;
 
+    /**
+     * Creates an executor with the given scan planner.
+     *
+     * @param scanPlanner the planner for Iceberg table scans
+     */
     public IcebergQueryExecutor(IcebergScanPlanner scanPlanner) {
         this.scanPlanner = scanPlanner;
     }
