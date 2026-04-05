@@ -1,3 +1,5 @@
 jni/target/
 target/
 Cargo.lock
+src/main/resources/native/
+src/main/resources/native/
