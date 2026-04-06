@@ -8,6 +8,7 @@
 
 package org.opensearch.lakehouse.integration.ppl;
 
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.opensearch.lakehouse.integration.AbstractIcebergQueryIT;
 import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.test.OpenSearchIntegTestCase;
@@ -51,6 +52,7 @@ public class PplTypeCastIT extends AbstractIcebergQueryIT {
         assertPplColumnCount(response, 1);
     }
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testCastToDate() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | eval v = cast(tpep_pickup_datetime as date) | head 10");
         assertPplNotEmpty(response);

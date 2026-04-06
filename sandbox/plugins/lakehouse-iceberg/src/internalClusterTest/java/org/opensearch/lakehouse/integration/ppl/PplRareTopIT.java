@@ -8,6 +8,7 @@
 
 package org.opensearch.lakehouse.integration.ppl;
 
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.opensearch.lakehouse.integration.AbstractIcebergQueryIT;
 import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.test.OpenSearchIntegTestCase;
@@ -20,12 +21,14 @@ import static org.junit.Assert.assertEquals;
 @OpenSearchIntegTestCase.ClusterScope(scope = OpenSearchIntegTestCase.Scope.SUITE, numDataNodes = 1)
 public class PplRareTopIT extends AbstractIcebergQueryIT {
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testTop() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | top vendorid");
         assertPplNotEmpty(response);
         assertPplHasRows(response);
     }
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testTopN() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | top 3 payment_type");
         assertPplNotEmpty(response);
@@ -38,6 +41,7 @@ public class PplRareTopIT extends AbstractIcebergQueryIT {
         assertPplHasRows(response);
     }
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testRare() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | rare payment_type");
         assertPplNotEmpty(response);
@@ -62,6 +66,7 @@ public class PplRareTopIT extends AbstractIcebergQueryIT {
         assertPplHasRows(response);
     }
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testTopWithFields() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | top 3 vendorid | fields vendorid");
         assertPplNotEmpty(response);

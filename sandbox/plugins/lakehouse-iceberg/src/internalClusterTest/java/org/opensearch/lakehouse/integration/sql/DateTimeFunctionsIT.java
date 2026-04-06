@@ -64,7 +64,7 @@ public class DateTimeFunctionsIT extends AbstractIcebergQueryIT {
 
     public void testDateDiff() throws Exception {
         SqlResponse response = executeSql(
-            "SELECT tpep_dropoff_datetime - tpep_pickup_datetime FROM " + TABLE_NAME + " LIMIT 10"
+            "SELECT TIMESTAMPDIFF(MINUTE, tpep_pickup_datetime, tpep_dropoff_datetime) FROM " + TABLE_NAME + " LIMIT 10"
         );
         assertSqlNotEmpty(response);
         assertSqlColumnCount(response, 1);

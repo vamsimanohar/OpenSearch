@@ -8,6 +8,7 @@
 
 package org.opensearch.lakehouse.integration.sql;
 
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.opensearch.lakehouse.integration.AbstractIcebergQueryIT;
 import org.opensearch.lakehouse.integration.SqlResponse;
 import org.opensearch.test.OpenSearchIntegTestCase;
@@ -62,6 +63,7 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         assertSqlMaxRows(response, 20);
     }
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/apache/datafusion/issues/15077")
     public void testAvgOver() throws Exception {
         SqlResponse response = executeSql(
             "SELECT vendorid, fare_amount, AVG(fare_amount) OVER (PARTITION BY vendorid) AS avg_by_vendor FROM "
@@ -77,7 +79,7 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
             "SELECT vendorid, COUNT(*) OVER (PARTITION BY vendorid) AS vendor_count FROM " + TABLE_NAME + " LIMIT 20"
         );
         assertSqlNotEmpty(response);
-        assertSqlColumnCount(response, 3);
+        assertSqlColumnCount(response, 2);
         assertSqlMaxRows(response, 20);
     }
 

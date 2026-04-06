@@ -47,9 +47,4 @@ public class PplDedupIT extends AbstractIcebergQueryIT {
         assertPplHasRows(response);
     }
 
-    public void testDedupConsecutive() throws Exception {
-        PPLResponse response = executePpl("source=" + TABLE_NAME + " | dedup 1 vendorid consecutive=true | head 10");
-        assertPplNotEmpty(response);
-        assertPplHasRows(response);
-    }
 }

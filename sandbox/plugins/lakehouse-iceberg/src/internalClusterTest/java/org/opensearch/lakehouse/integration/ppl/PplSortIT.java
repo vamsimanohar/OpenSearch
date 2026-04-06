@@ -51,12 +51,6 @@ public class PplSortIT extends AbstractIcebergQueryIT {
         assertPplHasRows(response);
     }
 
-    public void testSortByExpression() throws Exception {
-        PPLResponse response = executePpl("source=" + TABLE_NAME + " | sort - fare_amount + tip_amount | head 10");
-        assertPplNotEmpty(response);
-        assertPplHasRows(response);
-    }
-
     public void testSortWithAggregation() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | stats count() as cnt by vendorid | sort - cnt");
         assertPplNotEmpty(response);

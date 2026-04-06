@@ -52,7 +52,7 @@ public class BasicSelectIT extends AbstractIcebergQueryIT {
     }
 
     public void testSelectLiteral() throws Exception {
-        SqlResponse response = executeSql("SELECT 1 AS one, 'hello' AS greeting FROM " + TABLE_NAME + " LIMIT 1");
+        SqlResponse response = executeSql("SELECT 1 AS num, 'hello' AS greeting FROM " + TABLE_NAME + " LIMIT 1");
         assertSqlSingleRow(response);
         assertSqlColumnCount(response, 2);
     }

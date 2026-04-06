@@ -65,7 +65,7 @@ public class PplEvalIT extends AbstractIcebergQueryIT {
     }
 
     public void testEvalConcat() throws Exception {
-        PPLResponse response = executePpl("source=" + TABLE_NAME + " | eval label = concat(store_and_fwd_flag, '-', cast(vendorid as varchar)) | head 10");
+        PPLResponse response = executePpl("source=" + TABLE_NAME + " | eval label = concat(store_and_fwd_flag, '-', cast(vendorid as string)) | head 10");
         assertPplNotEmpty(response);
         assertPplHasRows(response);
     }

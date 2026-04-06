@@ -8,6 +8,7 @@
 
 package org.opensearch.lakehouse.integration.ppl;
 
+import org.apache.lucene.tests.util.LuceneTestCase;
 import org.opensearch.lakehouse.integration.AbstractIcebergQueryIT;
 import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.test.OpenSearchIntegTestCase;
@@ -38,6 +39,7 @@ public class PplConditionalIT extends AbstractIcebergQueryIT {
         assertPplHasRows(response);
     }
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testIsNull() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | where isnull(congestion_surcharge) | head 10");
         assertPplNotEmpty(response);

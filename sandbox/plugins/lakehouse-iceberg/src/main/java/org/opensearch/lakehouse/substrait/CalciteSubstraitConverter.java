@@ -788,6 +788,12 @@ public final class CalciteSubstraitConverter {
             return convertCast(call, inputRowType, ctx);
         }
 
+        // REINTERPRET converts an INTERVAL to its numeric value (used by TIMESTAMPDIFF).
+        // Treat as a cast to the output type (typically INTEGER/BIGINT).
+        if (kind == SqlKind.REINTERPRET) {
+            return convertCast(call, inputRowType, ctx);
+        }
+
         // TRIM(FLAG, trimChar, string) — map to trim/ltrim/rtrim based on flag
         if (kind == SqlKind.TRIM) {
             return convertTrim(call, inputRowType, ctx);
