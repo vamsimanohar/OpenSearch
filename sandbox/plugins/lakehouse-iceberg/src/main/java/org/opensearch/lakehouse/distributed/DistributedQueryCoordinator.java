@@ -97,10 +97,11 @@ public class DistributedQueryCoordinator {
      *
      * @param scanContext the scan context with file paths, Substrait plan, and storage config
      * @param fileInfos   the file metadata from the Iceberg scan plan (with sizes for balanced partitioning)
+     * @param plan        the distribution plan describing how to merge worker results
      * @return merged result rows from all worker nodes
      * @throws RuntimeException if any worker fails or the operation times out
      */
-    public Iterable<Object[]> execute(ExternalScanContext scanContext, List<IcebergScanPlan.FileInfo> fileInfos) {
+    public Iterable<Object[]> execute(ExternalScanContext scanContext, List<IcebergScanPlan.FileInfo> fileInfos, DistributionPlan plan) {
         List<DiscoveryNode> dataNodes = getDataNodes();
 
         logger.info("[DistributedQueryCoordinator] Distributing query: table={}, files={}, nodes={}",
@@ -198,8 +199,8 @@ public class DistributedQueryCoordinator {
             );
         }
 
-        // Merge responses from all workers
-        return mergeResponses(responses);
+        // Merge responses from all workers using the distribution plan
+        return DistributedResultMerger.merge(responses, plan);
     }
 
     /**
@@ -211,11 +212,14 @@ public class DistributedQueryCoordinator {
      *
      * @param scanContext the scan context
      * @param fileInfos   file metadata from the scan plan
+     * @param plan        the distribution plan describing how to merge worker results
      * @return result rows (either from distributed execution or single-node fallback)
      */
-    public Iterable<Object[]> executeOrFallback(ExternalScanContext scanContext, List<IcebergScanPlan.FileInfo> fileInfos) {
+    public Iterable<Object[]> executeOrFallback(
+        ExternalScanContext scanContext, List<IcebergScanPlan.FileInfo> fileInfos, DistributionPlan plan
+    ) {
         if (shouldDistribute(fileInfos)) {
-            return execute(scanContext, fileInfos);
+            return execute(scanContext, fileInfos, plan);
         }
 
         // Fall back to single-node execution via backend executor
@@ -228,32 +232,6 @@ public class DistributedQueryCoordinator {
             );
         }
         return executor.apply(scanContext);
-    }
-
-    /**
-     * Merges responses from multiple worker nodes into a single result set.
-     * Concatenates all rows from all responses in the order received.
-     *
-     * @param responses the worker responses to merge
-     * @return merged result rows
-     */
-    private Iterable<Object[]> mergeResponses(List<LakehouseWorkerResponse> responses) {
-        int totalRows = 0;
-        for (LakehouseWorkerResponse response : responses) {
-            totalRows += response.getRows().length;
-        }
-
-        logger.info("[DistributedQueryCoordinator] Merging {} responses, {} total rows",
-            responses.size(), totalRows);
-
-        List<Object[]> merged = new ArrayList<>(totalRows);
-        for (LakehouseWorkerResponse response : responses) {
-            Object[][] rows = response.getRows();
-            for (Object[] row : rows) {
-                merged.add(row);
-            }
-        }
-        return merged;
     }
 
     /**
