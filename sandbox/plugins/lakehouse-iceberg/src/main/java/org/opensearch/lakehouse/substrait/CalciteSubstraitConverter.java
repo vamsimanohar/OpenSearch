@@ -12,16 +12,22 @@ import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.TableScan;
+import org.apache.calcite.rel.core.Window;
 import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.rel.logical.LogicalFilter;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalSort;
+import org.apache.calcite.rel.logical.LogicalWindow;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexFieldCollation;
+import org.apache.calcite.rex.RexOver;
+import org.apache.calcite.rex.RexWindow;
+import org.apache.calcite.rex.RexWindowBound;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.rex.RexBuilder;
@@ -66,6 +72,7 @@ import io.substrait.proto.Type;
  *   <li>{@link LogicalProject} &rarr; {@link ProjectRel}</li>
  *   <li>{@link LogicalAggregate} &rarr; {@link AggregateRel}</li>
  *   <li>{@link LogicalSort} &rarr; {@link SortRel} and/or {@link FetchRel}</li>
+ *   <li>{@link LogicalWindow} &rarr; {@link ProjectRel} with {@code Expression.WindowFunction}</li>
  * </ul>
  *
  * <p>Unsupported node types throw {@link UnsupportedOperationException}.
@@ -171,6 +178,8 @@ public final class CalciteSubstraitConverter {
             return convertAggregate((LogicalAggregate) relNode, ctx);
         } else if (relNode instanceof LogicalSort) {
             return convertSort((LogicalSort) relNode, ctx);
+        } else if (relNode instanceof LogicalWindow) {
+            return convertWindow((LogicalWindow) relNode, ctx);
         }
         throw new UnsupportedOperationException("Unsupported RelNode type: " + relNode.getClass().getSimpleName());
     }
@@ -345,6 +354,280 @@ public final class CalciteSubstraitConverter {
         return input;
     }
 
+    /**
+     * Converts a LogicalWindow to a Substrait ProjectRel containing
+     * Expression.WindowFunction expressions.
+     * <p>
+     * DataFusion's Substrait consumer expects window functions as
+     * Expression.WindowFunction inside a ProjectRel (NOT ConsistentPartitionWindowRel,
+     * which returns not_impl_err). The ProjectRel contains:
+     * <ul>
+     *   <li>Field references for all input columns (pass-through)</li>
+     *   <li>Expression.WindowFunction for each window aggregate call</li>
+     * </ul>
+     * An emit mapping selects only the output fields (input refs + window results).
+     */
+    private static Rel convertWindow(LogicalWindow window, ConversionContext ctx) {
+        Rel input = convertRel(window.getInput(), ctx);
+        RelDataType inputRowType = window.getInput().getRowType();
+        int inputFieldCount = inputRowType.getFieldCount();
+
+        // Build expressions: first, field refs for all input columns
+        List<Expression> expressions = new ArrayList<>();
+        for (int i = 0; i < inputFieldCount; i++) {
+            expressions.add(makeFieldReference(i));
+        }
+
+        // Then, window function expressions from each Window.Group
+        // Access groups/aggCalls reflectively to avoid compile-time Guava dependency
+        // (Window.groups is ImmutableList<Group>, which implements List<Group>)
+        for (Window.Group group : getWindowGroups(window)) {
+            for (Window.RexWinAggCall aggCall : getGroupAggCalls(group)) {
+                expressions.add(convertWindowFunction(aggCall, group, inputRowType, ctx));
+            }
+        }
+
+        // The output row type of LogicalWindow = input fields + window function results.
+        // DataFusion's ProjectRel output = [input_fields..., expressions...].
+        // With emit mapping, we select the expressions that match the output row type.
+        int outputFieldCount = window.getRowType().getFieldCount();
+        RelCommon.Emit.Builder emitBuilder = RelCommon.Emit.newBuilder();
+        // First inputFieldCount expressions are the pass-through field refs (indices: inputFieldCount .. 2*inputFieldCount-1)
+        // Window function expressions follow (indices: 2*inputFieldCount .. end)
+        // We want to output: input fields, then window function results
+        for (int i = 0; i < outputFieldCount; i++) {
+            emitBuilder.addOutputMapping(inputFieldCount + i);
+        }
+
+        ProjectRel.Builder projectBuilder = ProjectRel.newBuilder()
+            .setCommon(RelCommon.newBuilder().setEmit(emitBuilder.build()).build())
+            .setInput(input);
+
+        for (Expression expr : expressions) {
+            projectBuilder.addExpressions(expr);
+        }
+
+        return Rel.newBuilder().setProject(projectBuilder.build()).build();
+    }
+
+    /**
+     * Converts a single Window.RexWinAggCall to a Substrait Expression.WindowFunction.
+     */
+    private static Expression convertWindowFunction(
+        Window.RexWinAggCall aggCall,
+        Window.Group group,
+        RelDataType inputRowType,
+        ConversionContext ctx
+    ) {
+        // Register the window function
+        String funcName = resolveWindowFunctionName(aggCall.getOperator().getName().toLowerCase());
+        int funcRef = ctx.registerFunction(FUNCTIONS_URI_ANCHOR, FUNCTIONS_COMPARISON_URI, funcName);
+
+        Expression.WindowFunction.Builder winFunc = Expression.WindowFunction.newBuilder()
+            .setFunctionReference(funcRef)
+            .setOutputType(convertType(aggCall.getType()));
+
+        // Add function arguments (e.g., column for SUM, offset for LAG/LEAD, buckets for NTILE)
+        for (RexNode operand : aggCall.getOperands()) {
+            winFunc.addArguments(
+                FunctionArgument.newBuilder()
+                    .setValue(convertRexNode(operand, inputRowType, ctx))
+                    .build()
+            );
+        }
+
+        // Partition by — convert group.keys bit set to field reference expressions
+        for (int key : group.keys) {
+            winFunc.addPartitions(makeFieldReference(key));
+        }
+
+        // Order by — convert group.orderKeys collation to SortField
+        for (RelFieldCollation fc : group.orderKeys.getFieldCollations()) {
+            winFunc.addSorts(
+                SortField.newBuilder()
+                    .setExpr(makeFieldReference(fc.getFieldIndex()))
+                    .setDirection(convertSortDirection(fc))
+                    .build()
+            );
+        }
+
+        // Window frame bounds — use UNSPECIFIED when no sorts to let DataFusion default
+        if (group.orderKeys.getFieldCollations().isEmpty()) {
+            winFunc.setBoundsType(Expression.WindowFunction.BoundsType.BOUNDS_TYPE_UNSPECIFIED);
+        } else {
+            winFunc.setBoundsType(group.isRows
+                ? Expression.WindowFunction.BoundsType.BOUNDS_TYPE_ROWS
+                : Expression.WindowFunction.BoundsType.BOUNDS_TYPE_RANGE);
+        }
+        winFunc.setLowerBound(convertWindowBound(group.lowerBound, true));
+        winFunc.setUpperBound(convertWindowBound(group.upperBound, false));
+
+        return Expression.newBuilder().setWindowFunction(winFunc.build()).build();
+    }
+
+    /**
+     * Converts a RexOver (window function expression in a projection) to a
+     * Substrait Expression.WindowFunction.
+     * <p>
+     * When Calcite hasn't decomposed the plan into a LogicalWindow node,
+     * window functions appear as RexOver nodes within a LogicalProject.
+     * RexOver extends RexCall and contains a RexWindow with partition/order/bounds.
+     */
+    private static Expression convertRexOver(RexOver over, RelDataType inputRowType, ConversionContext ctx) {
+        String funcName = resolveWindowFunctionName(over.getAggOperator().getName().toLowerCase());
+        int funcRef = ctx.registerFunction(FUNCTIONS_URI_ANCHOR, FUNCTIONS_COMPARISON_URI, funcName);
+
+        Expression.WindowFunction.Builder winFunc = Expression.WindowFunction.newBuilder()
+            .setFunctionReference(funcRef)
+            .setOutputType(convertType(over.getType()));
+
+        // Add function arguments (e.g., column for SUM, offset for LAG/LEAD, buckets for NTILE)
+        for (RexNode operand : over.getOperands()) {
+            winFunc.addArguments(
+                FunctionArgument.newBuilder()
+                    .setValue(convertRexNode(operand, inputRowType, ctx))
+                    .build()
+            );
+        }
+
+        RexWindow window = over.getWindow();
+
+        // Partition by
+        @SuppressWarnings("unchecked")
+        List<RexNode> partitionKeys = (List<RexNode>) getFieldViaReflection(window, "partitionKeys");
+        for (RexNode key : partitionKeys) {
+            winFunc.addPartitions(convertRexNode(key, inputRowType, ctx));
+        }
+
+        // Order by — RexFieldCollation is Pair<RexNode, ImmutableSet<SqlKind>>
+        @SuppressWarnings("unchecked")
+        List<Object> orderKeys = (List<Object>) getFieldViaReflection(window, "orderKeys");
+        for (Object rfc : orderKeys) {
+            // RexFieldCollation extends Pair<RexNode, ImmutableSet<SqlKind>>
+            org.apache.calcite.rex.RexFieldCollation fieldColl = (org.apache.calcite.rex.RexFieldCollation) rfc;
+            RexNode sortExpr = fieldColl.left;
+            Expression sortExprSubstrait = convertRexNode(sortExpr, inputRowType, ctx);
+
+            SortField.SortDirection dir;
+            if (fieldColl.getDirection() == RelFieldCollation.Direction.DESCENDING) {
+                dir = fieldColl.getNullDirection() == RelFieldCollation.NullDirection.LAST
+                    ? SortField.SortDirection.SORT_DIRECTION_DESC_NULLS_LAST
+                    : SortField.SortDirection.SORT_DIRECTION_DESC_NULLS_FIRST;
+            } else {
+                dir = fieldColl.getNullDirection() == RelFieldCollation.NullDirection.FIRST
+                    ? SortField.SortDirection.SORT_DIRECTION_ASC_NULLS_FIRST
+                    : SortField.SortDirection.SORT_DIRECTION_ASC_NULLS_LAST;
+            }
+
+            winFunc.addSorts(
+                SortField.newBuilder()
+                    .setExpr(sortExprSubstrait)
+                    .setDirection(dir)
+                    .build()
+            );
+        }
+
+        // Window frame bounds
+        RexWindowBound lowerBound = window.getLowerBound();
+        RexWindowBound upperBound = window.getUpperBound();
+        boolean isRows = (boolean) getFieldViaReflection(window, "isRows");
+
+        // When there are no ORDER BY sorts, use UNSPECIFIED to let DataFusion
+        // default to ROWS (safe for partitioned windows without ordering).
+        // Using RANGE with no sorts causes DataFusion to inject a dummy ORDER BY.
+        if (orderKeys.isEmpty()) {
+            winFunc.setBoundsType(Expression.WindowFunction.BoundsType.BOUNDS_TYPE_UNSPECIFIED);
+        } else {
+            winFunc.setBoundsType(isRows
+                ? Expression.WindowFunction.BoundsType.BOUNDS_TYPE_ROWS
+                : Expression.WindowFunction.BoundsType.BOUNDS_TYPE_RANGE);
+        }
+        winFunc.setLowerBound(convertWindowBound(lowerBound, true));
+        winFunc.setUpperBound(convertWindowBound(upperBound, false));
+
+        return Expression.newBuilder().setWindowFunction(winFunc.build()).build();
+    }
+
+    /**
+     * Reflectively accesses a field to avoid compile-time Guava ImmutableList dependency.
+     */
+    private static Object getFieldViaReflection(Object obj, String fieldName) {
+        try {
+            java.lang.reflect.Field f = obj.getClass().getField(fieldName);
+            return f.get(obj);
+        } catch (ReflectiveOperationException e) {
+            // Try getDeclaredField for private fields
+            try {
+                java.lang.reflect.Field f = obj.getClass().getDeclaredField(fieldName);
+                f.setAccessible(true);
+                return f.get(obj);
+            } catch (ReflectiveOperationException e2) {
+                throw new RuntimeException("Failed to access field: " + fieldName, e2);
+            }
+        }
+    }
+
+    /**
+     * Maps Calcite window function names to names DataFusion recognizes.
+     * DataFusion looks up window functions first as UDWF, then as UDAF.
+     */
+    private static String resolveWindowFunctionName(String calciteName) {
+        switch (calciteName) {
+            case "row_number": return "row_number";
+            case "rank": return "rank";
+            case "dense_rank": return "dense_rank";
+            case "lag": return "lag";
+            case "lead": return "lead";
+            case "ntile": return "ntile";
+            case "sum": case "sum0": case "$sum0": return "sum";
+            case "avg": return "avg";
+            case "count": return "count";
+            case "min": return "min";
+            case "max": return "max";
+            case "first_value": return "first_value";
+            case "last_value": return "last_value";
+            case "cume_dist": return "cume_dist";
+            case "percent_rank": return "percent_rank";
+            default:
+                throw new UnsupportedOperationException("Unsupported window function: " + calciteName);
+        }
+    }
+
+    /**
+     * Converts a Calcite RexWindowBound to a Substrait WindowFunction.Bound.
+     */
+    private static Expression.WindowFunction.Bound convertWindowBound(RexWindowBound bound, boolean isLower) {
+        Expression.WindowFunction.Bound.Builder b = Expression.WindowFunction.Bound.newBuilder();
+        if (bound.isUnbounded()) {
+            b.setUnbounded(Expression.WindowFunction.Bound.Unbounded.newBuilder().build());
+        } else if (bound.isCurrentRow()) {
+            b.setCurrentRow(Expression.WindowFunction.Bound.CurrentRow.newBuilder().build());
+        } else if (bound.isPreceding()) {
+            long offset = extractBoundOffset(bound);
+            b.setPreceding(Expression.WindowFunction.Bound.Preceding.newBuilder().setOffset(offset).build());
+        } else if (bound.isFollowing()) {
+            long offset = extractBoundOffset(bound);
+            b.setFollowing(Expression.WindowFunction.Bound.Following.newBuilder().setOffset(offset).build());
+        } else {
+            // Default: unbounded
+            b.setUnbounded(Expression.WindowFunction.Bound.Unbounded.newBuilder().build());
+        }
+        return b.build();
+    }
+
+    /**
+     * Extracts the numeric offset from a RexWindowBound.
+     */
+    private static long extractBoundOffset(RexWindowBound bound) {
+        RexNode offset = bound.getOffset();
+        if (offset instanceof RexLiteral) {
+            RexLiteral lit = (RexLiteral) offset;
+            Number val = lit.getValueAs(Number.class);
+            return val != null ? val.longValue() : 1;
+        }
+        return 1; // default offset
+    }
+
     // ---- RexNode to Expression conversion ----
 
     /**
@@ -355,6 +638,10 @@ public final class CalciteSubstraitConverter {
             return makeFieldReference(((RexInputRef) rexNode).getIndex());
         } else if (rexNode instanceof RexLiteral) {
             return convertLiteral((RexLiteral) rexNode);
+        } else if (rexNode instanceof RexOver) {
+            // Window function expression (e.g., ROW_NUMBER() OVER (...))
+            // Must be checked before RexCall since RexOver extends RexCall
+            return convertRexOver((RexOver) rexNode, inputRowType, ctx);
         } else if (rexNode instanceof RexCall) {
             RexCall call = (RexCall) rexNode;
             // CASE/WHEN → Substrait IfThen
@@ -986,6 +1273,32 @@ public final class CalciteSubstraitConverter {
                     : SortField.SortDirection.SORT_DIRECTION_DESC_NULLS_FIRST;
             default:
                 return SortField.SortDirection.SORT_DIRECTION_UNSPECIFIED;
+        }
+    }
+
+    /**
+     * Reflectively accesses Window.groups to avoid compile-time Guava ImmutableList dependency.
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Window.Group> getWindowGroups(Window window) {
+        try {
+            java.lang.reflect.Field f = Window.class.getField("groups");
+            return (List<Window.Group>) f.get(window);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException("Failed to access Window.groups", e);
+        }
+    }
+
+    /**
+     * Reflectively accesses Window.Group.aggCalls to avoid compile-time Guava ImmutableList dependency.
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Window.RexWinAggCall> getGroupAggCalls(Window.Group group) {
+        try {
+            java.lang.reflect.Field f = Window.Group.class.getField("aggCalls");
+            return (List<Window.RexWinAggCall>) f.get(group);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException("Failed to access Window.Group.aggCalls", e);
         }
     }
 
