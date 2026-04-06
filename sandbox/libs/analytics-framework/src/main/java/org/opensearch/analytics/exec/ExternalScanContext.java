@@ -22,6 +22,12 @@ public class ExternalScanContext {
     private final Map<String, String> storageConfig;
 
     /**
+     * Pre-computed results from distributed execution. When non-null, the plan executor
+     * should return these directly instead of calling {@code executeRemoteQuery()}.
+     */
+    private volatile Iterable<Object[]> preComputedResults;
+
+    /**
      * Creates a new scan context.
      *
      * @param tableName      table name matching the Substrait plan
@@ -56,4 +62,19 @@ public class ExternalScanContext {
      *        s3SessionToken (optional), s3Endpoint (optional).
      */
     public Map<String, String> getStorageConfig() { return storageConfig; }
+
+    /**
+     * Returns pre-computed results from distributed execution, or {@code null}
+     * if the query should be executed via the normal single-node backend path.
+     */
+    public Iterable<Object[]> getPreComputedResults() { return preComputedResults; }
+
+    /**
+     * Sets pre-computed results from distributed execution. When set, the plan executor
+     * will return these directly instead of delegating to the backend's
+     * {@code executeRemoteQuery()}.
+     *
+     * @param results the pre-computed result rows from distributed execution
+     */
+    public void setPreComputedResults(Iterable<Object[]> results) { this.preComputedResults = results; }
 }

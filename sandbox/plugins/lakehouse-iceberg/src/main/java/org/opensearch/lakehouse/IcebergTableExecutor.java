@@ -22,6 +22,7 @@ import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.CatalogConfig;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
+import org.opensearch.lakehouse.distributed.DistributedQueryCoordinator;
 import org.opensearch.lakehouse.scan.CalciteToIcebergPredicateConverter;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.lakehouse.schema.IcebergCalciteTable;
@@ -122,7 +123,24 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
         logger.debug("[IcebergTableExecutor] ExternalScanContext: table={}, files={}, substraitBytes={}, storageConfigKeys={}",
             tableName, scanPlan.getDataFilePaths().size(), substraitBytes.length, storageConfig.keySet());
 
-        return new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), substraitBytes, storageConfig);
+        ExternalScanContext scanContext = new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), substraitBytes, storageConfig);
+
+        // 6. Check if distributed execution is appropriate
+        DistributedQueryCoordinator coordinator = LakehouseState.instance().distributedCoordinator();
+        if (coordinator != null && coordinator.shouldDistribute(scanPlan.getFiles())) {
+            logger.info("[IcebergTableExecutor] Using distributed execution for {} files across cluster nodes",
+                scanPlan.fileCount());
+            try {
+                Iterable<Object[]> distributedResults = coordinator.execute(scanContext, scanPlan.getFiles());
+                scanContext.setPreComputedResults(distributedResults);
+                logger.info("[IcebergTableExecutor] Distributed execution completed successfully");
+            } catch (Exception e) {
+                logger.warn("[IcebergTableExecutor] Distributed execution failed, falling back to single-node", e);
+                // Leave preComputedResults null — DefaultPlanExecutor will use single-node path
+            }
+        }
+
+        return scanContext;
     }
 
     private Expression extractIcebergFilter(RelNode node) {

@@ -13,6 +13,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.analytics.exec.ExternalScanContext;
+import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.lakehouse.LakehouseState;
@@ -44,12 +45,22 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
      * Guice-injected constructor. Registers this handler with the transport service
      * under the {@link LakehouseWorkerAction#NAME} action name.
      *
-     * @param transportService transport service for handler registration
+     * <p>Also initializes the {@link DistributedQueryCoordinator} and registers it
+     * in {@link LakehouseState}, since this is the earliest point where both
+     * {@code TransportService} and {@code ClusterService} are available via Guice.
+     *
+     * @param transportService transport service for handler registration and distributed dispatch
      * @param actionFilters    action filters
+     * @param clusterService   cluster service for discovering data nodes
      */
     @Inject
-    public TransportLakehouseAction(TransportService transportService, ActionFilters actionFilters) {
+    public TransportLakehouseAction(TransportService transportService, ActionFilters actionFilters, ClusterService clusterService) {
         super(LakehouseWorkerAction.NAME, transportService, actionFilters, LakehouseWorkerRequest::new);
+
+        // Initialize the distributed query coordinator now that both services are available
+        DistributedQueryCoordinator coordinator = new DistributedQueryCoordinator(clusterService, transportService);
+        LakehouseState.instance().setDistributedCoordinator(coordinator);
+        logger.info("[TransportLakehouseAction] Initialized distributed query coordinator");
     }
 
     @Override

@@ -14,6 +14,7 @@ import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
+import org.opensearch.lakehouse.distributed.DistributedQueryCoordinator;
 import org.opensearch.lakehouse.scan.IcebergScanPlanner;
 
 import java.security.AccessControlContext;
@@ -50,6 +51,13 @@ public final class LakehouseState {
      * Maps an {@link ExternalScanContext} to result rows.
      */
     private volatile Function<ExternalScanContext, Iterable<Object[]>> backendExecutor;
+
+    /**
+     * Distributed query coordinator for scatter-gather execution across cluster nodes.
+     * Set by {@link LakehousePlugin#createComponents} when ClusterService and TransportService
+     * are available. {@code null} until plugin initialization completes.
+     */
+    private volatile DistributedQueryCoordinator distributedCoordinator;
 
     @SuppressWarnings("removal")
     private LakehouseState() {
@@ -90,6 +98,25 @@ public final class LakehouseState {
     public void setBackendExecutor(Function<ExternalScanContext, Iterable<Object[]>> executor) {
         this.backendExecutor = executor;
         logger.info("[LakehouseState] Backend executor registered");
+    }
+
+    /**
+     * Returns the distributed query coordinator, or {@code null} if not yet initialized.
+     */
+    public DistributedQueryCoordinator distributedCoordinator() {
+        return distributedCoordinator;
+    }
+
+    /**
+     * Registers the distributed query coordinator. Called from
+     * {@link LakehousePlugin#createComponents} when the ClusterService and
+     * TransportService become available.
+     *
+     * @param coordinator the distributed query coordinator
+     */
+    public void setDistributedCoordinator(DistributedQueryCoordinator coordinator) {
+        this.distributedCoordinator = coordinator;
+        logger.info("[LakehouseState] Distributed query coordinator registered");
     }
 
     /**
