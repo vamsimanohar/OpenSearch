@@ -13,6 +13,8 @@ import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,16 +45,26 @@ public final class DistributedResultMerger {
             return List.of();
         }
 
+        List<Object[]> merged;
         switch (plan.getQueryType()) {
             case SCAN_ONLY:
-                return mergeConcat(responses);
+                merged = mergeConcat(responses);
+                break;
             case GLOBAL_AGGREGATE:
-                return mergeGlobalAggregate(responses, plan);
+                merged = mergeGlobalAggregate(responses, plan);
+                break;
             case GROUPED_AGGREGATE:
-                return mergeGroupedAggregate(responses, plan);
+                merged = mergeGroupedAggregate(responses, plan);
+                break;
             default:
                 throw new IllegalStateException("Cannot merge results for UNSUPPORTED distribution plan");
         }
+
+        // Apply sort + limit if present
+        if (plan.getSortInfo() != null) {
+            merged = applySortAndLimit(merged, plan.getSortInfo());
+        }
+        return merged;
     }
 
     /**
@@ -232,6 +244,90 @@ public final class DistributedResultMerger {
         }
         // If not comparable, return accumulated value
         return a;
+    }
+
+    /**
+     * Applies sort and limit to merged results.
+     *
+     * <p>Sorts rows based on the sort columns and directions, then truncates
+     * to the limit. Handles null values: nulls first or nulls last per column
+     * as specified in the sort info.
+     *
+     * @param rows     the merged rows to sort and limit
+     * @param sortInfo the sort/limit specification
+     * @return sorted and limited rows
+     */
+    static List<Object[]> applySortAndLimit(List<Object[]> rows, DistributionPlan.SortInfo sortInfo) {
+        if (rows.isEmpty()) {
+            return rows;
+        }
+
+        int[] sortColumns = sortInfo.getSortColumns();
+        boolean[] ascending = sortInfo.getAscending();
+        boolean[] nullsFirst = sortInfo.getNullsFirst();
+
+        // Sort if there are sort columns
+        if (sortColumns.length > 0) {
+            Comparator<Object[]> comparator = (row1, row2) -> {
+                for (int i = 0; i < sortColumns.length; i++) {
+                    int col = sortColumns[i];
+                    Object val1 = row1[col];
+                    Object val2 = row2[col];
+
+                    // Handle nulls
+                    if (val1 == null && val2 == null) {
+                        continue;
+                    }
+                    if (val1 == null) {
+                        return nullsFirst[i] ? -1 : 1;
+                    }
+                    if (val2 == null) {
+                        return nullsFirst[i] ? 1 : -1;
+                    }
+
+                    int cmp = compareValues(val1, val2);
+                    if (!ascending[i]) {
+                        cmp = -cmp;
+                    }
+                    if (cmp != 0) {
+                        return cmp;
+                    }
+                }
+                return 0;
+            };
+
+            Collections.sort(rows, comparator);
+
+            logger.debug("[DistributedResultMerger] Sorted {} rows by {} columns", rows.size(), sortColumns.length);
+        }
+
+        // Apply limit
+        long limit = sortInfo.getLimit();
+        if (limit >= 0 && limit < rows.size()) {
+            rows = new ArrayList<>(rows.subList(0, (int) limit));
+            logger.debug("[DistributedResultMerger] Applied LIMIT {}, {} rows remaining", limit, rows.size());
+        }
+
+        return rows;
+    }
+
+    /**
+     * Compares two non-null values, handling numeric type promotion and
+     * falling back to Comparable for strings and other types.
+     */
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    private static int compareValues(Object a, Object b) {
+        if (a instanceof Number && b instanceof Number) {
+            if (a instanceof Double || b instanceof Double) {
+                return Double.compare(toDouble(a), toDouble(b));
+            }
+            return Long.compare(toLong(a), toLong(b));
+        }
+        if (a instanceof Comparable && b instanceof Comparable) {
+            return ((Comparable) a).compareTo(b);
+        }
+        // If not comparable, treat as equal
+        return 0;
     }
 
     private static long toLong(Object value) {

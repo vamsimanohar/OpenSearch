@@ -42,6 +42,62 @@ public class DistributionPlan {
         MAX
     }
 
+    /**
+     * Describes sort columns and limit for merge-sort at the coordinator.
+     *
+     * <p>When a query has ORDER BY + LIMIT, each worker returns pre-sorted,
+     * pre-limited rows. The coordinator must merge-sort and apply the final LIMIT.
+     */
+    public static class SortInfo {
+        private final int[] sortColumns;
+        private final boolean[] ascending;
+        private final boolean[] nullsFirst;
+        private final long limit;
+
+        /**
+         * Creates sort info for coordinator merge-sort.
+         *
+         * @param sortColumns column positions to sort by
+         * @param ascending   sort direction per column (true = ASC, false = DESC)
+         * @param nullsFirst  null handling per column (true = nulls first)
+         * @param limit       LIMIT value (-1 if no limit)
+         */
+        public SortInfo(int[] sortColumns, boolean[] ascending, boolean[] nullsFirst, long limit) {
+            this.sortColumns = sortColumns;
+            this.ascending = ascending;
+            this.nullsFirst = nullsFirst;
+            this.limit = limit;
+        }
+
+        /** Column positions to sort by. */
+        public int[] getSortColumns() {
+            return sortColumns;
+        }
+
+        /** Sort direction per column (true = ASC, false = DESC). */
+        public boolean[] getAscending() {
+            return ascending;
+        }
+
+        /** Null handling per column (true = nulls first, false = nulls last). */
+        public boolean[] getNullsFirst() {
+            return nullsFirst;
+        }
+
+        /** LIMIT value, or -1 if no limit. */
+        public long getLimit() {
+            return limit;
+        }
+
+        @Override
+        public String toString() {
+            return "SortInfo{sortColumns=" + java.util.Arrays.toString(sortColumns)
+                + ", ascending=" + java.util.Arrays.toString(ascending)
+                + ", nullsFirst=" + java.util.Arrays.toString(nullsFirst)
+                + ", limit=" + limit + "}";
+        }
+    }
+
     /** Describes how to merge a single aggregate column across workers. */
     public static class AggMergeInfo {
         private final int outputColumnIndex;
@@ -77,16 +133,19 @@ public class DistributionPlan {
     private final QueryType queryType;
     private final int[] groupKeyOutputColumns;
     private final List<AggMergeInfo> aggregateMerges;
+    private final SortInfo sortInfo;
 
-    private DistributionPlan(QueryType queryType, int[] groupKeyOutputColumns, List<AggMergeInfo> aggregateMerges) {
+    private DistributionPlan(QueryType queryType, int[] groupKeyOutputColumns,
+                             List<AggMergeInfo> aggregateMerges, SortInfo sortInfo) {
         this.queryType = queryType;
         this.groupKeyOutputColumns = groupKeyOutputColumns;
         this.aggregateMerges = aggregateMerges;
+        this.sortInfo = sortInfo;
     }
 
     /** Creates a plan for scan-only queries (no aggregation). */
     public static DistributionPlan scanOnly() {
-        return new DistributionPlan(QueryType.SCAN_ONLY, new int[0], Collections.emptyList());
+        return new DistributionPlan(QueryType.SCAN_ONLY, new int[0], Collections.emptyList(), null);
     }
 
     /**
@@ -95,7 +154,7 @@ public class DistributionPlan {
      * @param merges merge info for each aggregate column
      */
     public static DistributionPlan globalAggregate(List<AggMergeInfo> merges) {
-        return new DistributionPlan(QueryType.GLOBAL_AGGREGATE, new int[0], merges);
+        return new DistributionPlan(QueryType.GLOBAL_AGGREGATE, new int[0], merges, null);
     }
 
     /**
@@ -105,12 +164,23 @@ public class DistributionPlan {
      * @param merges                merge info for each aggregate column
      */
     public static DistributionPlan groupedAggregate(int[] groupKeyOutputColumns, List<AggMergeInfo> merges) {
-        return new DistributionPlan(QueryType.GROUPED_AGGREGATE, groupKeyOutputColumns, merges);
+        return new DistributionPlan(QueryType.GROUPED_AGGREGATE, groupKeyOutputColumns, merges, null);
     }
 
     /** Creates a plan indicating the query cannot be safely distributed. */
     public static DistributionPlan unsupported() {
-        return new DistributionPlan(QueryType.UNSUPPORTED, new int[0], Collections.emptyList());
+        return new DistributionPlan(QueryType.UNSUPPORTED, new int[0], Collections.emptyList(), null);
+    }
+
+    /**
+     * Returns a copy of this plan with sort info attached.
+     *
+     * @param sortInfo the sort/limit info to apply after merging
+     * @return a new plan with sort info set
+     */
+    public DistributionPlan withSortInfo(SortInfo sortInfo) {
+        return new DistributionPlan(this.queryType, this.groupKeyOutputColumns,
+            this.aggregateMerges, sortInfo);
     }
 
     /** Returns the query type classification. */
@@ -128,10 +198,16 @@ public class DistributionPlan {
         return aggregateMerges;
     }
 
+    /** Returns the sort/limit info, or {@code null} if no sort is needed at merge time. */
+    public SortInfo getSortInfo() {
+        return sortInfo;
+    }
+
     @Override
     public String toString() {
         return "DistributionPlan{type=" + queryType
             + ", groupKeys=" + java.util.Arrays.toString(groupKeyOutputColumns)
-            + ", merges=" + aggregateMerges + "}";
+            + ", merges=" + aggregateMerges
+            + ", sortInfo=" + sortInfo + "}";
     }
 }

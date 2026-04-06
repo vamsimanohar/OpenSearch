@@ -327,6 +327,102 @@ public class DistributedPlanSplitterTests extends OpenSearchTestCase {
 
     // ---- Project-on-aggregate that preserves group keys ----
 
+    // ---- Sort+Limit detection tests ----
+
+    public void testOrderByWithLimit() {
+        // SELECT * FROM orders ORDER BY amount DESC LIMIT 3
+        RelNode plan = relBuilder
+            .scan("orders")
+            .sortLimit(0, 3, relBuilder.desc(relBuilder.field("amount")))
+            .build();
+
+        DistributionPlan result = DistributedPlanSplitter.analyze(plan);
+
+        assertEquals(DistributionPlan.QueryType.SCAN_ONLY, result.getQueryType());
+        assertNotNull("Expected sort info", result.getSortInfo());
+        assertEquals(1, result.getSortInfo().getSortColumns().length);
+        assertEquals(2, result.getSortInfo().getSortColumns()[0]); // amount is column index 2
+        assertFalse("Expected DESC", result.getSortInfo().getAscending()[0]);
+        assertEquals(3, result.getSortInfo().getLimit());
+    }
+
+    public void testOrderByAscWithLimit() {
+        // SELECT * FROM orders ORDER BY id ASC LIMIT 5
+        RelNode plan = relBuilder
+            .scan("orders")
+            .sortLimit(0, 5, relBuilder.field("id"))
+            .build();
+
+        DistributionPlan result = DistributedPlanSplitter.analyze(plan);
+
+        assertEquals(DistributionPlan.QueryType.SCAN_ONLY, result.getQueryType());
+        assertNotNull("Expected sort info", result.getSortInfo());
+        assertEquals(1, result.getSortInfo().getSortColumns().length);
+        assertEquals(0, result.getSortInfo().getSortColumns()[0]); // id is column index 0
+        assertTrue("Expected ASC", result.getSortInfo().getAscending()[0]);
+        assertEquals(5, result.getSortInfo().getLimit());
+    }
+
+    public void testGroupedAggregateWithOrderByAndLimit() {
+        // SELECT region, COUNT(*) FROM orders GROUP BY region ORDER BY COUNT(*) DESC LIMIT 2
+        RelNode plan = relBuilder
+            .scan("orders")
+            .aggregate(
+                relBuilder.groupKey(relBuilder.field("region")),
+                relBuilder.count()
+            )
+            .sortLimit(0, 2, relBuilder.desc(relBuilder.field(1)))
+            .build();
+
+        DistributionPlan result = DistributedPlanSplitter.analyze(plan);
+
+        assertEquals(DistributionPlan.QueryType.GROUPED_AGGREGATE, result.getQueryType());
+        assertNotNull("Expected sort info on grouped aggregate", result.getSortInfo());
+        assertEquals(1, result.getSortInfo().getSortColumns().length);
+        assertEquals(1, result.getSortInfo().getSortColumns()[0]); // COUNT is at position 1
+        assertFalse("Expected DESC", result.getSortInfo().getAscending()[0]);
+        assertEquals(2, result.getSortInfo().getLimit());
+    }
+
+    public void testLimitOnlyNoOrderBy() {
+        // SELECT * FROM orders LIMIT 10
+        RelNode plan = relBuilder
+            .scan("orders")
+            .sortLimit(0, 10)
+            .build();
+
+        DistributionPlan result = DistributedPlanSplitter.analyze(plan);
+
+        assertEquals(DistributionPlan.QueryType.SCAN_ONLY, result.getQueryType());
+        assertNotNull("Expected sort info with limit only", result.getSortInfo());
+        assertEquals(0, result.getSortInfo().getSortColumns().length);
+        assertEquals(10, result.getSortInfo().getLimit());
+    }
+
+    public void testMultiColumnOrderByWithLimit() {
+        // SELECT * FROM orders ORDER BY region ASC, amount DESC LIMIT 5
+        RelNode plan = relBuilder
+            .scan("orders")
+            .sortLimit(0, 5,
+                relBuilder.field("region"),
+                relBuilder.desc(relBuilder.field("amount")))
+            .build();
+
+        DistributionPlan result = DistributedPlanSplitter.analyze(plan);
+
+        assertEquals(DistributionPlan.QueryType.SCAN_ONLY, result.getQueryType());
+        assertNotNull("Expected sort info", result.getSortInfo());
+        assertEquals(2, result.getSortInfo().getSortColumns().length);
+        // region is column index 3, amount is column index 2
+        assertEquals(3, result.getSortInfo().getSortColumns()[0]);
+        assertTrue("Expected ASC for region", result.getSortInfo().getAscending()[0]);
+        assertEquals(2, result.getSortInfo().getSortColumns()[1]);
+        assertFalse("Expected DESC for amount", result.getSortInfo().getAscending()[1]);
+        assertEquals(5, result.getSortInfo().getLimit());
+    }
+
+    // ---- Existing project tests ----
+
     public void testGroupedAggregateWithProjectPreservingGroupKey() {
         // SELECT region, COUNT(*) FROM orders GROUP BY region
         // with explicit project that keeps all columns

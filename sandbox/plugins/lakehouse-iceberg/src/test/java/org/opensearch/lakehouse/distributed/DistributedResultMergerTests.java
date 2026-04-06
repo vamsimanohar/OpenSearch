@@ -338,6 +338,192 @@ public class DistributedResultMergerTests extends OpenSearchTestCase {
         assertNull(result);
     }
 
+    // ---- Sort+Limit tests ----
+
+    public void testScanOnlyWithSortDescAndLimit() {
+        // SELECT * FROM t ORDER BY x DESC LIMIT 3 — two workers each return top 3
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[]{0}, new boolean[]{false}, new boolean[]{true}, 3
+        );
+        DistributionPlan plan = DistributionPlan.scanOnly().withSortInfo(sortInfo);
+
+        // Worker A: top 3 desc by x → [10, 8, 7]
+        LakehouseWorkerResponse r1 = response(new String[]{"x"}, new Object[][]{{10}, {8}, {7}});
+        // Worker B: top 3 desc by x → [9, 6, 5]
+        LakehouseWorkerResponse r2 = response(new String[]{"x"}, new Object[][]{{9}, {6}, {5}});
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals(3, result.size());
+        assertEquals(10, result.get(0)[0]);
+        assertEquals(9, result.get(1)[0]);
+        assertEquals(8, result.get(2)[0]);
+    }
+
+    public void testScanOnlyWithSortAscAndLimit() {
+        // SELECT * FROM t ORDER BY x ASC LIMIT 2
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[]{0}, new boolean[]{true}, new boolean[]{false}, 2
+        );
+        DistributionPlan plan = DistributionPlan.scanOnly().withSortInfo(sortInfo);
+
+        LakehouseWorkerResponse r1 = response(new String[]{"x"}, new Object[][]{{1}, {4}, {7}});
+        LakehouseWorkerResponse r2 = response(new String[]{"x"}, new Object[][]{{2}, {3}, {9}});
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals(2, result.size());
+        assertEquals(1, result.get(0)[0]);
+        assertEquals(2, result.get(1)[0]);
+    }
+
+    public void testSortWithLimitLargerThanResults() {
+        // LIMIT is larger than total rows — all rows returned
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[]{0}, new boolean[]{true}, new boolean[]{false}, 100
+        );
+        DistributionPlan plan = DistributionPlan.scanOnly().withSortInfo(sortInfo);
+
+        LakehouseWorkerResponse r1 = response(new String[]{"x"}, new Object[][]{{3}, {1}});
+        LakehouseWorkerResponse r2 = response(new String[]{"x"}, new Object[][]{{2}});
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals(3, result.size());
+        assertEquals(1, result.get(0)[0]);
+        assertEquals(2, result.get(1)[0]);
+        assertEquals(3, result.get(2)[0]);
+    }
+
+    public void testLimitOnlyNoSort() {
+        // LIMIT 2 without ORDER BY — just truncate
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[0], new boolean[0], new boolean[0], 2
+        );
+        DistributionPlan plan = DistributionPlan.scanOnly().withSortInfo(sortInfo);
+
+        LakehouseWorkerResponse r1 = response(new String[]{"x"}, new Object[][]{{1}, {2}});
+        LakehouseWorkerResponse r2 = response(new String[]{"x"}, new Object[][]{{3}, {4}});
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals(2, result.size());
+    }
+
+    public void testSortWithNullValues() {
+        // ASC sort with nulls last (default for ASC)
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[]{0}, new boolean[]{true}, new boolean[]{false}, -1
+        );
+        DistributionPlan plan = DistributionPlan.scanOnly().withSortInfo(sortInfo);
+
+        LakehouseWorkerResponse r1 = response(new String[]{"x"}, new Object[][]{{3}, {null}});
+        LakehouseWorkerResponse r2 = response(new String[]{"x"}, new Object[][]{{1}, {null}});
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals(4, result.size());
+        assertEquals(1, result.get(0)[0]);
+        assertEquals(3, result.get(1)[0]);
+        assertNull(result.get(2)[0]);
+        assertNull(result.get(3)[0]);
+    }
+
+    public void testSortDescWithNullsFirst() {
+        // DESC sort with nulls first (default for DESC)
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[]{0}, new boolean[]{false}, new boolean[]{true}, -1
+        );
+        DistributionPlan plan = DistributionPlan.scanOnly().withSortInfo(sortInfo);
+
+        LakehouseWorkerResponse r1 = response(new String[]{"x"}, new Object[][]{{5}, {null}});
+        LakehouseWorkerResponse r2 = response(new String[]{"x"}, new Object[][]{{3}, {1}});
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals(4, result.size());
+        assertNull(result.get(0)[0]);
+        assertEquals(5, result.get(1)[0]);
+        assertEquals(3, result.get(2)[0]);
+        assertEquals(1, result.get(3)[0]);
+    }
+
+    public void testMultiColumnSort() {
+        // ORDER BY name ASC, amount DESC LIMIT 3
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[]{0, 1}, new boolean[]{true, false}, new boolean[]{false, true}, 3
+        );
+        DistributionPlan plan = DistributionPlan.scanOnly().withSortInfo(sortInfo);
+
+        LakehouseWorkerResponse r1 = response(new String[]{"name", "amount"},
+            new Object[][]{{"alice", 100.0}, {"bob", 50.0}});
+        LakehouseWorkerResponse r2 = response(new String[]{"name", "amount"},
+            new Object[][]{{"alice", 200.0}, {"carol", 10.0}});
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals(3, result.size());
+        // alice first (ASC by name), then within alice: 200 before 100 (DESC by amount)
+        assertEquals("alice", result.get(0)[0]);
+        assertEquals(200.0, result.get(0)[1]);
+        assertEquals("alice", result.get(1)[0]);
+        assertEquals(100.0, result.get(1)[1]);
+        assertEquals("bob", result.get(2)[0]);
+        assertEquals(50.0, result.get(2)[1]);
+    }
+
+    public void testGroupedAggregateWithSortAndLimit() {
+        // SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY COUNT(*) DESC LIMIT 2
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[]{1}, new boolean[]{false}, new boolean[]{true}, 2
+        );
+        DistributionPlan plan = DistributionPlan.groupedAggregate(
+            new int[]{0},
+            List.of(new DistributionPlan.AggMergeInfo(1, DistributionPlan.MergeOp.SUM))
+        ).withSortInfo(sortInfo);
+
+        // Worker 1: east=5, west=3, north=1
+        LakehouseWorkerResponse r1 = response(
+            new String[]{"region", "count"},
+            new Object[][]{{"east", 5L}, {"west", 3L}, {"north", 1L}}
+        );
+        // Worker 2: east=7, north=2, south=10
+        LakehouseWorkerResponse r2 = response(
+            new String[]{"region", "count"},
+            new Object[][]{{"east", 7L}, {"north", 2L}, {"south", 10L}}
+        );
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        // After aggregation: east=12, west=3, north=3, south=10
+        // After ORDER BY count DESC LIMIT 2: east=12, south=10
+        assertEquals(2, result.size());
+        assertEquals("east", result.get(0)[0]);
+        assertEquals(12L, result.get(0)[1]);
+        assertEquals("south", result.get(1)[0]);
+        assertEquals(10L, result.get(1)[1]);
+    }
+
+    public void testSortWithMixedNumericTypes() {
+        // Sort with Integer and Long mixed
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[]{0}, new boolean[]{true}, new boolean[]{false}, -1
+        );
+        DistributionPlan plan = DistributionPlan.scanOnly().withSortInfo(sortInfo);
+
+        LakehouseWorkerResponse r1 = response(new String[]{"x"}, new Object[][]{{10L}, {30}});
+        LakehouseWorkerResponse r2 = response(new String[]{"x"}, new Object[][]{{20L}, {5}});
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals(4, result.size());
+        // 5, 10, 20, 30 in ascending order
+        assertEquals(5, result.get(0)[0]);
+        assertEquals(10L, result.get(1)[0]);
+        assertEquals(20L, result.get(2)[0]);
+        assertEquals(30, result.get(3)[0]);
+    }
+
     // ---- UNSUPPORTED plan throws ----
 
     public void testUnsupportedPlanThrows() {

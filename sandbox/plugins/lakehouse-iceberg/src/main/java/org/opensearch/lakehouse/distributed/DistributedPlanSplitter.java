@@ -8,12 +8,14 @@
 
 package org.opensearch.lakehouse.distributed;
 
+import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalSort;
 import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.logging.log4j.LogManager;
@@ -44,10 +46,16 @@ public final class DistributedPlanSplitter {
      * @return a {@link DistributionPlan} describing how to merge worker results
      */
     public static DistributionPlan analyze(RelNode plan) {
-        // Unwrap LogicalSort on top (ORDER BY / LIMIT) — sort is applied after merge
+        // Record sort info from LogicalSort before unwrapping
         RelNode current = plan;
+        DistributionPlan.SortInfo sortInfo = null;
         if (current instanceof LogicalSort) {
-            current = ((LogicalSort) current).getInput();
+            LogicalSort sort = (LogicalSort) current;
+            sortInfo = extractSortInfo(sort);
+            if (sortInfo != null) {
+                logger.debug("[DistributedPlanSplitter] Detected sort info: {}", sortInfo);
+            }
+            current = sort.getInput();
         }
 
         // Check for LogicalProject on top of LogicalAggregate
@@ -61,7 +69,8 @@ public final class DistributedPlanSplitter {
         LogicalAggregate aggregate = findAggregate(current);
         if (aggregate == null) {
             logger.debug("[DistributedPlanSplitter] No aggregate found — SCAN_ONLY");
-            return DistributionPlan.scanOnly();
+            DistributionPlan result = DistributionPlan.scanOnly();
+            return sortInfo != null ? result.withSortInfo(sortInfo) : result;
         }
 
         // Check all aggregate functions are supported (COUNT, SUM, MIN, MAX)
@@ -96,7 +105,8 @@ public final class DistributedPlanSplitter {
             }
 
             logger.debug("[DistributedPlanSplitter] GLOBAL_AGGREGATE with {} merges", merges.size());
-            return DistributionPlan.globalAggregate(merges);
+            DistributionPlan result = DistributionPlan.globalAggregate(merges);
+            return sortInfo != null ? result.withSortInfo(sortInfo) : result;
         }
 
         // Grouped aggregate: output is [groupKey0, groupKey1, ..., agg0, agg1, ...]
@@ -127,12 +137,14 @@ public final class DistributedPlanSplitter {
             }
             logger.debug("[DistributedPlanSplitter] GROUPED_AGGREGATE with {} group keys, {} merges (remapped through project)",
                 remappedGroupKeys.length, remappedMerges.size());
-            return DistributionPlan.groupedAggregate(remappedGroupKeys, remappedMerges);
+            DistributionPlan result = DistributionPlan.groupedAggregate(remappedGroupKeys, remappedMerges);
+            return sortInfo != null ? result.withSortInfo(sortInfo) : result;
         }
 
         logger.debug("[DistributedPlanSplitter] GROUPED_AGGREGATE with {} group keys, {} merges",
             groupCount, merges.size());
-        return DistributionPlan.groupedAggregate(groupKeyOutputColumns, merges);
+        DistributionPlan result = DistributionPlan.groupedAggregate(groupKeyOutputColumns, merges);
+        return sortInfo != null ? result.withSortInfo(sortInfo) : result;
     }
 
     /**
@@ -201,6 +213,62 @@ public final class DistributedPlanSplitter {
             remapped[g] = newPos;
         }
         return remapped;
+    }
+
+    /**
+     * Extracts sort info (collation and limit) from a LogicalSort node.
+     *
+     * <p>Returns non-null SortInfo if the sort has collation (ORDER BY) and/or
+     * fetch (LIMIT). Returns null if the sort is a no-op (no collation and no limit).
+     *
+     * @param sort the LogicalSort node
+     * @return sort info, or {@code null} if no sort/limit is needed
+     */
+    static DistributionPlan.SortInfo extractSortInfo(LogicalSort sort) {
+        List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
+        boolean hasCollation = !collations.isEmpty();
+        boolean hasLimit = sort.fetch != null;
+
+        if (!hasCollation && !hasLimit) {
+            return null;
+        }
+
+        int[] sortColumns;
+        boolean[] ascending;
+        boolean[] nullsFirst;
+
+        if (hasCollation) {
+            sortColumns = new int[collations.size()];
+            ascending = new boolean[collations.size()];
+            nullsFirst = new boolean[collations.size()];
+
+            for (int i = 0; i < collations.size(); i++) {
+                RelFieldCollation collation = collations.get(i);
+                sortColumns[i] = collation.getFieldIndex();
+                ascending[i] = collation.getDirection() == RelFieldCollation.Direction.ASCENDING;
+                // Determine nulls first/last:
+                // DataFusion default: nulls last for ASC, nulls first for DESC
+                if (collation.nullDirection == RelFieldCollation.NullDirection.FIRST) {
+                    nullsFirst[i] = true;
+                } else if (collation.nullDirection == RelFieldCollation.NullDirection.LAST) {
+                    nullsFirst[i] = false;
+                } else {
+                    // UNSPECIFIED: use DataFusion defaults
+                    nullsFirst[i] = !ascending[i]; // DESC → nulls first, ASC → nulls last
+                }
+            }
+        } else {
+            sortColumns = new int[0];
+            ascending = new boolean[0];
+            nullsFirst = new boolean[0];
+        }
+
+        long limit = -1;
+        if (hasLimit && sort.fetch instanceof RexLiteral) {
+            limit = ((Number) ((RexLiteral) sort.fetch).getValue()).longValue();
+        }
+
+        return new DistributionPlan.SortInfo(sortColumns, ascending, nullsFirst, limit);
     }
 
     /**
