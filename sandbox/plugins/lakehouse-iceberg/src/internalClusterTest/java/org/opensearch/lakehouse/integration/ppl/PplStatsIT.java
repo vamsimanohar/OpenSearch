@@ -8,7 +8,6 @@
 
 package org.opensearch.lakehouse.integration.ppl;
 
-import org.apache.lucene.tests.util.LuceneTestCase;
 import org.opensearch.lakehouse.integration.AbstractIcebergQueryIT;
 import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.test.OpenSearchIntegTestCase;
@@ -21,14 +20,12 @@ public class PplStatsIT extends AbstractIcebergQueryIT {
         assertPplNotEmpty(response);
     }
 
-    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testStatsCountBy() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | stats count() by vendorid");
         assertPplNotEmpty(response);
         assertPplHasRows(response);
     }
 
-    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testStatsSum() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | stats sum(total_amount)");
         assertPplNotEmpty(response);
@@ -40,7 +37,6 @@ public class PplStatsIT extends AbstractIcebergQueryIT {
         assertPplHasRows(response);
     }
 
-    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testStatsAvg() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | stats avg(trip_distance)");
         assertPplNotEmpty(response);
@@ -52,19 +48,16 @@ public class PplStatsIT extends AbstractIcebergQueryIT {
         assertPplHasRows(response);
     }
 
-    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testStatsMin() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | stats min(fare_amount)");
         assertPplNotEmpty(response);
     }
 
-    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testStatsMax() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | stats max(fare_amount)");
         assertPplNotEmpty(response);
     }
 
-    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testStatsMinMax() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | stats min(trip_distance) as min_dist, max(trip_distance) as max_dist");
         assertPplNotEmpty(response);
@@ -83,7 +76,6 @@ public class PplStatsIT extends AbstractIcebergQueryIT {
         assertPplHasRows(response);
     }
 
-    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testStatsCountDistinct() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | stats dc(vendorid)");
         assertPplNotEmpty(response);
@@ -94,7 +86,6 @@ public class PplStatsIT extends AbstractIcebergQueryIT {
         assertPplNotEmpty(response);
     }
 
-    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/opensearch-project/OpenSearch/issues/0000")
     public void testStatsWithAlias() throws Exception {
         PPLResponse response = executePpl("source=" + TABLE_NAME + " | stats count() as total_trips by vendorid");
         assertPplNotEmpty(response);

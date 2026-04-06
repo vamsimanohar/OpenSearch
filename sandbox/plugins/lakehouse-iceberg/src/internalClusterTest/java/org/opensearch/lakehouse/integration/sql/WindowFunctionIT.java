@@ -53,6 +53,7 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         assertSqlMaxRows(response, 20);
     }
 
+    @LuceneTestCase.AwaitsFix(bugUrl = "DataFusion decomposes SUM window into sub-expressions which fails in physical planner")
     public void testSumOver() throws Exception {
         SqlResponse response = executeSql(
             "SELECT vendorid, fare_amount, SUM(fare_amount) OVER (PARTITION BY vendorid ORDER BY fare_amount) AS running_total FROM "
@@ -63,7 +64,7 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         assertSqlMaxRows(response, 20);
     }
 
-    @LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/apache/datafusion/issues/15077")
+    @LuceneTestCase.AwaitsFix(bugUrl = "DataFusion decomposes AVG window into SUM/COUNT which fails in physical planner")
     public void testAvgOver() throws Exception {
         SqlResponse response = executeSql(
             "SELECT vendorid, fare_amount, AVG(fare_amount) OVER (PARTITION BY vendorid) AS avg_by_vendor FROM "

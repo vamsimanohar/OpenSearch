@@ -44,7 +44,11 @@ public class IcebergCalciteTable extends AbstractTable implements ExternalTable 
         RelDataTypeFactory.Builder builder = typeFactory.builder();
         Schema schema = icebergTable.schema();
         for (Types.NestedField field : schema.columns()) {
-            builder.add(field.name(), IcebergTypeMapper.toCalcite(field.type()));
+            RelDataType calciteType = typeFactory.createSqlType(IcebergTypeMapper.toCalcite(field.type()));
+            if (field.isOptional()) {
+                calciteType = typeFactory.createTypeWithNullability(calciteType, true);
+            }
+            builder.add(field.name(), calciteType);
         }
         return builder.build();
     }

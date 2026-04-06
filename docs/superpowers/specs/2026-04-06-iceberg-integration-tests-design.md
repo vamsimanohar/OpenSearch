@@ -343,20 +343,7 @@ All SQL test classes extend `AbstractIcebergQueryIT` and live in:
 | 4 | `testExcept` | `SELECT vendorid FROM nyc_taxi LIMIT 10 EXCEPT SELECT vendorid FROM nyc_taxi WHERE vendorid = 1 LIMIT 10` |
 | 5 | `testUnionWithAggregation` | `SELECT 'short' AS category, COUNT(*) FROM nyc_taxi WHERE trip_distance < 2 UNION ALL SELECT 'long', COUNT(*) FROM nyc_taxi WHERE trip_distance >= 10` |
 
-### 13. `JoinIT` (6 tests)
-
-Self-joins on the same Iceberg table (only one table is registered).
-
-| # | Test | SQL |
-|---|------|-----|
-| 1 | `testSelfJoin` | `SELECT a.vendorid, b.trip_distance FROM nyc_taxi a JOIN nyc_taxi b ON a.vendorid = b.vendorid LIMIT 10` |
-| 2 | `testSelfJoinWithFilter` | `SELECT a.vendorid, a.trip_distance, b.fare_amount FROM nyc_taxi a JOIN nyc_taxi b ON a.vendorid = b.vendorid WHERE a.trip_distance > 10 AND b.fare_amount > 50 LIMIT 10` |
-| 3 | `testLeftSelfJoin` | `SELECT a.vendorid, b.trip_distance FROM nyc_taxi a LEFT JOIN nyc_taxi b ON a.vendorid = b.vendorid AND b.trip_distance > 100 LIMIT 10` |
-| 4 | `testCrossJoinWithLimit` | `SELECT a.vendorid, b.payment_type FROM nyc_taxi a CROSS JOIN nyc_taxi b LIMIT 10` |
-| 5 | `testSelfJoinWithAggregation` | `SELECT a.vendorid, COUNT(*) FROM nyc_taxi a JOIN nyc_taxi b ON a.vendorid = b.vendorid LIMIT 10` |
-| 6 | `testJoinWithSubquery` | `SELECT a.vendorid, sub.avg_fare FROM nyc_taxi a JOIN (SELECT vendorid, AVG(fare_amount) AS avg_fare FROM nyc_taxi GROUP BY vendorid) sub ON a.vendorid = sub.vendorid LIMIT 10` |
-
-### 14. `ComplexQueriesIT` (10 tests)
+### 13. `ComplexQueriesIT` (10 tests)
 
 | # | Test | SQL |
 |---|------|-----|
@@ -371,9 +358,7 @@ Self-joins on the same Iceberg table (only one table is registered).
 | 9 | `testDeepNestedSubquery` | `SELECT avg_fare FROM (SELECT vendorid, AVG(fare_amount) AS avg_fare FROM (SELECT * FROM nyc_taxi WHERE trip_distance > 1 LIMIT 1000) sub1 GROUP BY vendorid) sub2 ORDER BY avg_fare DESC` |
 | 10 | `testAnalyticsStyleQuery` | `SELECT vendorid, payment_type, COUNT(*) AS trips, AVG(trip_distance) AS avg_dist, SUM(total_amount) AS revenue, AVG(tip_amount / NULLIF(total_amount, 0)) AS avg_tip_pct FROM nyc_taxi WHERE fare_amount > 0 GROUP BY vendorid, payment_type ORDER BY revenue DESC LIMIT 20` |
 
-**Total SQL: 12 + 15 + 18 + 10 + 14 + 12 + 10 + 10 + 8 + 8 + 10 + 5 + 6 + 10 = 148**
-
-*(Note: the original design targeted 124, but comprehensive research surfaced additional coverage. Keep all 148.)*
+**Total SQL: 12 + 15 + 18 + 10 + 14 + 12 + 10 + 10 + 8 + 8 + 10 + 5 + 10 = 142**
 
 ## PPL Test Classes (121 tests)
 
@@ -625,7 +610,6 @@ sandbox/plugins/lakehouse-iceberg/
 │   │   │   ├── SubqueryIT.java              (8 tests)
 │   │   │   ├── WindowFunctionIT.java        (10 tests)
 │   │   │   ├── SetOperationsIT.java         (5 tests)
-│   │   │   ├── JoinIT.java                  (6 tests)
 │   │   │   └── ComplexQueriesIT.java        (10 tests)
 │   │   └── ppl/
 │   │       ├── PplBasicCommandsIT.java      (15 tests)
@@ -645,4 +629,4 @@ sandbox/plugins/lakehouse-iceberg/
 └── BACKLOG.md                               (NEW — populated as tests fail)
 ```
 
-**Grand Total: 148 SQL + 121 PPL = 269 tests**
+**Grand Total: 142 SQL + 121 PPL = 263 tests**

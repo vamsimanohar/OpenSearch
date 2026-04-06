@@ -794,6 +794,11 @@ public final class CalciteSubstraitConverter {
             return convertCast(call, inputRowType, ctx);
         }
 
+        // DATE(expr) is equivalent to CAST(expr AS DATE) — treat as a cast
+        if (kind == SqlKind.OTHER_FUNCTION && "DATE".equalsIgnoreCase(call.getOperator().getName())) {
+            return convertCast(call, inputRowType, ctx);
+        }
+
         // TRIM(FLAG, trimChar, string) — map to trim/ltrim/rtrim based on flag
         if (kind == SqlKind.TRIM) {
             return convertTrim(call, inputRowType, ctx);

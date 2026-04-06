@@ -101,7 +101,7 @@ final class AbsorbRuleUtils {
         Boolean result = expression.accept(new RexVisitorImpl<Boolean>(true) {
             @Override
             public Boolean visitCall(RexCall call) {
-                if (!supported.contains(call.getOperator())) return false;
+                if (!isOperatorSupported(call.getOperator(), supported)) return false;
                 for (RexNode operand : call.getOperands()) {
                     Boolean childResult = operand.accept(this);
                     if (childResult != null && !childResult) return false;
@@ -120,8 +120,18 @@ final class AbsorbRuleUtils {
         if (aggCalls == null || aggCalls.isEmpty()) return true;
         Set<SqlOperator> supported = new HashSet<>(operatorTable.getOperatorList());
         for (AggregateCall aggCall : aggCalls) {
-            if (!supported.contains(aggCall.getAggregation())) return false;
+            if (!isOperatorSupported(aggCall.getAggregation(), supported)) return false;
         }
         return true;
+    }
+
+    /**
+     * Checks if an operator is supported, first by identity then by name+kind.
+     * Name+kind fallback is needed because PPL uses custom operator subclasses
+     * (e.g. NullableSqlAvgAggFunction) that differ from SqlStdOperatorTable instances.
+     */
+    private static boolean isOperatorSupported(SqlOperator op, Set<SqlOperator> supported) {
+        if (supported.contains(op)) return true;
+        return supported.stream().anyMatch(s -> s.getName().equals(op.getName()) && s.getKind() == op.getKind());
     }
 }

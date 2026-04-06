@@ -11,6 +11,7 @@ package org.opensearch.analytics;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlOperatorTable;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -59,7 +60,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     private final List<AnalyticsSearchBackendPlugin> backEnds = new ArrayList<>();
     private final List<ExternalTableExecutor> externalTableExecutors = new ArrayList<>();
     private final List<SchemaContributor> schemaContributors = new ArrayList<>();
-    private SqlOperatorTable operatorTable;
+    private SqlOperatorTable operatorTable = SqlStdOperatorTable.instance();
 
     @SuppressWarnings("rawtypes")
     @Override
@@ -107,8 +108,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     }
 
     private SqlOperatorTable aggregateOperatorTables() {
-        // TODO: re-wire once operatorTable() is added back to AnalyticsSearchBackendPlugin
-        return SqlOperatorTables.of();
+        return SqlStdOperatorTable.instance();
     }
 
     /**
