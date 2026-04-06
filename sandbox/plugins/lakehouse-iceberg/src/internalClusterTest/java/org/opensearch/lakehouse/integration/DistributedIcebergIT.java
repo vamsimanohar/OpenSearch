@@ -21,13 +21,17 @@ import org.opensearch.lakehouse.LakehousePlugin;
 import org.opensearch.lakehouse.LakehouseState;
 import org.opensearch.lakehouse.distributed.DistributedPlanSplitter;
 import org.opensearch.lakehouse.distributed.DistributedQueryCoordinator;
+import org.opensearch.lakehouse.distributed.DistributedResultMerger;
 import org.opensearch.lakehouse.distributed.DistributionPlan;
+import org.opensearch.lakehouse.distributed.FilePartitioner;
 import org.opensearch.lakehouse.distributed.LakehouseWorkerAction;
 import org.opensearch.lakehouse.distributed.LakehouseWorkerRequest;
+import org.opensearch.lakehouse.distributed.LakehouseWorkerResponse;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -146,5 +150,224 @@ public class DistributedIcebergIT extends OpenSearchIntegTestCase {
         assertEquals("SCAN_ONLY plan should have no group keys", 0, distPlan.getGroupKeyOutputColumns().length);
         assertTrue("SCAN_ONLY plan should have no aggregate merges", distPlan.getAggregateMerges().isEmpty());
         assertNull("SCAN_ONLY plan should have no sort info", distPlan.getSortInfo());
+    }
+
+    /**
+     * Verify that shouldDistribute returns false when given null file list.
+     */
+    public void testShouldNotDistributeWithNullFiles() {
+        DistributedQueryCoordinator coordinator = LakehouseState.instance().distributedCoordinator();
+        assertNotNull(coordinator);
+
+        assertFalse("shouldDistribute must return false for null file list",
+            coordinator.shouldDistribute(null));
+    }
+
+    /**
+     * Verify that shouldDistribute returns false when given empty file list.
+     */
+    public void testShouldNotDistributeWithEmptyFiles() {
+        DistributedQueryCoordinator coordinator = LakehouseState.instance().distributedCoordinator();
+        assertNotNull(coordinator);
+
+        assertFalse("shouldDistribute must return false for empty file list",
+            coordinator.shouldDistribute(List.of()));
+    }
+
+    /**
+     * Verify that shouldDistribute returns false with only a single file,
+     * even though we have multiple nodes in a hypothetical multi-node cluster.
+     * On a single-node test cluster, this should also be false.
+     */
+    public void testShouldNotDistributeWithSingleFile() {
+        DistributedQueryCoordinator coordinator = LakehouseState.instance().distributedCoordinator();
+        assertNotNull(coordinator);
+
+        List<IcebergScanPlan.FileInfo> singleFile = List.of(
+            new IcebergScanPlan.FileInfo("s3://bucket/data/file.parquet", 1024 * 1024)
+        );
+        assertFalse("shouldDistribute must return false for single file",
+            coordinator.shouldDistribute(singleFile));
+    }
+
+    /**
+     * Verify FilePartitioner correctly handles edge case where files exactly
+     * equal the number of partitions.
+     */
+    public void testFilePartitionerExactSplit() {
+        List<IcebergScanPlan.FileInfo> files = List.of(
+            new IcebergScanPlan.FileInfo("file1.parquet", 100),
+            new IcebergScanPlan.FileInfo("file2.parquet", 100),
+            new IcebergScanPlan.FileInfo("file3.parquet", 100)
+        );
+
+        List<List<IcebergScanPlan.FileInfo>> partitions = FilePartitioner.partition(files, 3);
+
+        assertEquals("3 files across 3 partitions should give 3 partitions", 3, partitions.size());
+        for (List<IcebergScanPlan.FileInfo> partition : partitions) {
+            assertEquals("Each partition should have exactly 1 file", 1, partition.size());
+        }
+    }
+
+    /**
+     * Verify FilePartitioner handles heavily skewed file sizes.
+     * One huge file vs many tiny files — should still produce balanced partitions.
+     */
+    public void testFilePartitionerSkewedSizes() {
+        List<IcebergScanPlan.FileInfo> files = new ArrayList<>();
+        files.add(new IcebergScanPlan.FileInfo("huge.parquet", 10_000_000L));
+        for (int i = 0; i < 20; i++) {
+            files.add(new IcebergScanPlan.FileInfo("tiny" + i + ".parquet", 1_000L));
+        }
+
+        List<List<IcebergScanPlan.FileInfo>> partitions = FilePartitioner.partition(files, 3);
+
+        assertEquals(3, partitions.size());
+        // All files should be accounted for
+        int totalFiles = partitions.stream().mapToInt(List::size).sum();
+        assertEquals(21, totalFiles);
+    }
+
+    /**
+     * Verify that DistributedResultMerger correctly merges scan-only results
+     * from multiple worker responses within the cluster plugin context.
+     */
+    public void testResultMergerScanOnlyInCluster() {
+        LakehouseWorkerResponse r1 = new LakehouseWorkerResponse(
+            new Object[][]{{1, "alice"}, {2, "bob"}},
+            new String[]{"id", "name"}
+        );
+        LakehouseWorkerResponse r2 = new LakehouseWorkerResponse(
+            new Object[][]{{3, "carol"}},
+            new String[]{"id", "name"}
+        );
+
+        List<Object[]> result = DistributedResultMerger.merge(
+            List.of(r1, r2), DistributionPlan.scanOnly()
+        );
+
+        assertEquals("Merged scan-only should have 3 rows", 3, result.size());
+        assertEquals(1, result.get(0)[0]);
+        assertEquals("carol", result.get(2)[1]);
+    }
+
+    /**
+     * Verify that DistributedResultMerger correctly performs grouped aggregate
+     * merge with overlapping groups from multiple workers.
+     */
+    public void testResultMergerGroupedAggregateInCluster() {
+        DistributionPlan plan = DistributionPlan.groupedAggregate(
+            new int[]{0},
+            List.of(new DistributionPlan.AggMergeInfo(1, DistributionPlan.MergeOp.SUM))
+        );
+
+        LakehouseWorkerResponse r1 = new LakehouseWorkerResponse(
+            new Object[][]{{"east", 10L}, {"west", 5L}},
+            new String[]{"region", "count"}
+        );
+        LakehouseWorkerResponse r2 = new LakehouseWorkerResponse(
+            new Object[][]{{"east", 7L}, {"south", 3L}},
+            new String[]{"region", "count"}
+        );
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals("Should have 3 distinct groups", 3, result.size());
+        // Find east group and verify merge
+        Object[] east = null;
+        for (Object[] row : result) {
+            if ("east".equals(row[0])) {
+                east = row;
+                break;
+            }
+        }
+        assertNotNull("Expected 'east' group in merged results", east);
+        assertEquals("east counts should be summed: 10 + 7 = 17", 17L, east[1]);
+    }
+
+    /**
+     * Verify that DistributedResultMerger handles sort + limit correctly
+     * across multiple worker responses.
+     */
+    public void testResultMergerSortAndLimitInCluster() {
+        DistributionPlan.SortInfo sortInfo = new DistributionPlan.SortInfo(
+            new int[]{0}, new boolean[]{false}, new boolean[]{true}, 2
+        );
+        DistributionPlan plan = DistributionPlan.scanOnly().withSortInfo(sortInfo);
+
+        LakehouseWorkerResponse r1 = new LakehouseWorkerResponse(
+            new Object[][]{{10}, {7}, {3}},
+            new String[]{"amount"}
+        );
+        LakehouseWorkerResponse r2 = new LakehouseWorkerResponse(
+            new Object[][]{{9}, {6}, {1}},
+            new String[]{"amount"}
+        );
+
+        List<Object[]> result = DistributedResultMerger.merge(List.of(r1, r2), plan);
+
+        assertEquals("LIMIT 2 should return 2 rows", 2, result.size());
+        assertEquals("First should be 10 (DESC)", 10, result.get(0)[0]);
+        assertEquals("Second should be 9 (DESC)", 9, result.get(1)[0]);
+    }
+
+    /**
+     * Verify that the transport action rejects requests with invalid fields.
+     * A request with empty filePaths should fail with a validation error.
+     */
+    public void testTransportActionRejectsEmptyFilePaths() {
+        LakehouseWorkerRequest request = new LakehouseWorkerRequest(
+            new String[0],           // Empty file paths - invalid
+            new byte[] { 1, 2, 3 },
+            Map.of(),
+            "test_table"
+        );
+
+        try {
+            client().execute(LakehouseWorkerAction.INSTANCE, request).actionGet();
+            fail("Should have thrown validation exception for empty filePaths");
+        } catch (Exception e) {
+            assertTrue(
+                "Error should be about validation, got: " + e.getMessage(),
+                e.getMessage() != null && e.getMessage().contains("filePaths must not be null or empty")
+            );
+        }
+    }
+
+    /**
+     * Verify that the transport action rejects requests with empty substrait plan.
+     */
+    public void testTransportActionRejectsEmptySubstraitPlan() {
+        LakehouseWorkerRequest request = new LakehouseWorkerRequest(
+            new String[] { "file.parquet" },
+            new byte[0],             // Empty substrait plan - invalid
+            Map.of(),
+            "test_table"
+        );
+
+        try {
+            client().execute(LakehouseWorkerAction.INSTANCE, request).actionGet();
+            fail("Should have thrown validation exception for empty substraitPlan");
+        } catch (Exception e) {
+            assertTrue(
+                "Error should be about validation, got: " + e.getMessage(),
+                e.getMessage() != null && e.getMessage().contains("substraitPlan must not be null or empty")
+            );
+        }
+    }
+
+    /**
+     * Verify that DistributionPlan.unsupported() is correctly identified
+     * and throws when attempting to merge.
+     */
+    public void testUnsupportedPlanCannotBeMerged() {
+        LakehouseWorkerResponse r = new LakehouseWorkerResponse(
+            new Object[][]{{1}}, new String[]{"x"}
+        );
+
+        expectThrows(
+            IllegalStateException.class,
+            () -> DistributedResultMerger.merge(List.of(r), DistributionPlan.unsupported())
+        );
     }
 }

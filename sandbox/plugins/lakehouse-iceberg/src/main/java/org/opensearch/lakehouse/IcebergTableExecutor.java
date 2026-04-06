@@ -136,14 +136,9 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
             && coordinator.shouldDistribute(scanPlan.getFiles())) {
             logger.info("[IcebergTableExecutor] Using distributed execution for {} files across cluster nodes (plan={})",
                 scanPlan.fileCount(), distPlan.getQueryType());
-            try {
-                Iterable<Object[]> distributedResults = coordinator.execute(scanContext, scanPlan.getFiles(), distPlan);
-                scanContext.setPreComputedResults(distributedResults);
-                logger.info("[IcebergTableExecutor] Distributed execution completed successfully");
-            } catch (Exception e) {
-                logger.warn("[IcebergTableExecutor] Distributed execution failed, falling back to single-node", e);
-                // Leave preComputedResults null — DefaultPlanExecutor will use single-node path
-            }
+            Iterable<Object[]> distributedResults = coordinator.execute(scanContext, scanPlan.getFiles(), distPlan);
+            scanContext.setPreComputedResults(distributedResults);
+            logger.info("[IcebergTableExecutor] Distributed execution completed successfully");
         }
 
         return scanContext;
