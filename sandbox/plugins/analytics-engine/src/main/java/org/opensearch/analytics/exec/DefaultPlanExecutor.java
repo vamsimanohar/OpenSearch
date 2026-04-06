@@ -70,6 +70,15 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
         this.indicesService = indicesService;
         this.clusterService = clusterService;
         this.externalTableExecutor = externalTableExecutor;
+
+        // Eagerly register the backend executor for distributed workers.
+        // Each node creates DefaultPlanExecutor during plugin init, so every node
+        // has the executor available before any distributed queries arrive.
+        if (!backEnds.isEmpty()) {
+            AnalyticsSearchBackendPlugin firstBackend = backEnds.values().iterator().next();
+            ExternalScanContext.setGlobalBackendExecutor(firstBackend::executeRemoteQuery);
+            logger.info("[DefaultPlanExecutor] Registered global backend executor [{}] for distributed workers", firstBackend.name());
+        }
     }
 
     /**
@@ -106,11 +115,6 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
             AnalyticsSearchBackendPlugin provider = selectBackEnd();
             if (provider == null) {
                 throw new IllegalStateException("No analytics backend registered for remote query execution");
-            }
-            // Register the backend executor globally so distributed worker nodes can use it
-            if (ExternalScanContext.getGlobalBackendExecutor() == null) {
-                ExternalScanContext.setGlobalBackendExecutor(provider::executeRemoteQuery);
-                logger.info("[DefaultPlanExecutor] Registered global backend executor [{}] for distributed workers", provider.name());
             }
             // If the scan context carries pre-computed results from distributed execution,
             // return them directly instead of delegating to the single-node backend.

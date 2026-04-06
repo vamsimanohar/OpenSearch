@@ -169,7 +169,11 @@ public class DistributedQueryCoordinator {
 
                     @Override
                     public String executor() {
-                        return ThreadPool.Names.SAME;
+                        // Must use GENERIC, not SAME, to avoid transport thread deadlock.
+                        // SAME runs on the transport I/O thread, which can deadlock when
+                        // the coordinator is blocking on latch.await() while responses
+                        // need the same thread pool to be delivered.
+                        return ThreadPool.Names.GENERIC;
                     }
                 }
             );
