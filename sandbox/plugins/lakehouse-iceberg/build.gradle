@@ -15,6 +15,13 @@ opensearchplugin {
     extendedPlugins = ['analytics-engine']
 }
 
+repositories {
+    maven {
+        name = 'OpenSearch Snapshots'
+        url = 'https://ci.opensearch.org/ci/dbc/snapshots/maven/'
+    }
+}
+
 // Guava comes transitively from calcite-core — forbidden on compile classpaths
 // by OpenSearch. Test sources need it (Calcite API exposes ImmutableList, etc.).
 // Bypass via custom configuration, following the analytics-engine pattern.
@@ -100,6 +107,25 @@ dependencies {
     testImplementation project(':sandbox:libs:analytics-framework')
     // Guava for test compilation — Calcite API exposes Guava types
     calciteTestCompile "com.google.guava:guava:${versions.guava}"
+
+    // Internal cluster test dependencies for SQL + PPL integration tests
+    internalClusterTestImplementation project(':sandbox:plugins:analytics-engine')
+    internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-datafusion')
+    internalClusterTestImplementation project(':sandbox:plugins:dsl-query-executor')
+    internalClusterTestImplementation project(':sandbox:libs:analytics-framework')
+    // PPL test infrastructure (TestPPLPlugin, PPLRequest, PPLResponse, etc.)
+    internalClusterTestImplementation files(project(':sandbox:plugins:analytics-engine').sourceSets.test.output)
+    // unified-query libs needed by the PPL test infrastructure classes (transitive=false to avoid conflicts)
+    internalClusterTestImplementation("org.opensearch.query:unified-query-api:3.6.0.0-SNAPSHOT") { transitive = false }
+    internalClusterTestImplementation("org.opensearch.query:unified-query-common:3.6.0.0-SNAPSHOT") { transitive = false }
+    internalClusterTestImplementation("org.opensearch.query:unified-query-core:3.6.0.0-SNAPSHOT") { transitive = false }
+    internalClusterTestImplementation("org.opensearch.query:unified-query-ppl:3.6.0.0-SNAPSHOT") { transitive = false }
+    internalClusterTestImplementation "org.antlr:antlr4-runtime:4.13.1"
+    // Calcite deps for TestSqlTransportAction (avatica-core for CalciteConnectionConfigImpl)
+    internalClusterTestImplementation("org.apache.calcite.avatica:avatica-core:1.27.0") { transitive = false }
+    internalClusterTestImplementation("org.immutables:value-annotations:2.8.8") { transitive = false }
+    // Gson needed by PPLBuiltinOperators at runtime
+    internalClusterTestImplementation("com.google.code.gson:gson:${versions.gson}") { transitive = false }
 }
 
 // Separate source set + configuration for data generation (avoids OpenSearch jar-hell)
@@ -159,6 +185,11 @@ tasks.named('bundlePlugin').configure {
     from tasks.named('cleanParquetAvro')
 }
 
+// Arrow memory needs access to java.nio internals
+tasks.named('internalClusterTest').configure {
+    jvmArgs += ["--add-opens", "java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"]
+}
+
 configurations.all {
     resolutionStrategy {
         force "com.google.guava:guava:33.4.0-jre"
@@ -167,5 +198,7 @@ configurations.all {
         force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
         force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
         force "org.slf4j:slf4j-api:${versions.slf4j}"
+        force "commons-logging:commons-logging:1.3.5"
+        force "commons-codec:commons-codec:1.15"
     }
 }

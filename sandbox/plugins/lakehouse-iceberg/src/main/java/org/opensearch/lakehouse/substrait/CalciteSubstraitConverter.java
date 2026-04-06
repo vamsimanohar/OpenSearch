@@ -24,6 +24,8 @@ import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexUtil;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -85,6 +87,24 @@ public final class CalciteSubstraitConverter {
 
     private static final int BOOLEAN_URI_ANCHOR = 2;
 
+    /** URI for Substrait's standard arithmetic functions. */
+    private static final String FUNCTIONS_ARITHMETIC_URI =
+        "https://github.com/substrait-io/substrait/blob/main/extensions/functions_arithmetic.yaml";
+
+    private static final int ARITHMETIC_URI_ANCHOR = 3;
+
+    /** URI for Substrait's standard string functions. */
+    private static final String FUNCTIONS_STRING_URI =
+        "https://github.com/substrait-io/substrait/blob/main/extensions/functions_string.yaml";
+
+    private static final int STRING_URI_ANCHOR = 4;
+
+    /** URI for Substrait's standard datetime functions. */
+    private static final String FUNCTIONS_DATETIME_URI =
+        "https://github.com/substrait-io/substrait/blob/main/extensions/functions_datetime.yaml";
+
+    private static final int DATETIME_URI_ANCHOR = 5;
+
     private CalciteSubstraitConverter() {}
 
     /**
@@ -97,6 +117,7 @@ public final class CalciteSubstraitConverter {
     public static byte[] toSubstrait(RelNode relNode) throws IOException {
         logger.debug("[SubstraitConverter] Converting Calcite plan to Substrait. Root node: {}", relNode.getClass().getSimpleName());
         ConversionContext ctx = new ConversionContext();
+        ctx.rexBuilder = relNode.getCluster().getRexBuilder();
         Rel rel = convertRel(relNode, ctx);
 
         // Build output field names from the top-level row type
@@ -159,13 +180,17 @@ public final class CalciteSubstraitConverter {
      */
     private static Rel convertTableScan(TableScan scan) {
         List<String> qualifiedName = scan.getTable().getQualifiedName();
+        // Use only the leaf table name — DataFusion resolves tables by name, not by
+        // Calcite schema path. PPL wraps the schema under "opensearch" (producing
+        // ["opensearch", "nyc_taxi"]) while SQL uses root-level names (["nyc_taxi"]).
+        String tableName = qualifiedName.get(qualifiedName.size() - 1);
 
         ReadRel.Builder readBuilder = ReadRel.newBuilder()
             .setCommon(directEmit())
             .setBaseSchema(convertNamedStruct(scan.getRowType()))
             .setNamedTable(
                 ReadRel.NamedTable.newBuilder()
-                    .addAllNames(qualifiedName)
+                    .addNames(tableName)
                     .build()
             );
 
@@ -331,7 +356,16 @@ public final class CalciteSubstraitConverter {
         } else if (rexNode instanceof RexLiteral) {
             return convertLiteral((RexLiteral) rexNode);
         } else if (rexNode instanceof RexCall) {
-            return convertRexCall((RexCall) rexNode, inputRowType, ctx);
+            RexCall call = (RexCall) rexNode;
+            // CASE/WHEN → Substrait IfThen
+            if (call.getKind() == SqlKind.CASE) {
+                return convertCase(call, inputRowType, ctx);
+            }
+            // SEARCH(field, Sarg) → expand to OR/AND chain
+            if (call.getKind() == SqlKind.SEARCH) {
+                return convertSearch(call, inputRowType, ctx);
+            }
+            return convertRexCall(call, inputRowType, ctx);
         }
         throw new UnsupportedOperationException("Unsupported RexNode type: " + rexNode.getClass().getSimpleName());
     }
@@ -340,14 +374,62 @@ public final class CalciteSubstraitConverter {
      * Converts a Calcite RexCall to a Substrait ScalarFunction expression.
      */
     private static Expression convertRexCall(RexCall call, RelDataType inputRowType, ConversionContext ctx) {
-        String funcName = mapSqlKindToSubstraitFunction(call.getKind());
+        SqlKind kind = call.getKind();
+
+        // CAST is not a scalar function — use Substrait's native Cast expression
+        if (kind == SqlKind.CAST || kind == SqlKind.SAFE_CAST) {
+            return convertCast(call, inputRowType, ctx);
+        }
+
+        // TRIM(FLAG, trimChar, string) — map to trim/ltrim/rtrim based on flag
+        if (kind == SqlKind.TRIM) {
+            return convertTrim(call, inputRowType, ctx);
+        }
+
+        // EXTRACT(YEAR FROM x) — convert to Substrait extract function
+        if (kind == SqlKind.EXTRACT) {
+            return convertExtract(call, inputRowType, ctx);
+        }
+
+        String funcName;
         int uriAnchor;
         String uri;
 
-        if (isBooleanFunction(call.getKind())) {
+        if (kind == SqlKind.OTHER_FUNCTION) {
+            // Named functions (UPPER, ABS, etc.) — resolve by operator name
+            String opName = call.getOperator().getName().toLowerCase();
+            // DateTime extract functions need special handling (two args: component + datetime)
+            if (isDateTimeExtract(opName)) {
+                return convertDateTimeExtract(call, inputRowType, ctx, opName);
+            }
+            funcName = resolveNamedFunction(call);
+            int[] uriInfo = resolveNamedFunctionUri(call);
+            uriAnchor = uriInfo[0];
+            uri = resolveNamedFunctionUriString(uriInfo[0]);
+        } else if (isBooleanFunction(kind)) {
+            funcName = mapSqlKindToSubstraitFunction(kind);
             uriAnchor = BOOLEAN_URI_ANCHOR;
             uri = FUNCTIONS_BOOLEAN_URI;
+        } else if (isArithmeticFunction(kind)) {
+            funcName = mapSqlKindToSubstraitFunction(kind);
+            uriAnchor = ARITHMETIC_URI_ANCHOR;
+            uri = FUNCTIONS_ARITHMETIC_URI;
+        } else if (kind == SqlKind.LIKE) {
+            funcName = "like:str_str";
+            uriAnchor = STRING_URI_ANCHOR;
+            uri = FUNCTIONS_STRING_URI;
+        } else if (kind == SqlKind.OTHER) {
+            // Generic "OTHER" kind — check operator name for specific handling
+            String opName = call.getOperator().getName();
+            if ("||".equals(opName)) {
+                funcName = "str_concat:str_str";
+                uriAnchor = STRING_URI_ANCHOR;
+                uri = FUNCTIONS_STRING_URI;
+            } else {
+                throw new UnsupportedOperationException("Unsupported OTHER operator: " + opName);
+            }
         } else {
+            funcName = mapSqlKindToSubstraitFunction(kind);
             uriAnchor = FUNCTIONS_URI_ANCHOR;
             uri = FUNCTIONS_COMPARISON_URI;
         }
@@ -400,6 +482,20 @@ public final class CalciteSubstraitConverter {
                 break;
             case DOUBLE:
                 litBuilder.setFp64(literal.getValueAs(Number.class).doubleValue());
+                break;
+            case DECIMAL:
+                // Calcite represents integer literals (e.g., 5) as DECIMAL(1,0).
+                // Convert to the most appropriate numeric type.
+                if (literal.getType().getScale() == 0) {
+                    long val = literal.getValueAs(Number.class).longValue();
+                    if (val >= Integer.MIN_VALUE && val <= Integer.MAX_VALUE) {
+                        litBuilder.setI32((int) val);
+                    } else {
+                        litBuilder.setI64(val);
+                    }
+                } else {
+                    litBuilder.setFp64(literal.getValueAs(Number.class).doubleValue());
+                }
                 break;
             case CHAR:
             case VARCHAR:
@@ -570,6 +666,16 @@ public final class CalciteSubstraitConverter {
                 return "is_null:any";
             case IS_NOT_NULL:
                 return "is_not_null:any";
+            case PLUS:
+                return "add:any_any";
+            case MINUS:
+                return "subtract:any_any";
+            case TIMES:
+                return "multiply:any_any";
+            case DIVIDE:
+                return "divide:any_any";
+            case MOD:
+                return "modulus:any_any";
             default:
                 return kind.name().toLowerCase();
         }
@@ -580,6 +686,289 @@ public final class CalciteSubstraitConverter {
      */
     private static boolean isBooleanFunction(SqlKind kind) {
         return kind == SqlKind.AND || kind == SqlKind.OR || kind == SqlKind.NOT;
+    }
+
+    /**
+     * Returns true if the SqlKind represents an arithmetic function.
+     */
+    private static boolean isArithmeticFunction(SqlKind kind) {
+        return kind == SqlKind.PLUS || kind == SqlKind.MINUS
+            || kind == SqlKind.TIMES || kind == SqlKind.DIVIDE || kind == SqlKind.MOD;
+    }
+
+    /**
+     * Resolves a named function (SqlKind.OTHER_FUNCTION) to a Substrait function name.
+     * These are functions like UPPER, LOWER, ABS, SQRT, etc.
+     */
+    private static String resolveNamedFunction(RexCall call) {
+        String opName = call.getOperator().getName().toLowerCase();
+        switch (opName) {
+            // String functions
+            case "upper": return "upper:str";
+            case "lower": return "lower:str";
+            case "substring": return "substring:str_i32_i32";
+            case "concat": return "concat:str_str";
+            case "replace": return "replace:str_str_str";
+            case "regexp_replace": return "regexp_replace:str_str_str";
+            case "trim": return "trim:str";
+            case "ltrim": return "ltrim:str";
+            case "rtrim": return "rtrim:str";
+            case "char_length":
+            case "character_length":
+            case "length": return "char_length:str";
+            case "overlay": return "overlay:str_str_i32_i32";
+            case "initcap": return "initcap:str";
+            // Math functions
+            case "abs": return "abs:any";
+            case "sqrt": return "sqrt:any";
+            case "exp": return "exp:any";
+            case "ln":
+            case "log": return "ln:any";
+            case "log10": return "log10:any";
+            case "power":
+            case "pow": return "power:any_any";
+            case "round": return "round:any_i32";
+            case "truncate": return "trunc:any_i32";
+            case "sign": return "signum:any";
+            case "mod": return "modulus:any_any";
+            case "divide": return "divide:any_any";
+            case "ceil":
+            case "ceiling": return "ceil:any";
+            case "floor": return "floor:any";
+            // Conditional
+            case "coalesce": return "coalesce:any";
+            case "nullif": return "nullif:any_any";
+            case "if": return "if:bool_any_any";
+            // Date/time (YEAR, MONTH, DAY, HOUR, MINUTE, DAYOFWEEK handled by convertDateTimeExtract)
+            case "now":
+            case "current_timestamp": return "current_timestamp:";
+            case "current_date": return "current_date:";
+            default:
+                throw new UnsupportedOperationException("Unsupported named function: " + opName);
+        }
+    }
+
+    /**
+     * Returns the URI anchor for a named function based on its operator name.
+     */
+    private static int[] resolveNamedFunctionUri(RexCall call) {
+        String opName = call.getOperator().getName().toLowerCase();
+        switch (opName) {
+            case "upper": case "lower": case "substring": case "concat":
+            case "replace": case "regexp_replace": case "trim": case "ltrim": case "rtrim":
+            case "char_length": case "character_length": case "length":
+            case "overlay": case "initcap":
+                return new int[]{STRING_URI_ANCHOR};
+            case "abs": case "sqrt": case "exp": case "ln": case "log":
+            case "log10": case "power": case "pow": case "round":
+            case "truncate": case "sign": case "mod": case "divide": case "ceil":
+            case "ceiling": case "floor":
+                return new int[]{ARITHMETIC_URI_ANCHOR};
+            case "now": case "current_timestamp": case "current_date":
+                return new int[]{DATETIME_URI_ANCHOR};
+            default:
+                return new int[]{FUNCTIONS_URI_ANCHOR};
+        }
+    }
+
+    /**
+     * Maps a URI anchor to its URI string.
+     */
+    private static String resolveNamedFunctionUriString(int anchor) {
+        switch (anchor) {
+            case STRING_URI_ANCHOR: return FUNCTIONS_STRING_URI;
+            case ARITHMETIC_URI_ANCHOR: return FUNCTIONS_ARITHMETIC_URI;
+            case DATETIME_URI_ANCHOR: return FUNCTIONS_DATETIME_URI;
+            case BOOLEAN_URI_ANCHOR: return FUNCTIONS_BOOLEAN_URI;
+            default: return FUNCTIONS_COMPARISON_URI;
+        }
+    }
+
+    /**
+     * Converts a CAST/SAFE_CAST RexCall to a Substrait Cast expression.
+     */
+    private static Expression convertCast(RexCall call, RelDataType inputRowType, ConversionContext ctx) {
+        RexNode operand = call.getOperands().get(0);
+        Expression input = convertRexNode(operand, inputRowType, ctx);
+        Type outputType = convertType(call.getType());
+
+        Expression.Cast.Builder castBuilder = Expression.Cast.newBuilder()
+            .setInput(input)
+            .setType(outputType);
+
+        if (call.getKind() == SqlKind.SAFE_CAST) {
+            castBuilder.setFailureBehavior(Expression.Cast.FailureBehavior.FAILURE_BEHAVIOR_RETURN_NULL);
+        } else {
+            castBuilder.setFailureBehavior(Expression.Cast.FailureBehavior.FAILURE_BEHAVIOR_THROW_EXCEPTION);
+        }
+
+        return Expression.newBuilder().setCast(castBuilder.build()).build();
+    }
+
+    /**
+     * Converts a CASE/WHEN expression to Substrait IfThen.
+     * Calcite represents CASE as: CASE WHEN cond1 THEN val1 WHEN cond2 THEN val2 ... ELSE default END
+     * with operands: [cond1, val1, cond2, val2, ..., default]
+     */
+    private static Expression convertCase(RexCall call, RelDataType inputRowType, ConversionContext ctx) {
+        List<RexNode> operands = call.getOperands();
+        Expression.IfThen.Builder ifThenBuilder = Expression.IfThen.newBuilder();
+
+        // Operands are pairs of (condition, value) with an optional trailing else
+        int i = 0;
+        while (i < operands.size() - 1) {
+            Expression condition = convertRexNode(operands.get(i), inputRowType, ctx);
+            Expression then = convertRexNode(operands.get(i + 1), inputRowType, ctx);
+            ifThenBuilder.addIfs(
+                Expression.IfThen.IfClause.newBuilder()
+                    .setIf(condition)
+                    .setThen(then)
+                    .build()
+            );
+            i += 2;
+        }
+
+        // Last operand is the ELSE clause if count is odd
+        if (i < operands.size()) {
+            ifThenBuilder.setElse(convertRexNode(operands.get(i), inputRowType, ctx));
+        }
+
+        return Expression.newBuilder().setIfThen(ifThenBuilder.build()).build();
+    }
+
+    /**
+     * Converts a SEARCH(field, Sarg) expression by expanding it back to
+     * standard comparisons using Calcite's RexUtil.expandSearch, then converting
+     * the expanded expression to Substrait.
+     */
+    private static Expression convertSearch(RexCall call, RelDataType inputRowType, ConversionContext ctx) {
+        RexNode expanded = RexUtil.expandSearch(ctx.rexBuilder, null, call);
+        return convertRexNode(expanded, inputRowType, ctx);
+    }
+
+    /**
+     * Converts a TRIM(FLAG, trimChar, string) to the appropriate Substrait function
+     * (trim/ltrim/rtrim) based on the trim flag.
+     */
+    private static Expression convertTrim(RexCall call, RelDataType inputRowType, ConversionContext ctx) {
+        // Calcite TRIM operands: [flag, trimChar, string]
+        RexLiteral flagLiteral = (RexLiteral) call.getOperands().get(0);
+        String flagStr = flagLiteral.getValue().toString();
+        RexNode trimChar = call.getOperands().get(1);
+        RexNode stringExpr = call.getOperands().get(2);
+
+        String funcName;
+        if ("LEADING".equalsIgnoreCase(flagStr)) {
+            funcName = "ltrim:str";
+        } else if ("TRAILING".equalsIgnoreCase(flagStr)) {
+            funcName = "rtrim:str";
+        } else {
+            funcName = "trim:str";
+        }
+
+        int funcRef = ctx.registerFunction(STRING_URI_ANCHOR, FUNCTIONS_STRING_URI, funcName);
+
+        Expression.ScalarFunction.Builder scalarFunc = Expression.ScalarFunction.newBuilder()
+            .setFunctionReference(funcRef)
+            .setOutputType(convertType(call.getType()));
+
+        // Add the string argument
+        scalarFunc.addArguments(
+            FunctionArgument.newBuilder()
+                .setValue(convertRexNode(stringExpr, inputRowType, ctx))
+                .build()
+        );
+
+        // If the trim character is not a space, add it as a second argument
+        if (trimChar instanceof RexLiteral) {
+            String trimCharStr = ((RexLiteral) trimChar).getValueAs(String.class);
+            if (trimCharStr != null && !" ".equals(trimCharStr)) {
+                scalarFunc.addArguments(
+                    FunctionArgument.newBuilder()
+                        .setValue(convertRexNode(trimChar, inputRowType, ctx))
+                        .build()
+                );
+            }
+        }
+
+        return Expression.newBuilder().setScalarFunction(scalarFunc.build()).build();
+    }
+
+    /**
+     * Converts a SQL EXTRACT(unit FROM datetime) to a Substrait extract ScalarFunction.
+     * Calcite represents EXTRACT with SqlKind.EXTRACT, operand[0] is a RexLiteral
+     * with a TimeUnitRange value, operand[1] is the datetime expression.
+     */
+    private static Expression convertExtract(RexCall call, RelDataType inputRowType, ConversionContext ctx) {
+        RexLiteral unitLiteral = (RexLiteral) call.getOperands().get(0);
+        String unit = unitLiteral.getValue().toString().toUpperCase();
+
+        int funcRef = ctx.registerFunction(DATETIME_URI_ANCHOR, FUNCTIONS_DATETIME_URI, "date_part:str_ts");
+
+        Expression componentLiteral = Expression.newBuilder()
+            .setLiteral(Expression.Literal.newBuilder().setString(unit))
+            .build();
+        Expression datetimeArg = convertRexNode(call.getOperands().get(1), inputRowType, ctx);
+
+        Expression.ScalarFunction.Builder scalarFunc = Expression.ScalarFunction.newBuilder()
+            .setFunctionReference(funcRef)
+            .setOutputType(convertType(call.getType()))
+            .addArguments(FunctionArgument.newBuilder().setValue(componentLiteral))
+            .addArguments(FunctionArgument.newBuilder().setValue(datetimeArg));
+
+        return Expression.newBuilder().setScalarFunction(scalarFunc.build()).build();
+    }
+
+    /**
+     * Returns true if the named function is a datetime extraction (YEAR, MONTH, etc.)
+     * that needs special two-argument handling (component + datetime).
+     */
+    private static boolean isDateTimeExtract(String opName) {
+        switch (opName) {
+            case "year": case "month": case "day":
+            case "hour": case "minute": case "second":
+            case "dayofweek": case "day_of_week":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Converts a datetime extract function (YEAR(x), MONTH(x), etc.) to a Substrait
+     * extract ScalarFunction with two arguments: the component name as a string literal,
+     * and the datetime expression.
+     */
+    private static Expression convertDateTimeExtract(RexCall call, RelDataType inputRowType,
+                                                     ConversionContext ctx, String opName) {
+        int funcRef = ctx.registerFunction(DATETIME_URI_ANCHOR, FUNCTIONS_DATETIME_URI, "date_part:str_ts");
+
+        // Map function name to DataFusion-compatible component string
+        String component;
+        switch (opName) {
+            case "year": component = "YEAR"; break;
+            case "month": component = "MONTH"; break;
+            case "day": component = "DAY"; break;
+            case "hour": component = "HOUR"; break;
+            case "minute": component = "MINUTE"; break;
+            case "second": component = "SECOND"; break;
+            case "dayofweek":
+            case "day_of_week": component = "DOW"; break;
+            default: component = opName.toUpperCase(); break;
+        }
+
+        Expression componentLiteral = Expression.newBuilder()
+            .setLiteral(Expression.Literal.newBuilder().setString(component))
+            .build();
+        Expression datetimeArg = convertRexNode(call.getOperands().get(0), inputRowType, ctx);
+
+        Expression.ScalarFunction.Builder scalarFunc = Expression.ScalarFunction.newBuilder()
+            .setFunctionReference(funcRef)
+            .setOutputType(convertType(call.getType()))
+            .addArguments(FunctionArgument.newBuilder().setValue(componentLiteral))
+            .addArguments(FunctionArgument.newBuilder().setValue(datetimeArg));
+
+        return Expression.newBuilder().setScalarFunction(scalarFunc.build()).build();
     }
 
     /**
@@ -609,6 +998,7 @@ public final class CalciteSubstraitConverter {
         final List<SimpleExtensionDeclaration> extensionDeclarations = new ArrayList<>();
         private final Map<String, Integer> functionAnchors = new HashMap<>();
         private int nextFunctionAnchor = 0;
+        RexBuilder rexBuilder;
 
         /**
          * Registers a function and returns its anchor reference.

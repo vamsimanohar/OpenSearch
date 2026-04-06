@@ -195,6 +195,13 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         String tableName = scanContext.getTableName();
         byte[] substraitPlan = scanContext.getSubstraitPlan();
 
+        // Short-circuit: if no data files match the scan predicates, return empty result
+        // rather than calling native code which panics on empty file lists.
+        if (filePaths.length == 0) {
+            logger.info("[DataFusionPlugin] No data files for table [{}] — returning empty result", tableName);
+            return List.of();
+        }
+
         logger.debug("[DataFusionPlugin] executeRemoteQuery: table={}, files={}, substraitPlan={} bytes",
             tableName, filePaths.length, substraitPlan != null ? substraitPlan.length : 0);
         logger.debug("[DataFusionPlugin] S3 config: region={}, bucket={}, credentials={}, sessionToken={}, endpoint={}",
