@@ -216,12 +216,17 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
             }
         }
 
-        // Call DataFusion via JNI — returns a stream pointer
+        // Call DataFusion via JNI — returns a stream pointer.
+        // Pass the global runtime pointer so the Iceberg executor shares the
+        // memory pool and disk manager (enabling spill-to-disk for large aggregations).
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        long runtimePtr = runtimeHandle.get();
         CompletableFuture<Long> future = new CompletableFuture<>();
         NativeBridge.executeIcebergQueryAsync(
             s3Region, s3Bucket,
             s3AccessKeyId, s3SecretAccessKey, s3SessionToken, s3Endpoint,
             filePaths, tableName, substraitPlan,
+            runtimePtr,
             new ActionListener<>() {
                 @Override
                 public void onResponse(Long streamPtr) { future.complete(streamPtr); }
@@ -241,7 +246,6 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         }
 
         // Stream Arrow batches and convert to Object[] rows
-        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
         StreamHandle streamHandle = new StreamHandle(streamPtr, runtimeHandle);
         BufferAllocator allocator = dfService.newChildAllocator();
         DatafusionResultStream resultStream = new DatafusionResultStream(streamHandle, allocator);

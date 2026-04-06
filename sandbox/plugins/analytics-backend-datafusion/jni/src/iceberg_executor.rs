@@ -24,6 +24,7 @@ use log::{debug, error, info};
 use prost::Message;
 use substrait::proto::Plan;
 
+use crate::api::DataFusionRuntime;
 use crate::cross_rt_stream::CrossRtStream;
 use crate::executor::DedicatedExecutor;
 use crate::s3_store::{register_s3_store, S3Config};
@@ -34,21 +35,38 @@ use crate::s3_store::{register_s3_store, S3Config};
 /// receiving a pre-built `ShardView` with cached object metas, it takes an
 /// `S3Config` plus a list of S3 file paths and registers them as a
 /// `ListingTable` after wiring the S3 object store into the session.
+///
+/// When `global_runtime` is provided, the session shares the global memory pool
+/// and disk manager (enabling spill-to-disk for large aggregations).
 pub async fn execute_iceberg_query(
     s3_config: S3Config,
     file_paths: Vec<String>,
     table_name: String,
     plan_bytes: Vec<u8>,
     cpu_executor: DedicatedExecutor,
+    global_runtime: Option<&DataFusionRuntime>,
 ) -> Result<jlong, DataFusionError> {
-    info!("[DataFusion-Rust] execute_iceberg_query: table={}, files={}, plan_bytes={}, bucket={}",
-        table_name, file_paths.len(), plan_bytes.len(), s3_config.bucket);
+    info!("[DataFusion-Rust] execute_iceberg_query: table={}, files={}, plan_bytes={}, bucket={}, has_global_runtime={}",
+        table_name, file_paths.len(), plan_bytes.len(), s3_config.bucket, global_runtime.is_some());
 
-    // Build a RuntimeEnv and optionally register the S3 object store
-    let runtime_env = RuntimeEnvBuilder::new().build().map_err(|e| {
-        error!("Failed to build runtime env: {}", e);
-        e
-    })?;
+    // Build a RuntimeEnv — share the global memory pool + disk manager if available,
+    // otherwise create a standalone one (for testing / fallback).
+    let runtime_env = match global_runtime {
+        Some(rt) => {
+            let builder = RuntimeEnvBuilder::from_runtime_env(&rt.runtime_env);
+            builder.build().map_err(|e| {
+                error!("Failed to build runtime env from global runtime: {}", e);
+                e
+            })?
+        }
+        None => {
+            RuntimeEnvBuilder::new().build().map_err(|e| {
+                error!("Failed to build runtime env: {}", e);
+                e
+            })?
+        }
+    };
+
     // Only register S3 store when we actually have an S3 bucket.
     // For local file:// paths (e.g., Hadoop catalog testing), DataFusion
     // handles them natively via LocalFileSystem — no registration needed.
@@ -56,10 +74,14 @@ pub async fn execute_iceberg_query(
         register_s3_store(&runtime_env, &s3_config)?;
     }
 
-    // Build a fresh session state per query
+    // Build a fresh session state per query.
+    // Use available CPU cores for target_partitions for better parallelism.
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = false;
-    config.options_mut().execution.target_partitions = 4;
+    config.options_mut().execution.target_partitions = num_cpus;
     config.options_mut().execution.batch_size = 8192;
 
     let state = SessionStateBuilder::new()

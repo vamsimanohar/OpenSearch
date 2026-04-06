@@ -152,6 +152,7 @@ public final class NativeBridge {
         String[] filePaths,
         String tableName,
         byte[] substraitPlan,
+        long runtimePtr,
         org.opensearch.core.action.ActionListener<Long> listener
     );
 

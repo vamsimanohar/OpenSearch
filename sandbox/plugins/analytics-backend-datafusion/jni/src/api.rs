@@ -359,6 +359,7 @@ pub async fn execute_iceberg_query(
     table_name: &str,
     plan_bytes: &[u8],
     manager: &RuntimeManager,
+    runtime_ptr: i64,
 ) -> Result<i64, DataFusionError> {
     let s3_config = S3Config {
         region: s3_region.to_string(),
@@ -371,12 +372,20 @@ pub async fn execute_iceberg_query(
 
     let cpu_executor = manager.cpu_executor();
 
+    // Recover the global runtime (memory pool + disk manager) if pointer is valid.
+    let global_runtime: Option<&DataFusionRuntime> = if runtime_ptr != 0 {
+        Some(unsafe { &*(runtime_ptr as *const DataFusionRuntime) })
+    } else {
+        None
+    };
+
     let result = crate::iceberg_executor::execute_iceberg_query(
         s3_config,
         file_paths,
         table_name.to_string(),
         plan_bytes.to_vec(),
         cpu_executor,
+        global_runtime,
     )
     .await?;
 

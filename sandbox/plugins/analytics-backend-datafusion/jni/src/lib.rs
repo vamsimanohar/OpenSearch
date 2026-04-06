@@ -255,6 +255,7 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_execut
     file_paths: JObjectArray,
     table_name: JString,
     substrait_bytes: JObject,
+    runtime_ptr: jlong,
     listener: JObject,
 ) {
     let tokio_rt_mgr = match get_tokio_rt_manager() {
@@ -359,6 +360,7 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_execut
         &table_name_str,
         &plan_bytes,
         tokio_rt_mgr,
+        runtime_ptr as i64,
     ));
 
     with_jni_env(|env| match result {
