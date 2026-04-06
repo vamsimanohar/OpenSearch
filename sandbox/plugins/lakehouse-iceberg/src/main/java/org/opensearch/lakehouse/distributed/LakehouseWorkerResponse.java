@@ -8,9 +8,9 @@
 
 package org.opensearch.lakehouse.distributed;
 
+import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
-import org.opensearch.core.transport.TransportResponse;
 
 import java.io.IOException;
 
@@ -19,7 +19,7 @@ import java.io.IOException;
  * portion of a distributed Iceberg query. Contains the result rows
  * and column names.
  */
-public class LakehouseWorkerResponse extends TransportResponse {
+public class LakehouseWorkerResponse extends ActionResponse {
 
     private final Object[][] rows;
     private final String[] columnNames;
@@ -37,6 +37,8 @@ public class LakehouseWorkerResponse extends TransportResponse {
 
     /**
      * Deserialization constructor.
+     *
+     * @param in the stream input to deserialize from
      */
     public LakehouseWorkerResponse(StreamInput in) throws IOException {
         super(in);
@@ -65,10 +67,12 @@ public class LakehouseWorkerResponse extends TransportResponse {
         }
     }
 
+    /** Returns the result rows, where each row is an array of cell values. */
     public Object[][] getRows() {
         return rows;
     }
 
+    /** Returns the column names for the result set. */
     public String[] getColumnNames() {
         return columnNames;
     }

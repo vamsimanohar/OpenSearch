@@ -10,6 +10,7 @@ package org.opensearch.lakehouse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.action.ActionRequest;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.node.DiscoveryNodes;
@@ -18,6 +19,7 @@ import org.opensearch.common.settings.ClusterSettings;
 import org.opensearch.common.settings.IndexScopedSettings;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.settings.SettingsFilter;
+import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
@@ -25,6 +27,8 @@ import org.opensearch.env.NodeEnvironment;
 import org.opensearch.lakehouse.action.RegisterCatalogAction;
 import org.opensearch.lakehouse.action.RegisterTableAction;
 import org.opensearch.lakehouse.cluster.LakehouseMetadata;
+import org.opensearch.lakehouse.distributed.LakehouseWorkerAction;
+import org.opensearch.lakehouse.distributed.TransportLakehouseAction;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.repositories.RepositoriesService;
@@ -94,6 +98,11 @@ public class LakehousePlugin extends Plugin implements ActionPlugin {
             new RegisterCatalogAction(clusterService),
             new RegisterTableAction(clusterService)
         );
+    }
+
+    @Override
+    public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
+        return List.of(new ActionHandler<>(LakehouseWorkerAction.INSTANCE, TransportLakehouseAction.class));
     }
 
     @Override

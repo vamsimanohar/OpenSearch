@@ -10,6 +10,7 @@ package org.opensearch.lakehouse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
@@ -23,6 +24,7 @@ import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Singleton holder for shared state across SPI-created instances.
@@ -41,6 +43,13 @@ public final class LakehouseState {
     private final IcebergCatalogConnector catalogConnector;
     private final ExecutorService scanExecutor;
     private final IcebergScanPlanner scanPlanner;
+
+    /**
+     * Backend execution function for distributed worker queries.
+     * Set by the DataFusion backend during plugin initialization.
+     * Maps an {@link ExternalScanContext} to result rows.
+     */
+    private volatile Function<ExternalScanContext, Iterable<Object[]>> backendExecutor;
 
     @SuppressWarnings("removal")
     private LakehouseState() {
@@ -62,6 +71,25 @@ public final class LakehouseState {
     /** Returns the shared scan planner. */
     public IcebergScanPlanner scanPlanner() {
         return scanPlanner;
+    }
+
+    /**
+     * Returns the backend executor for distributed worker queries, or {@code null}
+     * if no backend has been registered yet.
+     */
+    public Function<ExternalScanContext, Iterable<Object[]>> backendExecutor() {
+        return backendExecutor;
+    }
+
+    /**
+     * Registers the backend execution function. Called during plugin initialization
+     * when the DataFusion backend becomes available.
+     *
+     * @param executor function that executes an {@link ExternalScanContext} and returns result rows
+     */
+    public void setBackendExecutor(Function<ExternalScanContext, Iterable<Object[]>> executor) {
+        this.backendExecutor = executor;
+        logger.info("[LakehouseState] Backend executor registered");
     }
 
     /**

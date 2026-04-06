@@ -8,9 +8,10 @@
 
 package org.opensearch.lakehouse.distributed;
 
+import org.opensearch.action.ActionRequest;
+import org.opensearch.action.ActionRequestValidationException;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
-import org.opensearch.transport.TransportRequest;
 
 import java.io.IOException;
 import java.util.Map;
@@ -21,7 +22,7 @@ import java.util.Map;
  * to this worker, the serialized Substrait query plan, S3 storage
  * configuration, and the table name referenced in the plan.
  */
-public class LakehouseWorkerRequest extends TransportRequest {
+public class LakehouseWorkerRequest extends ActionRequest {
 
     private final String[] filePaths;
     private final byte[] substraitPlan;
@@ -45,6 +46,8 @@ public class LakehouseWorkerRequest extends TransportRequest {
 
     /**
      * Deserialization constructor.
+     *
+     * @param in the stream input to deserialize from
      */
     public LakehouseWorkerRequest(StreamInput in) throws IOException {
         super(in);
@@ -52,6 +55,11 @@ public class LakehouseWorkerRequest extends TransportRequest {
         this.substraitPlan = in.readByteArray();
         this.storageConfig = in.readMap(StreamInput::readString, StreamInput::readString);
         this.tableName = in.readString();
+    }
+
+    @Override
+    public ActionRequestValidationException validate() {
+        return null;
     }
 
     @Override
@@ -63,18 +71,22 @@ public class LakehouseWorkerRequest extends TransportRequest {
         out.writeString(tableName);
     }
 
+    /** Returns the S3 or file paths assigned to this worker. */
     public String[] getFilePaths() {
         return filePaths;
     }
 
+    /** Returns the serialized Substrait protobuf plan. */
     public byte[] getSubstraitPlan() {
         return substraitPlan;
     }
 
+    /** Returns the storage configuration map (e.g., s3Region, s3Bucket, credentials). */
     public Map<String, String> getStorageConfig() {
         return storageConfig;
     }
 
+    /** Returns the table name matching Substrait plan references. */
     public String getTableName() {
         return tableName;
     }
