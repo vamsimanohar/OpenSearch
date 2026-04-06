@@ -11,21 +11,28 @@ package org.opensearch.lakehouse.substrait;
 import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.core.SetOp;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.core.Window;
 import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.rel.logical.LogicalFilter;
+import org.apache.calcite.rel.logical.LogicalIntersect;
+import org.apache.calcite.rel.logical.LogicalMinus;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalSort;
+import org.apache.calcite.rel.logical.LogicalUnion;
 import org.apache.calcite.rel.logical.LogicalWindow;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexCorrelVariable;
+import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexFieldCollation;
 import org.apache.calcite.rex.RexOver;
+import org.apache.calcite.rex.RexSubQuery;
 import org.apache.calcite.rex.RexWindow;
 import org.apache.calcite.rex.RexWindowBound;
 import org.apache.calcite.sql.SqlKind;
@@ -55,6 +62,7 @@ import io.substrait.proto.ReadRel;
 import io.substrait.proto.Rel;
 import io.substrait.proto.RelCommon;
 import io.substrait.proto.RelRoot;
+import io.substrait.proto.SetRel;
 import io.substrait.proto.SimpleExtensionDeclaration;
 import io.substrait.proto.SimpleExtensionURI;
 import io.substrait.proto.SortField;
@@ -180,6 +188,12 @@ public final class CalciteSubstraitConverter {
             return convertSort((LogicalSort) relNode, ctx);
         } else if (relNode instanceof LogicalWindow) {
             return convertWindow((LogicalWindow) relNode, ctx);
+        } else if (relNode instanceof LogicalUnion) {
+            return convertSetOp((LogicalUnion) relNode, ctx);
+        } else if (relNode instanceof LogicalIntersect) {
+            return convertSetOp((LogicalIntersect) relNode, ctx);
+        } else if (relNode instanceof LogicalMinus) {
+            return convertSetOp((LogicalMinus) relNode, ctx);
         }
         throw new UnsupportedOperationException("Unsupported RelNode type: " + relNode.getClass().getSimpleName());
     }
@@ -352,6 +366,36 @@ public final class CalciteSubstraitConverter {
         }
 
         return input;
+    }
+
+    /**
+     * Converts a Calcite set operation (UNION, INTERSECT, EXCEPT) to a Substrait SetRel.
+     */
+    private static Rel convertSetOp(SetOp setOp, ConversionContext ctx) {
+        SetRel.Builder setBuilder = SetRel.newBuilder()
+            .setCommon(directEmit());
+
+        // Convert each input
+        for (org.apache.calcite.rel.RelNode input : setOp.getInputs()) {
+            setBuilder.addInputs(convertRel(input, ctx));
+        }
+
+        // Map Calcite set op kind + all flag to Substrait SetOp
+        if (setOp instanceof LogicalUnion) {
+            setBuilder.setOp(setOp.all
+                ? SetRel.SetOp.SET_OP_UNION_ALL
+                : SetRel.SetOp.SET_OP_UNION_DISTINCT);
+        } else if (setOp instanceof LogicalIntersect) {
+            setBuilder.setOp(setOp.all
+                ? SetRel.SetOp.SET_OP_INTERSECTION_MULTISET
+                : SetRel.SetOp.SET_OP_INTERSECTION_PRIMARY);
+        } else if (setOp instanceof LogicalMinus) {
+            setBuilder.setOp(setOp.all
+                ? SetRel.SetOp.SET_OP_MINUS_MULTISET
+                : SetRel.SetOp.SET_OP_MINUS_PRIMARY);
+        }
+
+        return Rel.newBuilder().setSet(setBuilder.build()).build();
     }
 
     /**
@@ -549,6 +593,78 @@ public final class CalciteSubstraitConverter {
     }
 
     /**
+     * Converts a RexSubQuery to a Substrait Expression.Subquery.
+     * Handles scalar, IN, and EXISTS subqueries.
+     */
+    private static Expression convertRexSubQuery(RexSubQuery subQuery, RelDataType inputRowType, ConversionContext ctx) {
+        SqlKind kind = subQuery.getKind();
+        Rel subqueryRel = convertRel(subQuery.rel, ctx);
+
+        if (kind == SqlKind.SCALAR_QUERY) {
+            return Expression.newBuilder()
+                .setSubquery(Expression.Subquery.newBuilder()
+                    .setScalar(Expression.Subquery.Scalar.newBuilder()
+                        .setInput(subqueryRel)
+                        .build())
+                    .build())
+                .build();
+        } else if (kind == SqlKind.IN) {
+            // IN subquery: operands[0] is the needle (left-hand expression)
+            Expression.Subquery.InPredicate.Builder inBuilder = Expression.Subquery.InPredicate.newBuilder()
+                .setHaystack(subqueryRel);
+            for (RexNode operand : subQuery.getOperands()) {
+                inBuilder.addNeedles(convertRexNode(operand, inputRowType, ctx));
+            }
+            return Expression.newBuilder()
+                .setSubquery(Expression.Subquery.newBuilder()
+                    .setInPredicate(inBuilder.build())
+                    .build())
+                .build();
+        } else if (kind == SqlKind.EXISTS) {
+            return Expression.newBuilder()
+                .setSubquery(Expression.Subquery.newBuilder()
+                    .setSetPredicate(Expression.Subquery.SetPredicate.newBuilder()
+                        .setPredicateOp(Expression.Subquery.SetPredicate.PredicateOp.PREDICATE_OP_EXISTS)
+                        .setTuples(subqueryRel)
+                        .build())
+                    .build())
+                .build();
+        }
+        throw new UnsupportedOperationException("Unsupported subquery kind: " + kind);
+    }
+
+    /**
+     * Converts a RexFieldAccess to a Substrait field reference.
+     * Handles correlated variable references (e.g., t.vendorid in a correlated subquery).
+     */
+    private static Expression convertRexFieldAccess(RexFieldAccess fieldAccess, RelDataType inputRowType, ConversionContext ctx) {
+        if (fieldAccess.getReferenceExpr() instanceof RexCorrelVariable) {
+            // Correlated reference — use OuterReference
+            int fieldIndex = fieldAccess.getField().getIndex();
+            return Expression.newBuilder()
+                .setSelection(
+                    Expression.FieldReference.newBuilder()
+                        .setDirectReference(
+                            Expression.ReferenceSegment.newBuilder()
+                                .setStructField(
+                                    Expression.ReferenceSegment.StructField.newBuilder()
+                                        .setField(fieldIndex)
+                                        .build()
+                                )
+                                .build()
+                        )
+                        .setOuterReference(Expression.FieldReference.OuterReference.newBuilder()
+                            .setStepsOut(1)
+                            .build())
+                        .build()
+                )
+                .build();
+        }
+        // Non-correlated field access — treat as regular field reference
+        return makeFieldReference(fieldAccess.getField().getIndex());
+    }
+
+    /**
      * Reflectively accesses a field to avoid compile-time Guava ImmutableList dependency.
      */
     private static Object getFieldViaReflection(Object obj, String fieldName) {
@@ -638,6 +754,10 @@ public final class CalciteSubstraitConverter {
             return makeFieldReference(((RexInputRef) rexNode).getIndex());
         } else if (rexNode instanceof RexLiteral) {
             return convertLiteral((RexLiteral) rexNode);
+        } else if (rexNode instanceof RexSubQuery) {
+            return convertRexSubQuery((RexSubQuery) rexNode, inputRowType, ctx);
+        } else if (rexNode instanceof RexFieldAccess) {
+            return convertRexFieldAccess((RexFieldAccess) rexNode, inputRowType, ctx);
         } else if (rexNode instanceof RexOver) {
             // Window function expression (e.g., ROW_NUMBER() OVER (...))
             // Must be checked before RexCall since RexOver extends RexCall

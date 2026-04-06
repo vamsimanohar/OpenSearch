@@ -126,12 +126,21 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
     }
 
     private Expression extractIcebergFilter(RelNode node) {
-        Filter filter = findNode(node, Filter.class);
-        if (filter == null) {
-            return null;
+        // Only push down filters directly above a table scan (WHERE clauses).
+        // HAVING filters sit above aggregates and reference computed columns
+        // (e.g. "cnt") that don't exist in the Iceberg table schema.
+        if (node instanceof Filter) {
+            Filter filter = (Filter) node;
+            if (filter.getInput() instanceof org.apache.calcite.rel.core.TableScan) {
+                RelDataType inputRowType = filter.getInput().getRowType();
+                return CalciteToIcebergPredicateConverter.convert(filter.getCondition(), inputRowType);
+            }
         }
-        RelDataType inputRowType = filter.getInput().getRowType();
-        return CalciteToIcebergPredicateConverter.convert(filter.getCondition(), inputRowType);
+        for (RelNode input : node.getInputs()) {
+            Expression result = extractIcebergFilter(input);
+            if (result != null) return result;
+        }
+        return null;
     }
 
     private String extractTableName(RelNode node) {

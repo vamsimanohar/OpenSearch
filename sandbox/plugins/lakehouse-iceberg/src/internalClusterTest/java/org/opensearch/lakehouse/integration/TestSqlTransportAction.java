@@ -24,8 +24,12 @@ import org.apache.calcite.rel.type.RelDataTypeSystem;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.fun.SqlLibrary;
+import org.apache.calcite.sql.fun.SqlLibraryOperatorTableFactory;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParser;
+import org.apache.calcite.sql.util.SqlOperatorTables;
+import org.apache.calcite.sql.validate.SqlConformanceEnum;
 import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
 import org.apache.calcite.sql.validate.SqlValidator;
 import org.apache.calcite.sql.validate.SqlValidatorUtil;
@@ -79,10 +83,11 @@ public class TestSqlTransportAction extends HandledTransportAction<SqlRequest, S
             logger.info("[TestSqlAction] Schema tables: {}", schema.getTableNames());
             logger.info("[TestSqlAction] Schema sub-schemas: {}", schema.getSubSchemaNames());
 
-            // Parse SQL with Lex.JAVA (preserves identifier casing)
+            // Parse SQL — MYSQL lex preserves casing, LENIENT allows % modulo
             SqlParser parser = SqlParser.create(sql, SqlParser.config()
                 .withCaseSensitive(false)
-                .withLex(Lex.JAVA));
+                .withLex(Lex.MYSQL)
+                .withConformance(SqlConformanceEnum.LENIENT));
             SqlNode sqlNode = parser.parseQuery();
 
             // Set up Calcite infrastructure
@@ -96,10 +101,19 @@ public class TestSqlTransportAction extends HandledTransportAction<SqlRequest, S
                 new CalciteConnectionConfigImpl(props)
             );
 
-            // Validate
+            // Validate — combine standard + library operator tables (CONCAT, LENGTH, etc.)
             SqlValidator validator = SqlValidatorUtil.newValidator(
-                SqlStdOperatorTable.instance(), catalogReader, typeFactory,
-                SqlValidator.Config.DEFAULT.withIdentifierExpansion(true)
+                SqlOperatorTables.chain(
+                    SqlStdOperatorTable.instance(),
+                    SqlLibraryOperatorTableFactory.INSTANCE.getOperatorTable(
+                        SqlLibrary.MYSQL,
+                        SqlLibrary.BIG_QUERY,
+                        SqlLibrary.SPARK,
+                        SqlLibrary.POSTGRESQL)),
+                catalogReader, typeFactory,
+                SqlValidator.Config.DEFAULT
+                    .withIdentifierExpansion(true)
+                    .withSqlConformance(SqlConformanceEnum.LENIENT)
             );
             SqlNode validated = validator.validate(sqlNode);
 
