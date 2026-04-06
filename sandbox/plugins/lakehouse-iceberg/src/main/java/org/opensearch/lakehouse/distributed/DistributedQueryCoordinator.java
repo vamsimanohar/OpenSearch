@@ -17,8 +17,11 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.transport.StreamTransportService;
+import org.opensearch.transport.TransportException;
+import org.opensearch.transport.TransportRequestOptions;
 import org.opensearch.transport.TransportResponseHandler;
-import org.opensearch.transport.TransportService;
+import org.opensearch.transport.stream.StreamTransportResponse;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -59,17 +62,17 @@ public class DistributedQueryCoordinator {
     private static final int MIN_FILES_FOR_DISTRIBUTION = 2;
 
     private final ClusterService clusterService;
-    private final TransportService transportService;
+    private final StreamTransportService streamTransportService;
 
     /**
      * Creates a new distributed query coordinator.
      *
-     * @param clusterService   cluster service for discovering data nodes
-     * @param transportService transport service for sending requests to worker nodes
+     * @param clusterService         cluster service for discovering data nodes
+     * @param streamTransportService Arrow Flight streaming transport for sending requests to worker nodes
      */
-    public DistributedQueryCoordinator(ClusterService clusterService, TransportService transportService) {
+    public DistributedQueryCoordinator(ClusterService clusterService, StreamTransportService streamTransportService) {
         this.clusterService = clusterService;
-        this.transportService = transportService;
+        this.streamTransportService = streamTransportService;
     }
 
     /**
@@ -79,6 +82,10 @@ public class DistributedQueryCoordinator {
      * @return {@code true} if the query should be distributed across multiple nodes
      */
     public boolean shouldDistribute(List<IcebergScanPlan.FileInfo> fileInfos) {
+        if (streamTransportService == null) {
+            logger.debug("[DistributedQueryCoordinator] Arrow Flight streaming transport not available, skipping distribution");
+            return false;
+        }
         if (fileInfos == null || fileInfos.size() < MIN_FILES_FOR_DISTRIBUTION) {
             return false;
         }
@@ -102,7 +109,7 @@ public class DistributedQueryCoordinator {
     public Iterable<Object[]> execute(ExternalScanContext scanContext, List<IcebergScanPlan.FileInfo> fileInfos, DistributionPlan plan) {
         List<DiscoveryNode> dataNodes = getDataNodes();
 
-        logger.info("[DistributedQueryCoordinator] Distributing query: table={}, files={}, nodes={}",
+        logger.info("[DistributedQueryCoordinator] Distributing query via Arrow Flight: table={}, files={}, nodes={}",
             scanContext.getTableName(), fileInfos.size(), dataNodes.size());
 
         // Partition files across nodes using size-balanced greedy assignment
@@ -119,9 +126,14 @@ public class DistributedQueryCoordinator {
             }
         }
 
-        // Fan out requests to worker nodes
+        // Connect to all target nodes via Arrow Flight streaming transport
+        for (DiscoveryNode node : dataNodes) {
+            streamTransportService.connectToNode(node);
+        }
+
+        // Fan out streaming requests to worker nodes
         CountDownLatch latch = new CountDownLatch(partitions.size());
-        List<LakehouseWorkerResponse> responses = Collections.synchronizedList(new ArrayList<>(partitions.size()));
+        List<LakehouseWorkerResponse> responses = Collections.synchronizedList(new ArrayList<>());
         AtomicReference<Exception> firstError = new AtomicReference<>();
 
         for (int i = 0; i < partitions.size(); i++) {
@@ -139,13 +151,15 @@ public class DistributedQueryCoordinator {
                 scanContext.getTableName()
             );
 
-            logger.debug("[DistributedQueryCoordinator] Sending request to node [{}]: {} files",
+            logger.debug("[DistributedQueryCoordinator] Sending streaming request to node [{}]: {} files",
                 targetNode.getName(), filePaths.length);
 
-            transportService.sendRequest(
+            // Use Arrow Flight streaming transport — worker sends batched responses
+            streamTransportService.sendRequest(
                 targetNode,
                 LakehouseWorkerAction.NAME,
                 request,
+                TransportRequestOptions.builder().withType(TransportRequestOptions.Type.STREAM).build(),
                 new TransportResponseHandler<LakehouseWorkerResponse>() {
                     @Override
                     public LakehouseWorkerResponse read(StreamInput in) throws IOException {
@@ -154,14 +168,43 @@ public class DistributedQueryCoordinator {
 
                     @Override
                     public void handleResponse(LakehouseWorkerResponse response) {
-                        logger.debug("[DistributedQueryCoordinator] Received response from node [{}]: {} rows",
+                        // Single-response path (should not be called for streaming)
+                        logger.debug("[DistributedQueryCoordinator] Received single response from node [{}]: {} rows",
                             targetNode.getName(), response.getRows().length);
                         responses.add(response);
                         latch.countDown();
                     }
 
                     @Override
-                    public void handleException(org.opensearch.transport.TransportException exp) {
+                    public void handleStreamResponse(StreamTransportResponse<LakehouseWorkerResponse> streamResponse) {
+                        try {
+                            int batchCount = 0;
+                            int totalRows = 0;
+                            LakehouseWorkerResponse batch;
+                            while ((batch = streamResponse.nextResponse()) != null) {
+                                batchCount++;
+                                totalRows += batch.getRows().length;
+                                responses.add(batch);
+                            }
+                            logger.debug("[DistributedQueryCoordinator] Received {} batches ({} rows) from node [{}]",
+                                batchCount, totalRows, targetNode.getName());
+                        } catch (Exception e) {
+                            streamResponse.cancel("Worker processing error", e);
+                            logger.error("[DistributedQueryCoordinator] Stream error from node [{}]", targetNode.getName(), e);
+                            firstError.compareAndSet(null, e);
+                        } finally {
+                            try {
+                                streamResponse.close();
+                            } catch (IOException ioe) {
+                                logger.warn("[DistributedQueryCoordinator] Error closing stream from node [{}]",
+                                    targetNode.getName(), ioe);
+                            }
+                            latch.countDown();
+                        }
+                    }
+
+                    @Override
+                    public void handleException(TransportException exp) {
                         logger.error("[DistributedQueryCoordinator] Worker node [{}] failed", targetNode.getName(), exp);
                         firstError.compareAndSet(null, exp);
                         latch.countDown();
@@ -169,10 +212,6 @@ public class DistributedQueryCoordinator {
 
                     @Override
                     public String executor() {
-                        // Must use GENERIC, not SAME, to avoid transport thread deadlock.
-                        // SAME runs on the transport I/O thread, which can deadlock when
-                        // the coordinator is blocking on latch.await() while responses
-                        // need the same thread pool to be delivered.
                         return ThreadPool.Names.GENERIC;
                     }
                 }
@@ -185,7 +224,7 @@ public class DistributedQueryCoordinator {
             if (!completed) {
                 throw new RuntimeException(
                     "Distributed query timed out after " + WORKER_TIMEOUT_MINUTES + " minutes. "
-                        + "Received " + responses.size() + " of " + partitions.size() + " responses."
+                        + "Received " + responses.size() + " batches from " + partitions.size() + " workers."
                 );
             }
         } catch (InterruptedException e) {
@@ -201,7 +240,7 @@ public class DistributedQueryCoordinator {
             );
         }
 
-        // Merge responses from all workers using the distribution plan
+        // Merge all batches from all workers using the distribution plan
         return DistributedResultMerger.merge(responses, plan);
     }
 

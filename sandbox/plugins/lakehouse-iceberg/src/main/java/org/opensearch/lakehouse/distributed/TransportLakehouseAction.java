@@ -14,12 +14,19 @@ import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.Nullable;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.lakehouse.LakehouseState;
 import org.opensearch.tasks.Task;
+import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.transport.StreamTransportService;
+import org.opensearch.transport.TransportChannel;
 import org.opensearch.transport.TransportService;
+import org.opensearch.transport.stream.StreamErrorCode;
+import org.opensearch.transport.stream.StreamException;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -29,41 +36,69 @@ import java.util.function.Function;
 /**
  * Transport action handler for distributed Iceberg query execution on worker nodes.
  *
+ * <p>Supports two execution paths:
+ * <ul>
+ *   <li><b>Arrow Flight streaming</b> (primary): When {@link StreamTransportService} is available
+ *       (feature flag enabled), registers a streaming handler that sends results in batches
+ *       via {@code channel.sendResponseBatch()} + {@code channel.completeStream()}.</li>
+ *   <li><b>Standard transport</b> (fallback for client().execute()): The {@code doExecute()}
+ *       path handles requests from {@code client().execute()} (used by integration tests
+ *       and validation). This is NOT used for distributed query execution.</li>
+ * </ul>
+ *
  * <p>The coordinator splits an Iceberg file scan across cluster nodes and sends each
  * worker a {@link LakehouseWorkerRequest} containing the assigned file paths, serialized
- * Substrait plan, storage configuration, and table name. This handler:
- * <ol>
- *   <li>Reconstructs an {@link ExternalScanContext} from the request</li>
- *   <li>Delegates to the DataFusion backend via the executor stored in {@link LakehouseState}</li>
- *   <li>Converts the result rows into a {@link LakehouseWorkerResponse}</li>
- * </ol>
+ * Substrait plan, storage configuration, and table name.
  */
 public class TransportLakehouseAction extends HandledTransportAction<LakehouseWorkerRequest, LakehouseWorkerResponse> {
 
     private static final Logger logger = LogManager.getLogger(TransportLakehouseAction.class);
 
+    /** Number of rows per batch when streaming results back to the coordinator. */
+    private static final int STREAM_BATCH_SIZE = 1000;
+
     /**
-     * Guice-injected constructor. Registers this handler with the transport service
-     * under the {@link LakehouseWorkerAction#NAME} action name.
+     * Guice-injected constructor. Registers this handler with both the standard transport
+     * service (for {@code client().execute()} validation) and the Arrow Flight streaming
+     * transport (for distributed query execution).
      *
-     * <p>Also initializes the {@link DistributedQueryCoordinator} and registers it
-     * in {@link LakehouseState}, since this is the earliest point where both
-     * {@code TransportService} and {@code ClusterService} are available via Guice.
-     *
-     * @param transportService transport service for handler registration and distributed dispatch
-     * @param actionFilters    action filters
-     * @param clusterService   cluster service for discovering data nodes
+     * @param transportService       standard transport service for handler registration
+     * @param actionFilters          action filters
+     * @param clusterService         cluster service for discovering data nodes
+     * @param streamTransportService Arrow Flight streaming transport (null if feature flag is off)
      */
     @Inject
-    public TransportLakehouseAction(TransportService transportService, ActionFilters actionFilters, ClusterService clusterService) {
+    public TransportLakehouseAction(
+        TransportService transportService,
+        ActionFilters actionFilters,
+        ClusterService clusterService,
+        @Nullable StreamTransportService streamTransportService
+    ) {
         super(LakehouseWorkerAction.NAME, transportService, actionFilters, LakehouseWorkerRequest::new);
 
-        // Initialize the distributed query coordinator now that both services are available
-        DistributedQueryCoordinator coordinator = new DistributedQueryCoordinator(clusterService, transportService);
+        // Register streaming handler on Arrow Flight transport if available
+        if (streamTransportService != null) {
+            streamTransportService.registerRequestHandler(
+                LakehouseWorkerAction.NAME,
+                ThreadPool.Names.GENERIC,
+                LakehouseWorkerRequest::new,
+                this::handleStreamRequest
+            );
+            logger.info("[TransportLakehouseAction] Registered Arrow Flight streaming handler for distributed queries");
+        } else {
+            logger.info("[TransportLakehouseAction] Arrow Flight streaming not available (feature flag off)");
+        }
+
+        // Initialize the distributed query coordinator with the streaming transport
+        DistributedQueryCoordinator coordinator = new DistributedQueryCoordinator(clusterService, streamTransportService);
         LakehouseState.instance().setDistributedCoordinator(coordinator);
         logger.info("[TransportLakehouseAction] Initialized distributed query coordinator");
     }
 
+    /**
+     * Standard transport handler for {@code client().execute()} requests.
+     * Used by integration tests and request validation. NOT used for distributed execution.
+     */
     @Override
     protected void doExecute(Task task, LakehouseWorkerRequest request, ActionListener<LakehouseWorkerResponse> listener) {
         try {
@@ -99,9 +134,6 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             String[] columnNames = null;
             for (Object[] row : result) {
                 if (columnNames == null && row.length > 0) {
-                    // Column names are not available from Iterable<Object[]> alone.
-                    // They will be inferred from the first batch by the coordinator.
-                    // For now, generate positional column names.
                     columnNames = new String[row.length];
                     for (int i = 0; i < row.length; i++) {
                         columnNames[i] = "col_" + i;
@@ -121,6 +153,95 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
         } catch (Exception e) {
             logger.error("[TransportLakehouseAction] Worker execution failed", e);
             listener.onFailure(e);
+        }
+    }
+
+    /**
+     * Arrow Flight streaming handler for distributed query execution.
+     * Streams results back to the coordinator in batches of {@link #STREAM_BATCH_SIZE} rows.
+     *
+     * @param request the worker request with file paths, Substrait plan, and storage config
+     * @param channel the streaming transport channel for sending batched responses
+     * @param task    the task associated with this request
+     */
+    private void handleStreamRequest(LakehouseWorkerRequest request, TransportChannel channel, Task task) throws IOException {
+        try {
+            String[] filePaths = request.getFilePaths();
+            byte[] substraitPlan = request.getSubstraitPlan();
+            String tableName = request.getTableName();
+
+            logger.info("[TransportLakehouseAction] Streaming worker received request: table={}, files={}, plan={} bytes",
+                tableName, filePaths.length, substraitPlan != null ? substraitPlan.length : 0);
+
+            // Build the ExternalScanContext from the request data
+            ExternalScanContext scanContext = new ExternalScanContext(
+                tableName,
+                Arrays.asList(filePaths),
+                substraitPlan,
+                request.getStorageConfig()
+            );
+
+            // Retrieve the backend executor
+            Function<ExternalScanContext, Iterable<Object[]>> executor = ExternalScanContext.getGlobalBackendExecutor();
+            if (executor == null) {
+                throw new IllegalStateException(
+                    "Backend executor not initialized. The analytics backend must have processed at least one query "
+                    + "before distributed worker execution is available."
+                );
+            }
+
+            // Execute the query via the backend (DataFusion native engine)
+            Iterable<Object[]> result = executor.apply(scanContext);
+
+            // Stream results back in batches
+            List<Object[]> batch = new ArrayList<>(STREAM_BATCH_SIZE);
+            String[] columnNames = null;
+            int totalRows = 0;
+            int batchCount = 0;
+
+            for (Object[] row : result) {
+                if (columnNames == null && row.length > 0) {
+                    columnNames = new String[row.length];
+                    for (int i = 0; i < row.length; i++) {
+                        columnNames[i] = "col_" + i;
+                    }
+                }
+                batch.add(row);
+
+                if (batch.size() >= STREAM_BATCH_SIZE) {
+                    channel.sendResponseBatch(new LakehouseWorkerResponse(
+                        batch.toArray(new Object[0][]), columnNames
+                    ));
+                    totalRows += batch.size();
+                    batchCount++;
+                    batch.clear();
+                }
+            }
+
+            // Send remaining rows
+            if (!batch.isEmpty()) {
+                if (columnNames == null) {
+                    columnNames = new String[0];
+                }
+                channel.sendResponseBatch(new LakehouseWorkerResponse(
+                    batch.toArray(new Object[0][]), columnNames
+                ));
+                totalRows += batch.size();
+                batchCount++;
+            }
+
+            channel.completeStream();
+            logger.info("[TransportLakehouseAction] Streaming worker completed: {} rows in {} batches", totalRows, batchCount);
+
+        } catch (StreamException e) {
+            if (e.getErrorCode() == StreamErrorCode.CANCELLED) {
+                logger.info("[TransportLakehouseAction] Client cancelled stream: {}", e.getMessage());
+            } else {
+                channel.sendResponse(e);
+            }
+        } catch (Exception e) {
+            logger.error("[TransportLakehouseAction] Streaming worker execution failed", e);
+            channel.sendResponse(e);
         }
     }
 }

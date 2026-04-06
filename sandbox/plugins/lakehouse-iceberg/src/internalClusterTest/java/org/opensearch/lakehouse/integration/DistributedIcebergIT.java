@@ -64,9 +64,10 @@ public class DistributedIcebergIT extends OpenSearchIntegTestCase {
     }
 
     /**
-     * Verify that shouldDistribute returns false on a single-node cluster,
-     * even when there are multiple files to process. Single-node clusters
-     * should always fall back to local execution.
+     * Verify that shouldDistribute returns false when Arrow Flight streaming
+     * transport is not available (feature flag off) or on a single-node cluster.
+     * Without FlightStreamPlugin, StreamTransportService is null, so distribution
+     * is disabled regardless of file count or node count.
      */
     public void testShouldNotDistributeOnSingleNode() {
         DistributedQueryCoordinator coordinator = LakehouseState.instance().distributedCoordinator();
@@ -150,6 +151,26 @@ public class DistributedIcebergIT extends OpenSearchIntegTestCase {
         assertEquals("SCAN_ONLY plan should have no group keys", 0, distPlan.getGroupKeyOutputColumns().length);
         assertTrue("SCAN_ONLY plan should have no aggregate merges", distPlan.getAggregateMerges().isEmpty());
         assertNull("SCAN_ONLY plan should have no sort info", distPlan.getSortInfo());
+    }
+
+    /**
+     * Verify that shouldDistribute returns false when Arrow Flight streaming
+     * transport is not available. This test cluster does not load FlightStreamPlugin,
+     * so StreamTransportService is null and distribution must be disabled.
+     */
+    public void testShouldNotDistributeWithoutStreamingTransport() {
+        DistributedQueryCoordinator coordinator = LakehouseState.instance().distributedCoordinator();
+        assertNotNull(coordinator);
+
+        // Even with many files, distribution should be disabled without Arrow Flight
+        List<IcebergScanPlan.FileInfo> manyFiles = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            manyFiles.add(new IcebergScanPlan.FileInfo("s3://bucket/data/file" + i + ".parquet", 1024 * 1024));
+        }
+        assertFalse(
+            "shouldDistribute must return false when Arrow Flight streaming is not available",
+            coordinator.shouldDistribute(manyFiles)
+        );
     }
 
     /**
