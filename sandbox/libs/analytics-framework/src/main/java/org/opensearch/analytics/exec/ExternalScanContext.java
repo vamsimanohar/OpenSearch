@@ -10,12 +10,35 @@ package org.opensearch.analytics.exec;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Carries the resolved scan context from an external table plugin (e.g., Iceberg)
  * to the native execution backend (e.g., DataFusion).
  */
 public class ExternalScanContext {
+
+    /**
+     * Global backend executor for distributed worker queries.
+     * Registered by the plan executor when the backend becomes available.
+     * Used by distributed worker transport actions to execute file scans.
+     */
+    private static volatile Function<ExternalScanContext, Iterable<Object[]>> globalBackendExecutor;
+
+    /**
+     * Registers the global backend executor for distributed worker queries.
+     *
+     * @param executor function that executes an {@link ExternalScanContext} and returns result rows
+     */
+    public static void setGlobalBackendExecutor(Function<ExternalScanContext, Iterable<Object[]>> executor) {
+        globalBackendExecutor = executor;
+    }
+
+    /** Returns the global backend executor, or {@code null} if not yet registered. */
+    public static Function<ExternalScanContext, Iterable<Object[]>> getGlobalBackendExecutor() {
+        return globalBackendExecutor;
+    }
+
     private final String tableName;
     private final List<String> dataFilePaths;
     private final byte[] substraitPlan;

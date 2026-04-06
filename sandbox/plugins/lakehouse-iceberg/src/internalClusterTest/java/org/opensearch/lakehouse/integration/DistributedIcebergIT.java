@@ -89,7 +89,7 @@ public class DistributedIcebergIT extends OpenSearchIntegTestCase {
     public void testTransportActionRegistered() {
         LakehouseWorkerRequest request = new LakehouseWorkerRequest(
             new String[] { "file1.parquet" },
-            new byte[] {},
+            new byte[] { 1, 2, 3 },  // Non-empty to pass validation
             Map.of(),
             "test_table"
         );

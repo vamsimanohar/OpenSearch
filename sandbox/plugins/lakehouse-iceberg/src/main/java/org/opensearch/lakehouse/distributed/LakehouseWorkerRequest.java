@@ -59,7 +59,18 @@ public class LakehouseWorkerRequest extends ActionRequest {
 
     @Override
     public ActionRequestValidationException validate() {
-        return null;
+        ActionRequestValidationException validationException = null;
+        if (filePaths == null || filePaths.length == 0) {
+            validationException = new ActionRequestValidationException();
+            validationException.addValidationError("filePaths must not be null or empty");
+        }
+        if (substraitPlan == null || substraitPlan.length == 0) {
+            if (validationException == null) {
+                validationException = new ActionRequestValidationException();
+            }
+            validationException.addValidationError("substraitPlan must not be null or empty");
+        }
+        return validationException;
     }
 
     @Override

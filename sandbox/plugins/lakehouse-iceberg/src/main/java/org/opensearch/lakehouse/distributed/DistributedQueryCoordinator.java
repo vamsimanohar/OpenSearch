@@ -15,7 +15,6 @@ import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.common.io.stream.StreamInput;
-import org.opensearch.lakehouse.LakehouseState;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportResponseHandler;
@@ -28,7 +27,6 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
 
 /**
  * Orchestrates distributed Iceberg query execution across cluster nodes using
@@ -201,37 +199,6 @@ public class DistributedQueryCoordinator {
 
         // Merge responses from all workers using the distribution plan
         return DistributedResultMerger.merge(responses, plan);
-    }
-
-    /**
-     * Executes a distributed query or falls back to single-node execution.
-     *
-     * <p>This is the main entry point that handles the decision logic:
-     * if distribution is appropriate, it distributes; otherwise it delegates
-     * to the single-node backend executor.
-     *
-     * @param scanContext the scan context
-     * @param fileInfos   file metadata from the scan plan
-     * @param plan        the distribution plan describing how to merge worker results
-     * @return result rows (either from distributed execution or single-node fallback)
-     */
-    public Iterable<Object[]> executeOrFallback(
-        ExternalScanContext scanContext, List<IcebergScanPlan.FileInfo> fileInfos, DistributionPlan plan
-    ) {
-        if (shouldDistribute(fileInfos)) {
-            return execute(scanContext, fileInfos, plan);
-        }
-
-        // Fall back to single-node execution via backend executor
-        logger.info("[DistributedQueryCoordinator] Falling back to single-node execution (nodes={}, files={})",
-            getDataNodes().size(), fileInfos != null ? fileInfos.size() : 0);
-        Function<ExternalScanContext, Iterable<Object[]>> executor = LakehouseState.instance().backendExecutor();
-        if (executor == null) {
-            throw new IllegalStateException(
-                "Cannot execute query: no backend executor registered and distributed execution not applicable"
-            );
-        }
-        return executor.apply(scanContext);
     }
 
     /**

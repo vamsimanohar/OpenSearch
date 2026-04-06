@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.function.Function;
 
+
 /**
  * Transport action handler for distributed Iceberg query execution on worker nodes.
  *
@@ -81,11 +82,12 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
                 request.getStorageConfig()
             );
 
-            // Retrieve the backend executor from LakehouseState
-            Function<ExternalScanContext, Iterable<Object[]>> executor = LakehouseState.instance().backendExecutor();
+            // Retrieve the backend executor from the global registry (set by DefaultPlanExecutor)
+            Function<ExternalScanContext, Iterable<Object[]>> executor = ExternalScanContext.getGlobalBackendExecutor();
             if (executor == null) {
                 throw new IllegalStateException(
-                    "Backend executor not initialized. Ensure the DataFusion backend plugin is loaded and has registered its executor."
+                    "Backend executor not initialized. The analytics backend must have processed at least one query "
+                    + "before distributed worker execution is available."
                 );
             }
 

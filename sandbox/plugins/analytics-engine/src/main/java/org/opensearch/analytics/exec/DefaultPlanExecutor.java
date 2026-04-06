@@ -107,6 +107,11 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
             if (provider == null) {
                 throw new IllegalStateException("No analytics backend registered for remote query execution");
             }
+            // Register the backend executor globally so distributed worker nodes can use it
+            if (ExternalScanContext.getGlobalBackendExecutor() == null) {
+                ExternalScanContext.setGlobalBackendExecutor(provider::executeRemoteQuery);
+                logger.info("[DefaultPlanExecutor] Registered global backend executor [{}] for distributed workers", provider.name());
+            }
             // If the scan context carries pre-computed results from distributed execution,
             // return them directly instead of delegating to the single-node backend.
             Iterable<Object[]> preComputed = scanContext.getPreComputedResults();
