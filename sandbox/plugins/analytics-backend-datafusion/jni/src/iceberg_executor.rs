@@ -20,7 +20,7 @@ use datafusion::{
 };
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use jni::sys::jlong;
-use log::error;
+use log::{debug, error, info};
 use prost::Message;
 use substrait::proto::Plan;
 
@@ -41,6 +41,9 @@ pub async fn execute_iceberg_query(
     plan_bytes: Vec<u8>,
     cpu_executor: DedicatedExecutor,
 ) -> Result<jlong, DataFusionError> {
+    info!("[DataFusion-Rust] execute_iceberg_query: table={}, files={}, plan_bytes={}, bucket={}",
+        table_name, file_paths.len(), plan_bytes.len(), s3_config.bucket);
+
     // Build a RuntimeEnv and optionally register the S3 object store
     let runtime_env = RuntimeEnvBuilder::new().build().map_err(|e| {
         error!("Failed to build runtime env: {}", e);
@@ -110,10 +113,20 @@ pub async fn execute_iceberg_query(
     let substrait_plan = Plan::decode(plan_bytes.as_slice()).map_err(|e| {
         DataFusionError::Execution(format!("Failed to decode Substrait: {}", e))
     })?;
+    debug!("[DataFusion-Rust] Substrait plan decoded: {} relations",
+        substrait_plan.relations.len());
 
     let logical_plan = from_substrait_plan(&ctx.state(), &substrait_plan).await?;
+    info!("[DataFusion-Rust] Logical plan:");
+    for line in format!("{}", logical_plan.display_indent()).lines() {
+        info!("[DataFusion-Rust]   {}", line);
+    }
     let dataframe = ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
+    info!("[DataFusion-Rust] Physical plan:");
+    for line in format!("{}", datafusion::physical_plan::displayable(physical_plan.as_ref()).indent(true)).lines() {
+        info!("[DataFusion-Rust]   {}", line);
+    }
 
     let df_stream = execute_stream(physical_plan, ctx.task_ctx()).map_err(|e| {
         error!("Failed to create execution stream: {}", e);

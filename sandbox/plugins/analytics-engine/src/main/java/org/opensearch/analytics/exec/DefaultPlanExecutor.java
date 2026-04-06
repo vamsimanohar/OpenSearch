@@ -86,8 +86,10 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
     @Override
     public Iterable<Object[]> execute(RelNode logicalFragment, Object context) {
         // Route external (non-OpenSearch) tables through the native backend
+        logger.debug("[DefaultPlanExecutor] Executing plan:\n{}", logicalFragment.explain());
         ExternalTable externalTable = extractExternalTable(logicalFragment);
         if (externalTable != null) {
+            logger.debug("[DefaultPlanExecutor] Detected external table: type={}", externalTable.getClass().getSimpleName());
             if (externalTableExecutor == null) {
                 throw new IllegalStateException("Query references an external table but no ExternalTableExecutor is registered");
             }
@@ -96,6 +98,11 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
             if (scanContext == null) {
                 throw new IllegalStateException("ExternalTableExecutor.prepareScan() returned null for " + externalTable);
             }
+            logger.debug("[DefaultPlanExecutor] ScanContext: table={}, files={}, substraitBytes={}, storageConfigKeys={}",
+                scanContext.getTableName(),
+                scanContext.getDataFilePaths() != null ? scanContext.getDataFilePaths().size() : 0,
+                scanContext.getSubstraitPlan() != null ? scanContext.getSubstraitPlan().length : 0,
+                scanContext.getStorageConfig() != null ? scanContext.getStorageConfig().keySet() : "null");
             AnalyticsSearchBackendPlugin provider = selectBackEnd();
             if (provider == null) {
                 throw new IllegalStateException("No analytics backend registered for remote query execution");

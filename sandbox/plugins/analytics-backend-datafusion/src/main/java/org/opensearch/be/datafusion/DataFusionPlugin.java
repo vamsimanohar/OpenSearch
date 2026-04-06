@@ -195,6 +195,20 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         String tableName = scanContext.getTableName();
         byte[] substraitPlan = scanContext.getSubstraitPlan();
 
+        logger.debug("[DataFusionPlugin] executeRemoteQuery: table={}, files={}, substraitPlan={} bytes",
+            tableName, filePaths.length, substraitPlan != null ? substraitPlan.length : 0);
+        logger.debug("[DataFusionPlugin] S3 config: region={}, bucket={}, credentials={}, sessionToken={}, endpoint={}",
+            s3Region, s3Bucket,
+            s3AccessKeyId != null ? "present" : "absent",
+            s3SessionToken != null ? "present" : "absent",
+            s3Endpoint != null ? s3Endpoint : "default");
+        if (logger.isDebugEnabled() && filePaths.length > 0) {
+            logger.debug("[DataFusionPlugin] First file path: {}", filePaths[0]);
+            if (filePaths.length > 1) {
+                logger.debug("[DataFusionPlugin] Last file path: {}", filePaths[filePaths.length - 1]);
+            }
+        }
+
         // Call DataFusion via JNI — returns a stream pointer
         CompletableFuture<Long> future = new CompletableFuture<>();
         NativeBridge.executeIcebergQueryAsync(
@@ -209,10 +223,13 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
             }
         );
 
+        logger.debug("[DataFusionPlugin] Waiting for JNI async result...");
         long streamPtr;
         try {
             streamPtr = future.join();
+            logger.debug("[DataFusionPlugin] JNI returned stream pointer: {}", streamPtr);
         } catch (Exception e) {
+            logger.error("[DataFusionPlugin] JNI execution failed: {}", e.getMessage(), e);
             throw new RuntimeException("Iceberg query execution failed via DataFusion", e);
         }
 
@@ -223,11 +240,15 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         DatafusionResultStream resultStream = new DatafusionResultStream(streamHandle, allocator);
 
         List<Object[]> rows = new ArrayList<>();
+        int batchCount = 0;
         try {
             Iterator<EngineResultBatch> batchIterator = resultStream.iterator();
             while (batchIterator.hasNext()) {
                 EngineResultBatch batch = batchIterator.next();
+                batchCount++;
                 List<String> fieldNames = batch.getFieldNames();
+                logger.debug("[DataFusionPlugin] Arrow batch #{}: {} rows, {} columns ({})",
+                    batchCount, batch.getRowCount(), fieldNames.size(), fieldNames);
                 for (int row = 0; row < batch.getRowCount(); row++) {
                     Object[] rowValues = new Object[fieldNames.size()];
                     for (int col = 0; col < fieldNames.size(); col++) {
@@ -244,7 +265,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         } finally {
             resultStream.close();
         }
-        logger.info("[DataFusionPlugin] Iceberg query returned {} rows via native execution", rows.size());
+        logger.info("[DataFusionPlugin] Iceberg query returned {} rows in {} batches via native execution", rows.size(), batchCount);
         return rows;
     }
 

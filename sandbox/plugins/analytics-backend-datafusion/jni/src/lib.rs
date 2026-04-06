@@ -504,5 +504,9 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_initLo
     mut env: JNIEnv,
     _class: JClass,
 ) {
-    // TODO: wire Rust→Java logging bridge
+    // Initialize env_logger — reads RUST_LOG env var for filtering.
+    // Default to info level for our crate if RUST_LOG is not set.
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("opensearch_datafusion_jni=info,datafusion=warn")
+    ).try_init();
 }

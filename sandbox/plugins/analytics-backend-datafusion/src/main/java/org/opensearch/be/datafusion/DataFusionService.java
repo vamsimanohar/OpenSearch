@@ -62,6 +62,7 @@ public class DataFusionService extends AbstractLifecycleComponent {
     protected void doStart() {
         logger.debug("Starting DataFusion service");
         NativeBridge.initTokioRuntimeManager(cpuThreads);
+        NativeBridge.initLogger();
         logger.debug("Tokio runtime manager initialized with {} CPU threads", cpuThreads);
 
         long ptr = NativeBridge.createGlobalRuntime(memoryPoolLimit, 0L, spillDirectory, spillMemoryLimit);

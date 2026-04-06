@@ -25,6 +25,9 @@ import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -67,6 +70,8 @@ import io.substrait.proto.Type;
  */
 public final class CalciteSubstraitConverter {
 
+    private static final Logger logger = LogManager.getLogger(CalciteSubstraitConverter.class);
+
     /** URI anchor for the Substrait comparison functions extension. */
     private static final int FUNCTIONS_URI_ANCHOR = 1;
 
@@ -90,14 +95,18 @@ public final class CalciteSubstraitConverter {
      * @throws IOException if serialization fails
      */
     public static byte[] toSubstrait(RelNode relNode) throws IOException {
+        logger.debug("[SubstraitConverter] Converting Calcite plan to Substrait. Root node: {}", relNode.getClass().getSimpleName());
         ConversionContext ctx = new ConversionContext();
         Rel rel = convertRel(relNode, ctx);
 
         // Build output field names from the top-level row type
         RelRoot.Builder rootBuilder = RelRoot.newBuilder().setInput(rel);
+        List<String> outputFields = new ArrayList<>();
         for (RelDataTypeField field : relNode.getRowType().getFieldList()) {
             rootBuilder.addNames(field.getName());
+            outputFields.add(field.getName());
         }
+        logger.debug("[SubstraitConverter] Output fields: {}", outputFields);
 
         Plan.Builder planBuilder = Plan.newBuilder()
             .addRelations(PlanRel.newBuilder().setRoot(rootBuilder.build()));
@@ -115,13 +124,22 @@ public final class CalciteSubstraitConverter {
             planBuilder.addExtensions(decl);
         }
 
-        return planBuilder.build().toByteArray();
+        Plan plan = planBuilder.build();
+        byte[] bytes = plan.toByteArray();
+        logger.debug("[SubstraitConverter] Substrait plan: {} bytes, {} extension URIs, {} function declarations",
+            bytes.length, ctx.extensionUris.size(), ctx.extensionDeclarations.size());
+        if (logger.isDebugEnabled()) {
+            logger.debug("[SubstraitConverter] Readable Substrait plan:\n{}", plan);
+        }
+        return bytes;
     }
 
     /**
      * Recursively converts a Calcite RelNode to a Substrait Rel.
      */
     static Rel convertRel(RelNode relNode, ConversionContext ctx) {
+        logger.debug("[SubstraitConverter] Converting node: {} -> {}", relNode.getClass().getSimpleName(),
+            relNode.getRowType());
         if (relNode instanceof TableScan) {
             return convertTableScan((TableScan) relNode);
         } else if (relNode instanceof LogicalFilter) {
