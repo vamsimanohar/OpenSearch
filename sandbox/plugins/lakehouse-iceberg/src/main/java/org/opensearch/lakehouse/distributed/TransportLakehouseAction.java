@@ -98,6 +98,10 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
     /**
      * Standard transport handler for {@code client().execute()} requests.
      * Used by integration tests and request validation. NOT used for distributed execution.
+     *
+     * @param task     the task for this request
+     * @param request  the worker request
+     * @param listener the action listener for the response
      */
     @Override
     protected void doExecute(Task task, LakehouseWorkerRequest request, ActionListener<LakehouseWorkerResponse> listener) {
