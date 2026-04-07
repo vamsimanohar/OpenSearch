@@ -155,26 +155,35 @@ public class GenerateTestData {
             records.add(r);
         }
 
-        // Write Parquet data
+        // Write Parquet data across multiple files for distributed query testing
+        int numFiles = 4;
+        int recordsPerFile = records.size() / numFiles;
         GenericAppenderFactory appenderFactory = new GenericAppenderFactory(schema);
-        String dataFilePath = table.location() + "/data/test-data-00000.parquet";
-        OutputFile outputFile = table.io().newOutputFile(dataFilePath);
 
-        DataWriter<Record> writer = appenderFactory.newDataWriter(
-            table.encryption().encrypt(outputFile),
-            FileFormat.PARQUET,
-            null
-        );
+        var appendOp = table.newAppend();
+        for (int fileIdx = 0; fileIdx < numFiles; fileIdx++) {
+            String dataFilePath = table.location() + "/data/test-data-" + String.format("%05d", fileIdx) + ".parquet";
+            OutputFile outputFile = table.io().newOutputFile(dataFilePath);
 
-        try {
-            for (GenericRecord r : records) {
-                writer.write(r);
+            DataWriter<Record> writer = appenderFactory.newDataWriter(
+                table.encryption().encrypt(outputFile),
+                FileFormat.PARQUET,
+                null
+            );
+
+            int start = fileIdx * recordsPerFile;
+            int end = (fileIdx == numFiles - 1) ? records.size() : start + recordsPerFile;
+            try {
+                for (int j = start; j < end; j++) {
+                    writer.write(records.get(j));
+                }
+            } finally {
+                writer.close();
             }
-        } finally {
-            writer.close();
+            appendOp.appendFile(writer.toDataFile());
+            System.out.println("Written file " + fileIdx + ": " + (end - start) + " records");
         }
-
-        table.newAppend().appendFile(writer.toDataFile()).commit();
+        appendOp.commit();
         table.refresh();
 
         // Verify

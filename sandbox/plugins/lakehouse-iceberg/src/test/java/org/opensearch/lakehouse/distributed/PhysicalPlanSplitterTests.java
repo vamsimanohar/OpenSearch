@@ -248,7 +248,8 @@ public class PhysicalPlanSplitterTests extends OpenSearchTestCase {
 
     public void testSplitPlanToString() {
         PhysicalPlanSplitter.SplitPlan plan = new PhysicalPlanSplitter.SplitPlan(
-            "SELECT * FROM t", "SELECT * FROM __partial", true
+            "SELECT * FROM t", "SELECT * FROM __partial", true,
+            PhysicalPlanSplitter.MergeType.PASS_THROUGH, 0, null, null, -1
         );
 
         String str = plan.toString();
@@ -258,7 +259,9 @@ public class PhysicalPlanSplitterTests extends OpenSearchTestCase {
     }
 
     public void testCannotDistributeReturnsNullSql() {
-        PhysicalPlanSplitter.SplitPlan plan = new PhysicalPlanSplitter.SplitPlan(null, null, false);
+        PhysicalPlanSplitter.SplitPlan plan = new PhysicalPlanSplitter.SplitPlan(
+            null, null, false, null, 0, null, null, -1
+        );
 
         assertFalse("Should not be distributable", plan.canDistribute());
         assertNull("Worker SQL should be null", plan.getWorkerSql());

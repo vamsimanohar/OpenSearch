@@ -87,10 +87,13 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             logger.info("[TransportLakehouseAction] Arrow Flight streaming not available (feature flag off)");
         }
 
-        // Initialize the distributed query coordinator with the streaming transport
-        DistributedQueryCoordinator coordinator = new DistributedQueryCoordinator(clusterService, streamTransportService);
+        // Initialize the distributed query coordinator with both transport types
+        DistributedQueryCoordinator coordinator = new DistributedQueryCoordinator(
+            clusterService, transportService, streamTransportService
+        );
         LakehouseState.instance().setDistributedCoordinator(coordinator);
-        logger.info("[TransportLakehouseAction] Initialized distributed query coordinator");
+        logger.info("[TransportLakehouseAction] Initialized distributed query coordinator (streaming={})",
+            streamTransportService != null);
     }
 
     /**

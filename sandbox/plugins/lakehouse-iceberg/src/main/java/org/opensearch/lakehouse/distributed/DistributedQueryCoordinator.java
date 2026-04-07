@@ -10,7 +10,6 @@ package org.opensearch.lakehouse.distributed;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.service.ClusterService;
@@ -21,6 +20,7 @@ import org.opensearch.transport.StreamTransportService;
 import org.opensearch.transport.TransportException;
 import org.opensearch.transport.TransportRequestOptions;
 import org.opensearch.transport.TransportResponseHandler;
+import org.opensearch.transport.TransportService;
 import org.opensearch.transport.stream.StreamTransportResponse;
 
 import java.io.IOException;
@@ -31,51 +31,42 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
 
 /**
  * Orchestrates distributed Iceberg query execution across cluster nodes using
  * a proper two-phase approach: physical plan splitting + scatter-gather.
  *
- * <p>Unlike the naive scatter-gather approach (which sends the FULL query to every
- * worker), this coordinator uses {@link PhysicalPlanSplitter} to generate:
+ * <p>Supports two transport modes:
  * <ul>
- *   <li><b>Worker SQL</b>: partial aggregation, scan + filter + GROUP BY (no ORDER BY/LIMIT)</li>
- *   <li><b>Coordinator SQL</b>: final aggregation + ORDER BY + LIMIT on merged partial results</li>
+ *   <li><b>Arrow Flight streaming</b> (preferred): batched streaming via {@link StreamTransportService}</li>
+ *   <li><b>Standard transport</b> (fallback): single-response via {@link TransportService}</li>
  * </ul>
- *
- * <p>The execution flow is:
- * <ol>
- *   <li>Split the plan into worker and coordinator SQL via {@link PhysicalPlanSplitter}</li>
- *   <li>Partition files across N worker nodes via {@link FilePartitioner}</li>
- *   <li>Send {workerSql, filePaths[], storageConfig} to each worker via Arrow Flight</li>
- *   <li>Workers execute workerSql via DataFusion, stream Object[][] back</li>
- *   <li>Coordinator collects all worker results</li>
- *   <li>Coordinator registers partial results as a temporary table in DataFusion</li>
- *   <li>Coordinator executes coordinatorSql via DataFusion to produce final results</li>
- * </ol>
  */
 public class DistributedQueryCoordinator {
 
     private static final Logger logger = LogManager.getLogger(DistributedQueryCoordinator.class);
 
-    /** Maximum time to wait for all worker responses. */
     private static final long WORKER_TIMEOUT_MINUTES = 5;
-
-    /** Minimum number of files required before distributing (avoid overhead for trivial scans). */
     private static final int MIN_FILES_FOR_DISTRIBUTION = 2;
 
     private final ClusterService clusterService;
+    private final TransportService transportService;
     private final StreamTransportService streamTransportService;
 
     /**
      * Creates a new distributed query coordinator.
      *
      * @param clusterService         cluster service for discovering data nodes
-     * @param streamTransportService Arrow Flight streaming transport for sending requests to worker nodes
+     * @param transportService       standard transport for single-response requests
+     * @param streamTransportService Arrow Flight streaming transport (may be null)
      */
-    public DistributedQueryCoordinator(ClusterService clusterService, StreamTransportService streamTransportService) {
+    public DistributedQueryCoordinator(
+        ClusterService clusterService,
+        TransportService transportService,
+        StreamTransportService streamTransportService
+    ) {
         this.clusterService = clusterService;
+        this.transportService = transportService;
         this.streamTransportService = streamTransportService;
     }
 
@@ -86,8 +77,8 @@ public class DistributedQueryCoordinator {
      * @return {@code true} if the query should be distributed across multiple nodes
      */
     public boolean shouldDistribute(List<IcebergScanPlan.FileInfo> fileInfos) {
-        if (streamTransportService == null) {
-            logger.debug("[DistributedQueryCoordinator] Arrow Flight streaming transport not available, skipping distribution");
+        if (transportService == null && streamTransportService == null) {
+            logger.debug("[DistributedQueryCoordinator] No transport available, skipping distribution");
             return false;
         }
         if (fileInfos == null || fileInfos.size() < MIN_FILES_FOR_DISTRIBUTION) {
@@ -100,14 +91,11 @@ public class DistributedQueryCoordinator {
     /**
      * Executes a distributed query using the split plan approach.
      *
-     * <p>Sends the worker SQL to each node's assigned file subset, collects partial
-     * results, then executes the coordinator SQL to produce the final result.
-     *
      * @param splitPlan     the split plan from {@link PhysicalPlanSplitter}
      * @param fileInfos     file metadata from the Iceberg scan plan
      * @param storageConfig S3/storage configuration for workers
      * @param tableName     the table name for DataFusion registration
-     * @return final result rows
+     * @return final result rows after coordinator merge
      */
     public Iterable<Object[]> execute(
         PhysicalPlanSplitter.SplitPlan splitPlan,
@@ -120,7 +108,6 @@ public class DistributedQueryCoordinator {
         logger.info("[DistributedQueryCoordinator] Distributing query: table={}, files={}, nodes={}, workerSql={}",
             tableName, fileInfos.size(), dataNodes.size(), splitPlan.getWorkerSql());
 
-        // Partition files across nodes using size-balanced greedy assignment
         List<List<IcebergScanPlan.FileInfo>> partitions = FilePartitioner.partition(fileInfos, dataNodes.size());
 
         logger.info("[DistributedQueryCoordinator] Created {} partitions across {} data nodes",
@@ -134,35 +121,50 @@ public class DistributedQueryCoordinator {
             }
         }
 
-        // Connect to all target nodes via Arrow Flight streaming transport
+        List<LakehouseWorkerResponse> responses;
+
+        if (streamTransportService != null) {
+            responses = fanOutViaStreaming(partitions, dataNodes, splitPlan, storageConfig, tableName);
+        } else {
+            responses = fanOutViaStandard(partitions, dataNodes, splitPlan, storageConfig, tableName);
+        }
+
+        // Collect all partial results
+        List<Object[]> partialResults = new ArrayList<>();
+        for (LakehouseWorkerResponse response : responses) {
+            for (Object[] row : response.getRows()) {
+                partialResults.add(row);
+            }
+        }
+
+        logger.info("[DistributedQueryCoordinator] Collected {} partial rows from {} workers. Merging with type: {}",
+            partialResults.size(), partitions.size(), splitPlan.getMergeType());
+
+        return CoordinatorMerger.merge(partialResults, splitPlan);
+    }
+
+    /**
+     * Fan out via Arrow Flight streaming transport (batched responses).
+     */
+    private List<LakehouseWorkerResponse> fanOutViaStreaming(
+        List<List<IcebergScanPlan.FileInfo>> partitions,
+        List<DiscoveryNode> dataNodes,
+        PhysicalPlanSplitter.SplitPlan splitPlan,
+        Map<String, String> storageConfig,
+        String tableName
+    ) {
         for (DiscoveryNode node : dataNodes) {
             streamTransportService.connectToNode(node);
         }
 
-        // Fan out streaming requests to worker nodes
         CountDownLatch latch = new CountDownLatch(partitions.size());
         List<LakehouseWorkerResponse> responses = Collections.synchronizedList(new ArrayList<>());
         AtomicReference<Exception> firstError = new AtomicReference<>();
 
         for (int i = 0; i < partitions.size(); i++) {
-            List<IcebergScanPlan.FileInfo> partition = partitions.get(i);
             DiscoveryNode targetNode = dataNodes.get(i);
+            LakehouseWorkerRequest request = buildRequest(partitions.get(i), splitPlan, storageConfig, tableName);
 
-            String[] filePaths = partition.stream()
-                .map(IcebergScanPlan.FileInfo::getPath)
-                .toArray(String[]::new);
-
-            LakehouseWorkerRequest request = new LakehouseWorkerRequest(
-                filePaths,
-                splitPlan.getWorkerSql(),
-                storageConfig,
-                tableName
-            );
-
-            logger.debug("[DistributedQueryCoordinator] Sending streaming request to node [{}]: {} files, sql={}",
-                targetNode.getName(), filePaths.length, splitPlan.getWorkerSql());
-
-            // Use Arrow Flight streaming transport
             streamTransportService.sendRequest(
                 targetNode,
                 LakehouseWorkerAction.NAME,
@@ -176,8 +178,6 @@ public class DistributedQueryCoordinator {
 
                     @Override
                     public void handleResponse(LakehouseWorkerResponse response) {
-                        logger.debug("[DistributedQueryCoordinator] Received single response from node [{}]: {} rows",
-                            targetNode.getName(), response.getRows().length);
                         responses.add(response);
                         latch.countDown();
                     }
@@ -185,34 +185,22 @@ public class DistributedQueryCoordinator {
                     @Override
                     public void handleStreamResponse(StreamTransportResponse<LakehouseWorkerResponse> streamResponse) {
                         try {
-                            int batchCount = 0;
-                            int totalRows = 0;
                             LakehouseWorkerResponse batch;
                             while ((batch = streamResponse.nextResponse()) != null) {
-                                batchCount++;
-                                totalRows += batch.getRows().length;
                                 responses.add(batch);
                             }
-                            logger.debug("[DistributedQueryCoordinator] Received {} batches ({} rows) from node [{}]",
-                                batchCount, totalRows, targetNode.getName());
                         } catch (Exception e) {
                             streamResponse.cancel("Worker processing error", e);
-                            logger.error("[DistributedQueryCoordinator] Stream error from node [{}]", targetNode.getName(), e);
                             firstError.compareAndSet(null, e);
                         } finally {
-                            try {
-                                streamResponse.close();
-                            } catch (IOException ioe) {
-                                logger.warn("[DistributedQueryCoordinator] Error closing stream from node [{}]",
-                                    targetNode.getName(), ioe);
-                            }
+                            try { streamResponse.close(); } catch (IOException ignored) {}
                             latch.countDown();
                         }
                     }
 
                     @Override
                     public void handleException(TransportException exp) {
-                        logger.error("[DistributedQueryCoordinator] Worker node [{}] failed", targetNode.getName(), exp);
+                        logger.error("[DistributedQueryCoordinator] Worker [{}] failed", targetNode.getName(), exp);
                         firstError.compareAndSet(null, exp);
                         latch.countDown();
                     }
@@ -225,13 +213,87 @@ public class DistributedQueryCoordinator {
             );
         }
 
-        // Wait for all workers to complete
+        waitForWorkers(latch, firstError, partitions.size(), responses.size());
+        return responses;
+    }
+
+    /**
+     * Fan out via standard transport (single response per worker).
+     */
+    private List<LakehouseWorkerResponse> fanOutViaStandard(
+        List<List<IcebergScanPlan.FileInfo>> partitions,
+        List<DiscoveryNode> dataNodes,
+        PhysicalPlanSplitter.SplitPlan splitPlan,
+        Map<String, String> storageConfig,
+        String tableName
+    ) {
+        CountDownLatch latch = new CountDownLatch(partitions.size());
+        List<LakehouseWorkerResponse> responses = Collections.synchronizedList(new ArrayList<>());
+        AtomicReference<Exception> firstError = new AtomicReference<>();
+
+        for (int i = 0; i < partitions.size(); i++) {
+            DiscoveryNode targetNode = dataNodes.get(i);
+            LakehouseWorkerRequest request = buildRequest(partitions.get(i), splitPlan, storageConfig, tableName);
+
+            logger.info("[DistributedQueryCoordinator] Sending standard request to node [{}]: {} files",
+                targetNode.getName(), partitions.get(i).size());
+
+            transportService.sendRequest(
+                targetNode,
+                LakehouseWorkerAction.NAME,
+                request,
+                new TransportResponseHandler<LakehouseWorkerResponse>() {
+                    @Override
+                    public LakehouseWorkerResponse read(StreamInput in) throws IOException {
+                        return new LakehouseWorkerResponse(in);
+                    }
+
+                    @Override
+                    public void handleResponse(LakehouseWorkerResponse response) {
+                        logger.info("[DistributedQueryCoordinator] Received response from [{}]: {} rows",
+                            targetNode.getName(), response.getRows().length);
+                        responses.add(response);
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public void handleException(TransportException exp) {
+                        logger.error("[DistributedQueryCoordinator] Worker [{}] failed", targetNode.getName(), exp);
+                        firstError.compareAndSet(null, exp);
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public String executor() {
+                        return ThreadPool.Names.GENERIC;
+                    }
+                }
+            );
+        }
+
+        waitForWorkers(latch, firstError, partitions.size(), responses.size());
+        return responses;
+    }
+
+    private LakehouseWorkerRequest buildRequest(
+        List<IcebergScanPlan.FileInfo> partition,
+        PhysicalPlanSplitter.SplitPlan splitPlan,
+        Map<String, String> storageConfig,
+        String tableName
+    ) {
+        String[] filePaths = partition.stream()
+            .map(IcebergScanPlan.FileInfo::getPath)
+            .toArray(String[]::new);
+        return new LakehouseWorkerRequest(filePaths, splitPlan.getWorkerSql(), storageConfig, tableName);
+    }
+
+    private void waitForWorkers(CountDownLatch latch, AtomicReference<Exception> firstError, int workerCount, int responseCount) {
         try {
             boolean completed = latch.await(WORKER_TIMEOUT_MINUTES, TimeUnit.MINUTES);
             if (!completed) {
                 throw new RuntimeException(
                     "Distributed query timed out after " + WORKER_TIMEOUT_MINUTES + " minutes. "
-                        + "Received " + responses.size() + " batches from " + partitions.size() + " workers."
+                        + "Received " + responseCount + " responses from " + workerCount + " workers."
                 );
             }
         } catch (InterruptedException e) {
@@ -239,81 +301,12 @@ public class DistributedQueryCoordinator {
             throw new RuntimeException("Distributed query interrupted", e);
         }
 
-        // Check for errors
         Exception error = firstError.get();
         if (error != null) {
             throw new RuntimeException("Distributed query failed on one or more worker nodes", error);
         }
-
-        // Collect all partial results from workers
-        List<Object[]> partialResults = new ArrayList<>();
-        String[] columnNames = null;
-        for (LakehouseWorkerResponse response : responses) {
-            if (columnNames == null && response.getColumnNames().length > 0) {
-                columnNames = response.getColumnNames();
-            }
-            for (Object[] row : response.getRows()) {
-                partialResults.add(row);
-            }
-        }
-
-        logger.info("[DistributedQueryCoordinator] Collected {} partial rows from {} workers. Executing coordinator SQL: {}",
-            partialResults.size(), partitions.size(), splitPlan.getCoordinatorSql());
-
-        // Execute coordinator SQL against partial results via the local DataFusion backend.
-        // Register partial results as a temporary table named "__partial", then execute coordinatorSql.
-        return executeCoordinatorPhase(splitPlan.getCoordinatorSql(), partialResults, columnNames, tableName);
     }
 
-    /**
-     * Executes the coordinator phase: registers partial worker results as a
-     * temporary table and runs the coordinator SQL against it.
-     *
-     * <p>For now, this uses the global backend executor with the partial results
-     * registered as a virtual table. In the future, this will use a dedicated
-     * DataFusion Rust function that accepts Arrow RecordBatches directly.
-     *
-     * @param coordinatorSql the SQL to execute on partial results
-     * @param partialResults the merged partial rows from all workers
-     * @param columnNames    column names from the worker results
-     * @param originalTable  the original table name (not used in coordinator SQL)
-     * @return final result rows
-     */
-    private Iterable<Object[]> executeCoordinatorPhase(
-        String coordinatorSql, List<Object[]> partialResults, String[] columnNames, String originalTable
-    ) {
-        // Use the global backend executor to run coordinator SQL.
-        // Build a scan context that will register partial results as "__partial".
-        Function<ExternalScanContext, Iterable<Object[]>> executor = ExternalScanContext.getGlobalBackendExecutor();
-        if (executor == null) {
-            logger.warn("[DistributedQueryCoordinator] No backend executor available for coordinator phase, returning partial results");
-            return partialResults;
-        }
-
-        // For now, return partial results directly if coordinator SQL is just a pass-through
-        if (coordinatorSql.equals("SELECT * FROM " + PhysicalPlanSplitter.PARTIAL_TABLE)) {
-            logger.info("[DistributedQueryCoordinator] Coordinator SQL is pass-through, returning {} partial rows", partialResults.size());
-            return partialResults;
-        }
-
-        // For aggregate queries, we would ideally register the partial results as a
-        // MemTable in DataFusion and execute coordinatorSql against it. This requires
-        // a new JNI API endpoint. For now, return partial results with a warning.
-        //
-        // TODO: Implement MemTable registration + coordinator SQL execution in Rust
-        //   1. NativeBridge.registerMemTable(runtimePtr, "__partial", columnNames, rows)
-        //   2. NativeBridge.executeSql(runtimePtr, coordinatorSql) -> streamPtr
-        //   3. Read stream as usual
-        logger.warn("[DistributedQueryCoordinator] Coordinator SQL execution not yet implemented via DataFusion. "
-            + "Returning partial results directly. SQL would be: {}", coordinatorSql);
-        return partialResults;
-    }
-
-    /**
-     * Returns the current data nodes in the cluster.
-     *
-     * @return list of data nodes (may include the local node)
-     */
     private List<DiscoveryNode> getDataNodes() {
         DiscoveryNodes nodes = clusterService.state().nodes();
         return new ArrayList<>(nodes.getDataNodes().values());

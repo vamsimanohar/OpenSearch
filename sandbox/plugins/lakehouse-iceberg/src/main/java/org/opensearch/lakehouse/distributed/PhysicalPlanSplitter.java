@@ -58,6 +58,60 @@ public final class PhysicalPlanSplitter {
 
     private PhysicalPlanSplitter() {}
 
+    /** How the coordinator should merge partial worker results. */
+    public enum MergeType {
+        /** No aggregation — just return concatenated partial results. */
+        PASS_THROUGH,
+        /** Scan-only query with ORDER BY + LIMIT — sort and limit in Java. */
+        SCAN_WITH_SORT,
+        /** Aggregate query — re-aggregate using HashMap merge, then sort + limit. */
+        AGGREGATE
+    }
+
+    /** Merge operation for a single output column. */
+    public enum MergeOp {
+        /** Pass through (group key or identity column). */
+        IDENTITY,
+        /** SUM the partial values. */
+        SUM,
+        /** MIN of partial values. */
+        MIN,
+        /** MAX of partial values. */
+        MAX
+    }
+
+    /** Describes one output column of the coordinator merge. */
+    public static class MergeColumn {
+        final MergeOp op;
+        final int sourceIndex;       // index in the partial result row
+        final int sourceIndex2;      // -1 unless AVG (second source for count)
+        final boolean isAvg;         // if true, output = SUM(sourceIndex) / SUM(sourceIndex2)
+
+        MergeColumn(MergeOp op, int sourceIndex) {
+            this(op, sourceIndex, -1, false);
+        }
+
+        MergeColumn(MergeOp op, int sourceIndex, int sourceIndex2, boolean isAvg) {
+            this.op = op;
+            this.sourceIndex = sourceIndex;
+            this.sourceIndex2 = sourceIndex2;
+            this.isAvg = isAvg;
+        }
+    }
+
+    /** Sort direction for coordinator ORDER BY. */
+    public static class SortColumn {
+        final int outputIndex;       // index in the merged output row
+        final boolean descending;
+        final boolean nullsFirst;
+
+        SortColumn(int outputIndex, boolean descending, boolean nullsFirst) {
+            this.outputIndex = outputIndex;
+            this.descending = descending;
+            this.nullsFirst = nullsFirst;
+        }
+    }
+
     /**
      * Result of splitting a query plan into worker and coordinator SQL.
      */
@@ -65,18 +119,23 @@ public final class PhysicalPlanSplitter {
         private final String workerSql;
         private final String coordinatorSql;
         private final boolean canDistribute;
+        private final MergeType mergeType;
+        private final int groupKeyCount;
+        private final List<MergeColumn> mergeColumns;
+        private final List<SortColumn> sortColumns;
+        private final long limit;
 
-        /**
-         * Creates a new split plan.
-         *
-         * @param workerSql      SQL for workers (null if cannot distribute)
-         * @param coordinatorSql SQL for coordinator (null if cannot distribute)
-         * @param canDistribute  whether the query can be distributed
-         */
-        public SplitPlan(String workerSql, String coordinatorSql, boolean canDistribute) {
+        SplitPlan(String workerSql, String coordinatorSql, boolean canDistribute,
+                  MergeType mergeType, int groupKeyCount, List<MergeColumn> mergeColumns,
+                  List<SortColumn> sortColumns, long limit) {
             this.workerSql = workerSql;
             this.coordinatorSql = coordinatorSql;
             this.canDistribute = canDistribute;
+            this.mergeType = mergeType;
+            this.groupKeyCount = groupKeyCount;
+            this.mergeColumns = mergeColumns != null ? mergeColumns : List.of();
+            this.sortColumns = sortColumns != null ? sortColumns : List.of();
+            this.limit = limit;
         }
 
         /** SQL to execute on each worker (partial aggregation, no sort/limit). */
@@ -88,9 +147,25 @@ public final class PhysicalPlanSplitter {
         /** Whether the query can be distributed. False for unsupported aggregates. */
         public boolean canDistribute() { return canDistribute; }
 
+        /** How the coordinator should merge partial results. */
+        public MergeType getMergeType() { return mergeType; }
+
+        /** Number of group key columns (first N columns in partial results). */
+        public int getGroupKeyCount() { return groupKeyCount; }
+
+        /** Merge operations for each output column (after group keys). */
+        public List<MergeColumn> getMergeColumns() { return mergeColumns; }
+
+        /** Sort specification for the final output. */
+        public List<SortColumn> getSortColumns() { return sortColumns; }
+
+        /** Maximum rows in the final output (-1 = unlimited). */
+        public long getLimit() { return limit; }
+
         @Override
         public String toString() {
             return "SplitPlan{canDistribute=" + canDistribute
+                + ", mergeType=" + mergeType
                 + ", workerSql=" + workerSql
                 + ", coordinatorSql=" + coordinatorSql + "}";
         }
@@ -147,7 +222,8 @@ public final class PhysicalPlanSplitter {
 
         if (sort == null) {
             // No sort/limit: worker does everything, coordinator is pass-through
-            return new SplitPlan(fullSql, "SELECT * FROM " + PARTIAL_TABLE, true);
+            return new SplitPlan(fullSql, "SELECT * FROM " + PARTIAL_TABLE, true,
+                MergeType.PASS_THROUGH, 0, null, null, -1);
         }
 
         // Generate worker SQL from the sort's input (everything below the sort)
@@ -157,7 +233,12 @@ public final class PhysicalPlanSplitter {
         StringBuilder coordSql = new StringBuilder("SELECT * FROM ").append(PARTIAL_TABLE);
         appendOrderByAndLimit(coordSql, sort);
 
-        return new SplitPlan(workerSql, coordSql.toString(), true);
+        // Extract sort metadata
+        List<SortColumn> sortCols = extractSortColumns(sort);
+        long limit = extractLimit(sort);
+
+        return new SplitPlan(workerSql, coordSql.toString(), true,
+            MergeType.SCAN_WITH_SORT, 0, null, sortCols, limit);
     }
 
     /**
@@ -182,8 +263,10 @@ public final class PhysicalPlanSplitter {
         List<String> workerSelectExprs = new ArrayList<>(groupColumns);
         List<String> coordSelectExprs = new ArrayList<>(groupColumns);
         List<String> coordFinalExprs = new ArrayList<>(); // for the final SELECT aliases
+        List<MergeColumn> mergeColumns = new ArrayList<>();
 
         int aliasCounter = 0;
+        int workerColIndex = groupCount; // track column index in worker output
         boolean hasUnsupported = false;
 
         // Track original output names for the coordinator to alias correctly
@@ -198,14 +281,14 @@ public final class PhysicalPlanSplitter {
                 case COUNT: {
                     String alias = "__c" + aliasCounter++;
                     if (call.getArgList().isEmpty()) {
-                        // COUNT(*)
                         workerSelectExprs.add("COUNT(*) AS " + quoteIdentifier(alias));
                     } else {
-                        // COUNT(col)
                         String colName = inputFieldNames.get(call.getArgList().get(0));
                         workerSelectExprs.add("COUNT(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(alias));
                     }
                     coordSelectExprs.add("SUM(" + quoteIdentifier(alias) + ") AS " + quoteIdentifier(outputName));
+                    mergeColumns.add(new MergeColumn(MergeOp.SUM, workerColIndex));
+                    workerColIndex++;
                     break;
                 }
                 case SUM:
@@ -214,6 +297,8 @@ public final class PhysicalPlanSplitter {
                     String colName = inputFieldNames.get(call.getArgList().get(0));
                     workerSelectExprs.add("SUM(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(alias));
                     coordSelectExprs.add("SUM(" + quoteIdentifier(alias) + ") AS " + quoteIdentifier(outputName));
+                    mergeColumns.add(new MergeColumn(MergeOp.SUM, workerColIndex));
+                    workerColIndex++;
                     break;
                 }
                 case MIN: {
@@ -221,6 +306,8 @@ public final class PhysicalPlanSplitter {
                     String colName = inputFieldNames.get(call.getArgList().get(0));
                     workerSelectExprs.add("MIN(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(alias));
                     coordSelectExprs.add("MIN(" + quoteIdentifier(alias) + ") AS " + quoteIdentifier(outputName));
+                    mergeColumns.add(new MergeColumn(MergeOp.MIN, workerColIndex));
+                    workerColIndex++;
                     break;
                 }
                 case MAX: {
@@ -228,10 +315,11 @@ public final class PhysicalPlanSplitter {
                     String colName = inputFieldNames.get(call.getArgList().get(0));
                     workerSelectExprs.add("MAX(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(alias));
                     coordSelectExprs.add("MAX(" + quoteIdentifier(alias) + ") AS " + quoteIdentifier(outputName));
+                    mergeColumns.add(new MergeColumn(MergeOp.MAX, workerColIndex));
+                    workerColIndex++;
                     break;
                 }
                 case AVG: {
-                    // Decompose AVG(col) into SUM(col) and COUNT(col)
                     String sumAlias = "__c" + aliasCounter++;
                     String countAlias = "__c" + aliasCounter++;
                     String colName = inputFieldNames.get(call.getArgList().get(0));
@@ -241,6 +329,9 @@ public final class PhysicalPlanSplitter {
                         "CAST(SUM(" + quoteIdentifier(sumAlias) + ") AS DOUBLE) / SUM("
                             + quoteIdentifier(countAlias) + ") AS " + quoteIdentifier(outputName)
                     );
+                    // AVG merge: sum column at workerColIndex, count column at workerColIndex+1
+                    mergeColumns.add(new MergeColumn(MergeOp.SUM, workerColIndex, workerColIndex + 1, true));
+                    workerColIndex += 2;
                     break;
                 }
                 default:
@@ -252,7 +343,7 @@ public final class PhysicalPlanSplitter {
         }
 
         if (hasUnsupported) {
-            return new SplitPlan(null, null, false);
+            return new SplitPlan(null, null, false, null, 0, null, null, -1);
         }
 
         // Build worker SQL: SELECT partial_aggs FROM table WHERE ... GROUP BY group_cols
@@ -285,10 +376,15 @@ public final class PhysicalPlanSplitter {
             appendOrderByAndLimit(coordSql, sort);
         }
 
+        // Extract sort and limit metadata for the coordinator merge
+        List<SortColumn> sortCols = sort != null ? extractSortColumns(sort) : null;
+        long limitVal = sort != null ? extractLimit(sort) : -1;
+
         logger.debug("[PhysicalPlanSplitter] Worker SQL: {}", workerSql);
         logger.debug("[PhysicalPlanSplitter] Coordinator SQL: {}", coordSql);
 
-        return new SplitPlan(workerSql.toString(), coordSql.toString(), true);
+        return new SplitPlan(workerSql.toString(), coordSql.toString(), true,
+            MergeType.AGGREGATE, groupCount, mergeColumns, sortCols, limitVal);
     }
 
     /**
@@ -345,10 +441,13 @@ public final class PhysicalPlanSplitter {
             // Use RelToSqlConverter to convert the filter's condition subtree
             // We generate SQL for the entire filter+scan, then extract the WHERE clause
             String fullSql = relToSql(filter, tableName);
-            int whereIdx = fullSql.toUpperCase().indexOf(" WHERE ");
+            // RelToSqlConverter may produce multi-line SQL with \n before WHERE
+            String normalized = fullSql.replaceAll("\\s+", " ").trim();
+            int whereIdx = normalized.toUpperCase().indexOf(" WHERE ");
             if (whereIdx >= 0) {
-                return fullSql.substring(whereIdx + 7);
+                return normalized.substring(whereIdx + 7);
             }
+            logger.warn("[PhysicalPlanSplitter] extractFilterClause: no WHERE found in SQL: {}", fullSql);
         }
         // Walk down to find filter
         for (RelNode input : node.getInputs()) {
@@ -371,7 +470,62 @@ public final class PhysicalPlanSplitter {
         // Strip schema qualifiers: "schema"."table" -> "table"
         String quotedTable = "\"" + tableName + "\"";
         sql = sql.replaceAll("\"\\w+\"\\." + java.util.regex.Pattern.quote(quotedTable), quotedTable);
+
+        // Lowercase all double-quoted identifiers to match Iceberg/Parquet schema case.
+        // DataFusion treats quoted identifiers as case-sensitive.
+        sql = lowercaseQuotedIdentifiers(sql);
         return sql;
+    }
+
+    /**
+     * Lowercases all double-quoted identifiers in a SQL string.
+     * Handles escaped quotes ({@code ""}) inside identifiers.
+     */
+    private static String lowercaseQuotedIdentifiers(String sql) {
+        StringBuilder sb = new StringBuilder(sql.length());
+        int i = 0;
+        while (i < sql.length()) {
+            if (sql.charAt(i) == '"') {
+                // Find the end of the quoted identifier
+                int start = i;
+                i++;
+                while (i < sql.length()) {
+                    if (sql.charAt(i) == '"') {
+                        if (i + 1 < sql.length() && sql.charAt(i + 1) == '"') {
+                            i += 2; // escaped quote
+                        } else {
+                            i++; // end of identifier
+                            break;
+                        }
+                    } else {
+                        i++;
+                    }
+                }
+                sb.append(sql.substring(start, i).toLowerCase(java.util.Locale.ROOT));
+            } else if (sql.charAt(i) == '\'') {
+                // Skip string literals — don't lowercase them
+                sb.append(sql.charAt(i));
+                i++;
+                while (i < sql.length()) {
+                    sb.append(sql.charAt(i));
+                    if (sql.charAt(i) == '\'') {
+                        if (i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
+                            sb.append(sql.charAt(i + 1));
+                            i += 2;
+                        } else {
+                            i++;
+                            break;
+                        }
+                    } else {
+                        i++;
+                    }
+                }
+            } else {
+                sb.append(sql.charAt(i));
+                i++;
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -421,9 +575,36 @@ public final class PhysicalPlanSplitter {
     }
 
     /**
-     * Double-quotes an identifier for DataFusion SQL.
+     * Extracts sort column metadata from a LogicalSort for the Java-side merge.
+     */
+    private static List<SortColumn> extractSortColumns(LogicalSort sort) {
+        List<SortColumn> result = new ArrayList<>();
+        List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
+        for (RelFieldCollation c : collations) {
+            boolean desc = c.getDirection() == RelFieldCollation.Direction.DESCENDING;
+            boolean nullsFirst = c.nullDirection == RelFieldCollation.NullDirection.FIRST;
+            result.add(new SortColumn(c.getFieldIndex(), desc, nullsFirst));
+        }
+        return result;
+    }
+
+    /**
+     * Extracts the LIMIT value from a LogicalSort, or -1 if no limit.
+     */
+    private static long extractLimit(LogicalSort sort) {
+        if (sort.fetch instanceof RexLiteral) {
+            return ((Number) ((RexLiteral) sort.fetch).getValue()).longValue();
+        }
+        return -1;
+    }
+
+    /**
+     * Double-quotes an identifier for DataFusion SQL, lowercasing to match
+     * Iceberg/Parquet schema conventions. DataFusion treats quoted identifiers
+     * as case-sensitive, so {@code "URL"} would fail against a Parquet column
+     * named {@code url}.
      */
     private static String quoteIdentifier(String name) {
-        return "\"" + name.replace("\"", "\"\"") + "\"";
+        return "\"" + name.toLowerCase(java.util.Locale.ROOT).replace("\"", "\"\"") + "\"";
     }
 }
