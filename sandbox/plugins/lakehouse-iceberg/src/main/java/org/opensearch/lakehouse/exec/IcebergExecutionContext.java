@@ -16,7 +16,7 @@ import java.util.List;
 public class IcebergExecutionContext {
     private final String tableName;
     private final List<String> dataFilePaths;
-    private final byte[] substraitPlan;
+    private final String sqlQuery;
     private final List<String> projectedColumns;
     private final String s3Region;
     private final String s3Bucket;
@@ -29,7 +29,7 @@ public class IcebergExecutionContext {
      *
      * @param tableName        the Iceberg table name
      * @param dataFilePaths    pruned list of data file paths to scan
-     * @param substraitPlan    serialized Substrait plan bytes
+     * @param sqlQuery    SQL query string for DataFusion
      * @param projectedColumns columns to project
      * @param s3Region         AWS region for S3 access
      * @param s3Bucket         S3 bucket name
@@ -40,7 +40,7 @@ public class IcebergExecutionContext {
     public IcebergExecutionContext(
         String tableName,
         List<String> dataFilePaths,
-        byte[] substraitPlan,
+        String sqlQuery,
         List<String> projectedColumns,
         String s3Region,
         String s3Bucket,
@@ -50,7 +50,7 @@ public class IcebergExecutionContext {
     ) {
         this.tableName = tableName;
         this.dataFilePaths = dataFilePaths;
-        this.substraitPlan = substraitPlan;
+        this.sqlQuery = sqlQuery;
         this.projectedColumns = projectedColumns;
         this.s3Region = s3Region;
         this.s3Bucket = s3Bucket;
@@ -69,9 +69,9 @@ public class IcebergExecutionContext {
         return dataFilePaths;
     }
 
-    /** Returns the serialized Substrait plan bytes. */
-    public byte[] getSubstraitPlan() {
-        return substraitPlan;
+    /** Returns the SQL query string for DataFusion. */
+    public String getSqlQuery() {
+        return sqlQuery;
     }
 
     /** Returns the projected column names. */

@@ -357,7 +357,7 @@ pub async fn execute_iceberg_query(
     s3_endpoint: Option<&str>,
     file_paths: Vec<String>,
     table_name: &str,
-    plan_bytes: &[u8],
+    sql_query: &str,
     manager: &RuntimeManager,
     runtime_ptr: i64,
 ) -> Result<i64, DataFusionError> {
@@ -383,7 +383,7 @@ pub async fn execute_iceberg_query(
         s3_config,
         file_paths,
         table_name.to_string(),
-        plan_bytes.to_vec(),
+        sql_query.to_string(),
         cpu_executor,
         global_runtime,
     )

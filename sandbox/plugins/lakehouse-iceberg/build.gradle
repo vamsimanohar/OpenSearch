@@ -58,9 +58,6 @@ dependencies {
 
     // hadoop-client-runtime includes shaded: woodstox, guava, commons-config, re2j, etc.
 
-    // Substrait (Java)
-    implementation "io.substrait:core:0.31.0"
-
     // AWS SDK
     implementation "software.amazon.awssdk:glue:${versions.aws}"
     implementation "software.amazon.awssdk:s3:${versions.aws}"

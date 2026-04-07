@@ -18,18 +18,15 @@ use datafusion::{
     physical_plan::execute_stream,
     prelude::*,
 };
-use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use jni::sys::jlong;
-use log::{debug, error, info};
-use prost::Message;
-use substrait::proto::Plan;
+use log::{error, info};
 
 use crate::api::DataFusionRuntime;
 use crate::cross_rt_stream::CrossRtStream;
 use crate::executor::DedicatedExecutor;
 use crate::s3_store::{register_s3_store, S3Config};
 
-/// Execute a Substrait plan against S3-backed Parquet files via DataFusion.
+/// Execute a SQL query against S3-backed Parquet files via DataFusion.
 ///
 /// This is the Iceberg variant of `query_executor::execute_query`. Instead of
 /// receiving a pre-built `ShardView` with cached object metas, it takes an
@@ -42,12 +39,12 @@ pub async fn execute_iceberg_query(
     s3_config: S3Config,
     file_paths: Vec<String>,
     table_name: String,
-    plan_bytes: Vec<u8>,
+    sql_query: String,
     cpu_executor: DedicatedExecutor,
     global_runtime: Option<&DataFusionRuntime>,
 ) -> Result<jlong, DataFusionError> {
-    info!("[DataFusion-Rust] execute_iceberg_query: table={}, files={}, plan_bytes={}, bucket={}, has_global_runtime={}",
-        table_name, file_paths.len(), plan_bytes.len(), s3_config.bucket, global_runtime.is_some());
+    info!("[DataFusion-Rust] execute_iceberg_query: table={}, files={}, sql_len={}, bucket={}, has_global_runtime={}",
+        table_name, file_paths.len(), sql_query.len(), s3_config.bucket, global_runtime.is_some());
 
     // Build a RuntimeEnv — share the global memory pool + disk manager if available,
     // otherwise create a standalone one (for testing / fallback).
@@ -131,19 +128,11 @@ pub async fn execute_iceberg_query(
         e
     })?;
 
-    // Decode substrait -> logical plan -> physical plan -> stream
-    let substrait_plan = Plan::decode(plan_bytes.as_slice()).map_err(|e| {
-        DataFusionError::Execution(format!("Failed to decode Substrait: {}", e))
+    // Execute SQL query directly via DataFusion's SQL engine
+    let dataframe = ctx.sql(&sql_query).await.map_err(|e| {
+        error!("Failed to execute SQL: {}", e);
+        e
     })?;
-    debug!("[DataFusion-Rust] Substrait plan decoded: {} relations",
-        substrait_plan.relations.len());
-
-    let logical_plan = from_substrait_plan(&ctx.state(), &substrait_plan).await?;
-    info!("[DataFusion-Rust] Logical plan:");
-    for line in format!("{}", logical_plan.display_indent()).lines() {
-        info!("[DataFusion-Rust]   {}", line);
-    }
-    let dataframe = ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
     info!("[DataFusion-Rust] Physical plan:");
     for line in format!("{}", datafusion::physical_plan::displayable(physical_plan.as_ref()).indent(true)).lines() {

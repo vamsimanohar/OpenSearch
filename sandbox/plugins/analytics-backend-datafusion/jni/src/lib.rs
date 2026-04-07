@@ -240,7 +240,7 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_execut
     });
 }
 
-// Executes an Iceberg query against S3-backed Parquet files and returns a stream handle to listener
+// Executes an Iceberg SQL query against S3-backed Parquet files and returns a stream handle to listener
 #[jni_safe]
 #[no_mangle]
 pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_executeIcebergQueryAsync(
@@ -254,7 +254,7 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_execut
     s3_endpoint: JString,
     file_paths: JObjectArray,
     table_name: JString,
-    substrait_bytes: JObject,
+    sql_query: JString,
     runtime_ptr: jlong,
     listener: JObject,
 ) {
@@ -333,11 +333,10 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_execut
             return;
         }
     };
-    let plan_bytes_obj = unsafe { JByteArray::from_raw(substrait_bytes.as_raw()) };
-    let plan_bytes = match env.convert_byte_array(plan_bytes_obj) {
-        Ok(b) => b,
+    let sql_query_str: String = match env.get_string(&sql_query) {
+        Ok(s) => s.into(),
         Err(e) => {
-            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Failed to convert plan bytes: {}", e)));
+            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Invalid SQL query string: {}", e)));
             return;
         }
     };
@@ -358,7 +357,7 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_execut
         endpoint.as_deref(),
         paths,
         &table_name_str,
-        &plan_bytes,
+        &sql_query_str,
         tokio_rt_mgr,
         runtime_ptr as i64,
     ));

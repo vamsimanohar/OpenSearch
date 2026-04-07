@@ -30,11 +30,11 @@ public class IcebergQueryExecutorTests extends OpenSearchTestCase {
     }
 
     public void testExecutionContextCarriesAllFields() {
-        byte[] plan = new byte[] { 1, 2, 3 };
+        String sql = "SELECT * FROM test_table";
         IcebergExecutionContext ctx = new IcebergExecutionContext(
             "test_table",
             List.of("s3://bucket/file1.parquet", "s3://bucket/file2.parquet"),
-            plan,
+            sql,
             List.of("id", "name"),
             "us-east-1",
             "bucket",
@@ -47,7 +47,7 @@ public class IcebergQueryExecutorTests extends OpenSearchTestCase {
         assertEquals(2, ctx.getDataFilePaths().size());
         assertEquals("s3://bucket/file1.parquet", ctx.getDataFilePaths().get(0));
         assertEquals("s3://bucket/file2.parquet", ctx.getDataFilePaths().get(1));
-        assertArrayEquals(plan, ctx.getSubstraitPlan());
+        assertEquals(sql, ctx.getSqlQuery());
         assertEquals(List.of("id", "name"), ctx.getProjectedColumns());
         assertEquals("us-east-1", ctx.getS3Region());
         assertEquals("bucket", ctx.getS3Bucket());
@@ -60,7 +60,7 @@ public class IcebergQueryExecutorTests extends OpenSearchTestCase {
         IcebergExecutionContext ctx = new IcebergExecutionContext(
             "table",
             List.of(),
-            new byte[0],
+            "SELECT 1",
             List.of(),
             "eu-west-1",
             "my-bucket",
@@ -85,7 +85,7 @@ public class IcebergQueryExecutorTests extends OpenSearchTestCase {
         IcebergExecutionContext ctx = new IcebergExecutionContext(
             "empty_table",
             List.of(),
-            new byte[0],
+            "",
             List.of(),
             "us-west-2",
             "",

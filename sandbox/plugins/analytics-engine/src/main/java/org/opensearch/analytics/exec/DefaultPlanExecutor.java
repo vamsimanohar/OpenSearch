@@ -98,10 +98,10 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
             if (scanContext == null) {
                 throw new IllegalStateException("ExternalTableExecutor.prepareScan() returned null for " + externalTable);
             }
-            logger.debug("[DefaultPlanExecutor] ScanContext: table={}, files={}, substraitBytes={}, storageConfigKeys={}",
+            logger.debug("[DefaultPlanExecutor] ScanContext: table={}, files={}, sqlQuery={}, storageConfigKeys={}",
                 scanContext.getTableName(),
                 scanContext.getDataFilePaths() != null ? scanContext.getDataFilePaths().size() : 0,
-                scanContext.getSubstraitPlan() != null ? scanContext.getSubstraitPlan().length : 0,
+                scanContext.getSqlQuery(),
                 scanContext.getStorageConfig() != null ? scanContext.getStorageConfig().keySet() : "null");
             AnalyticsSearchBackendPlugin provider = selectBackEnd();
             if (provider == null) {

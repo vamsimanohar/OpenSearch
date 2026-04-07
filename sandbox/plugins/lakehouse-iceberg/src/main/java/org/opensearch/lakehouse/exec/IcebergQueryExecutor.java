@@ -12,14 +12,16 @@ import org.apache.calcite.rel.RelNode;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.lakehouse.scan.IcebergScanPlanner;
 import org.opensearch.lakehouse.schema.IcebergCalciteTable;
-import org.opensearch.lakehouse.substrait.CalciteSubstraitConverter;
+import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
+import org.apache.calcite.sql.SqlDialect;
+import org.apache.calcite.sql.SqlNode;
 
 import java.io.IOException;
 import java.util.List;
 
 /**
  * Orchestrates Iceberg query execution on a single node.
- * Flow: extract predicates &rarr; scan plan &rarr; substrait convert &rarr; JNI execute
+ * Flow: extract predicates &rarr; scan plan &rarr; SQL transpile &rarr; JNI execute
  */
 public class IcebergQueryExecutor {
 
@@ -40,7 +42,7 @@ public class IcebergQueryExecutor {
      * @param relNode      the optimized Calcite plan
      * @param icebergTable the Calcite table wrapping the Iceberg table
      * @return execution context ready for JNI bridge
-     * @throws IOException if substrait conversion fails
+     * @throws IOException if SQL conversion fails
      */
     public IcebergExecutionContext prepare(RelNode relNode, IcebergCalciteTable icebergTable) throws IOException {
         // 1. Plan scan with predicate pushdown
@@ -51,8 +53,11 @@ public class IcebergQueryExecutor {
             null         // all columns
         );
 
-        // 2. Convert Calcite plan to Substrait bytes
-        byte[] substraitBytes = CalciteSubstraitConverter.toSubstrait(relNode);
+        // 2. Convert Calcite plan to DataFusion SQL
+        SqlDialect dialect = DataFusionSqlDialect.DEFAULT;
+        RelToSqlConverter converter = new RelToSqlConverter(dialect);
+        SqlNode sqlNode = converter.visitRoot(relNode).asStatement();
+        String sqlQuery = sqlNode.toSqlString(dialect).getSql();
 
         // 3. Extract S3 bucket from first file path
         String firstPath = scanPlan.getDataFilePaths().isEmpty() ? "" : scanPlan.getDataFilePaths().get(0);
@@ -63,7 +68,7 @@ public class IcebergQueryExecutor {
         return new IcebergExecutionContext(
             icebergTable.getIcebergTable().name(),
             scanPlan.getDataFilePaths(),
-            substraitBytes,
+            sqlQuery,
             scanPlan.getProjectedColumns(),
             region,
             bucket,

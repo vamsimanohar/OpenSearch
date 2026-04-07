@@ -25,7 +25,10 @@ import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
 import org.opensearch.lakehouse.scan.CalciteToIcebergPredicateConverter;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.lakehouse.schema.IcebergCalciteTable;
-import org.opensearch.lakehouse.substrait.CalciteSubstraitConverter;
+import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
+import org.apache.calcite.sql.SqlDialect;
+import org.apache.calcite.sql.SqlNode;
+import org.opensearch.lakehouse.exec.DataFusionSqlDialect;
 
 import java.security.AccessController;
 import java.security.PrivilegedAction;
@@ -81,7 +84,7 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
                     table,
                     icebergTable.getPinnedSnapshotId(),
                     predicates,
-                    null  // all columns — DataFusion handles projection from Substrait plan
+                    null  // all columns — DataFusion handles projection from SQL query
                 )
             );
             scanPlan = plan;
@@ -100,13 +103,16 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
             }
         }
 
-        // 3. Convert Calcite RelNode to Substrait bytes
-        byte[] substraitBytes;
+        // 3. Convert Calcite RelNode to DataFusion SQL
+        String sqlQuery;
         try {
-            substraitBytes = CalciteSubstraitConverter.toSubstrait(logicalPlan);
-            logger.debug("[IcebergTableExecutor] Substrait plan generated: {} bytes", substraitBytes.length);
+            SqlDialect dialect = DataFusionSqlDialect.DEFAULT;
+            RelToSqlConverter converter = new RelToSqlConverter(dialect);
+            SqlNode sqlNode = converter.visitRoot(logicalPlan).asStatement();
+            sqlQuery = sqlNode.toSqlString(dialect).getSql();
+            logger.debug("[IcebergTableExecutor] Generated SQL for DataFusion: {}", sqlQuery);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to convert query plan to Substrait", e);
+            throw new RuntimeException("Failed to convert query plan to SQL", e);
         }
 
         // 4. Build storage config from CatalogConfig
@@ -119,10 +125,10 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
             storageConfig.get("s3Region"), storageConfig.get("s3Bucket"),
             storageConfig.containsKey("s3AccessKeyId") ? "present" : "absent",
             storageConfig.getOrDefault("s3Endpoint", "default"));
-        logger.debug("[IcebergTableExecutor] ExternalScanContext: table={}, files={}, substraitBytes={}, storageConfigKeys={}",
-            tableName, scanPlan.getDataFilePaths().size(), substraitBytes.length, storageConfig.keySet());
+        logger.debug("[IcebergTableExecutor] ExternalScanContext: table={}, files={}, sqlQuery={}, storageConfigKeys={}",
+            tableName, scanPlan.getDataFilePaths().size(), sqlQuery, storageConfig.keySet());
 
-        return new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), substraitBytes, storageConfig);
+        return new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), sqlQuery, storageConfig);
     }
 
     private Expression extractIcebergFilter(RelNode node) {

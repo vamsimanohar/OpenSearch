@@ -128,7 +128,7 @@ public final class NativeBridge {
     // ---- Iceberg / S3 query execution ----
 
     /**
-     * Executes a Substrait plan against S3-backed Parquet files via DataFusion.
+     * Executes a SQL query against S3-backed Parquet files via DataFusion.
      * Used for Iceberg external table queries where files are on S3, not local disk.
      *
      * @param s3Region         AWS region
@@ -138,8 +138,9 @@ public final class NativeBridge {
      * @param s3SessionToken   AWS session token, or null
      * @param s3Endpoint       S3 endpoint override, or null (for local testing with MinIO etc.)
      * @param filePaths        array of S3 Parquet file paths to scan
-     * @param tableName        table name (must match the name in the Substrait plan)
-     * @param substraitPlan    serialized Substrait plan bytes
+     * @param tableName        table name for DataFusion table registration
+     * @param sqlQuery         SQL query string for DataFusion to execute
+     * @param runtimePtr       native DataFusion runtime pointer
      * @param listener         callback receiving the stream pointer (Long) or error
      */
     public static native void executeIcebergQueryAsync(
@@ -151,7 +152,7 @@ public final class NativeBridge {
         String s3Endpoint,
         String[] filePaths,
         String tableName,
-        byte[] substraitPlan,
+        String sqlQuery,
         long runtimePtr,
         org.opensearch.core.action.ActionListener<Long> listener
     );

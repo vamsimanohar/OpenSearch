@@ -18,7 +18,7 @@ import java.util.Map;
 public class ExternalScanContext {
     private final String tableName;
     private final List<String> dataFilePaths;
-    private final byte[] substraitPlan;
+    private final String sqlQuery;
     private final Map<String, String> storageConfig;
 
     /**
@@ -26,18 +26,18 @@ public class ExternalScanContext {
      *
      * @param tableName      table name matching the Substrait plan
      * @param dataFilePaths  pruned data file paths to scan
-     * @param substraitPlan  serialized Substrait plan bytes
+     * @param sqlQuery       SQL query string for the target execution engine
      * @param storageConfig  storage configuration (S3 region, bucket, credentials)
      */
     public ExternalScanContext(
         String tableName,
         List<String> dataFilePaths,
-        byte[] substraitPlan,
+        String sqlQuery,
         Map<String, String> storageConfig
     ) {
         this.tableName = tableName;
         this.dataFilePaths = dataFilePaths;
-        this.substraitPlan = substraitPlan;
+        this.sqlQuery = sqlQuery;
         this.storageConfig = storageConfig;
     }
 
@@ -47,8 +47,8 @@ public class ExternalScanContext {
     /** Pruned list of data file paths (e.g., s3://bucket/data/file.parquet). */
     public List<String> getDataFilePaths() { return dataFilePaths; }
 
-    /** Serialized Substrait plan bytes (Calcite RelNode converted to protobuf). */
-    public byte[] getSubstraitPlan() { return substraitPlan; }
+    /** SQL query string for the target execution engine. */
+    public String getSqlQuery() { return sqlQuery; }
 
     /**
      * Storage configuration for the external data source.

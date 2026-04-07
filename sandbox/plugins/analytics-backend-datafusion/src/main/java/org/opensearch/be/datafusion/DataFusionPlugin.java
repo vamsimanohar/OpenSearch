@@ -193,7 +193,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
         String[] filePaths = scanContext.getDataFilePaths().toArray(new String[0]);
         String tableName = scanContext.getTableName();
-        byte[] substraitPlan = scanContext.getSubstraitPlan();
+        String sqlQuery = scanContext.getSqlQuery();
 
         // Short-circuit: if no data files match the scan predicates, return empty result
         // rather than calling native code which panics on empty file lists.
@@ -202,8 +202,8 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
             return List.of();
         }
 
-        logger.debug("[DataFusionPlugin] executeRemoteQuery: table={}, files={}, substraitPlan={} bytes",
-            tableName, filePaths.length, substraitPlan != null ? substraitPlan.length : 0);
+        logger.debug("[DataFusionPlugin] executeRemoteQuery: table={}, files={}, sqlQuery={}",
+            tableName, filePaths.length, sqlQuery);
         logger.debug("[DataFusionPlugin] S3 config: region={}, bucket={}, credentials={}, sessionToken={}, endpoint={}",
             s3Region, s3Bucket,
             s3AccessKeyId != null ? "present" : "absent",
@@ -225,7 +225,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         NativeBridge.executeIcebergQueryAsync(
             s3Region, s3Bucket,
             s3AccessKeyId, s3SecretAccessKey, s3SessionToken, s3Endpoint,
-            filePaths, tableName, substraitPlan,
+            filePaths, tableName, sqlQuery,
             runtimePtr,
             new ActionListener<>() {
                 @Override
