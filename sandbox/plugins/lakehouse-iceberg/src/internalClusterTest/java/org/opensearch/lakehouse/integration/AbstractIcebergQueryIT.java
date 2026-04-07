@@ -197,6 +197,90 @@ public abstract class AbstractIcebergQueryIT extends OpenSearchIntegTestCase {
         assertEquals("Expected exactly 1 row", 1, response.getTotal());
     }
 
+    // ---- Value assertion helpers ----
+
+    protected Object getSqlValue(SqlResponse response, int row, int col) {
+        return response.getRows().get(row)[col];
+    }
+
+    protected double getSqlDouble(SqlResponse response, int row, int col) {
+        Object val = getSqlValue(response, row, col);
+        if (val instanceof Number) return ((Number) val).doubleValue();
+        return Double.parseDouble(val.toString());
+    }
+
+    protected long getSqlLong(SqlResponse response, int row, int col) {
+        Object val = getSqlValue(response, row, col);
+        if (val instanceof Number) return ((Number) val).longValue();
+        return Long.parseLong(val.toString());
+    }
+
+    protected String getSqlString(SqlResponse response, int row, int col) {
+        Object val = getSqlValue(response, row, col);
+        return val == null ? null : val.toString();
+    }
+
+    protected int getSqlColumnIndex(SqlResponse response, String columnName) {
+        List<String> cols = response.getColumns();
+        for (int i = 0; i < cols.size(); i++) {
+            if (cols.get(i).equalsIgnoreCase(columnName)) return i;
+        }
+        fail("Column not found: " + columnName + " in " + cols);
+        return -1;
+    }
+
+    protected void assertSqlValueEquals(String msg, long expected, SqlResponse response, int row, int col) {
+        assertEquals(msg, expected, getSqlLong(response, row, col));
+    }
+
+    protected void assertSqlValueClose(String msg, double expected, SqlResponse response, int row, int col, double tolerance) {
+        assertEquals(msg, expected, getSqlDouble(response, row, col), tolerance);
+    }
+
+    protected void assertSqlColumnOrdered(SqlResponse response, int col, boolean ascending) {
+        List<Object[]> rows = response.getRows();
+        for (int i = 1; i < rows.size(); i++) {
+            double prev = ((Number) rows.get(i - 1)[col]).doubleValue();
+            double curr = ((Number) rows.get(i)[col]).doubleValue();
+            if (ascending) {
+                assertTrue("Row " + i + " not in ASC order: " + prev + " > " + curr, prev <= curr);
+            } else {
+                assertTrue("Row " + i + " not in DESC order: " + prev + " < " + curr, prev >= curr);
+            }
+        }
+    }
+
+    protected void assertSqlAllRowsEqual(SqlResponse response, int col, Object expected) {
+        for (int i = 0; i < response.getRows().size(); i++) {
+            Object val = response.getRows().get(i)[col];
+            if (expected instanceof Number && val instanceof Number) {
+                assertEquals("Row " + i + " col " + col + " mismatch",
+                    ((Number) expected).longValue(), ((Number) val).longValue());
+            } else {
+                assertEquals("Row " + i + " col " + col + " mismatch", expected, val);
+            }
+        }
+    }
+
+    protected void assertSqlAllRowsSatisfy(SqlResponse response, int col, java.util.function.Predicate<Object> predicate, String description) {
+        for (int i = 0; i < response.getRows().size(); i++) {
+            Object val = response.getRows().get(i)[col];
+            assertTrue("Row " + i + " failed: " + description + " (value=" + val + ")", predicate.test(val));
+        }
+    }
+
+    protected void assertSqlNoNulls(SqlResponse response, int col) {
+        for (int i = 0; i < response.getRows().size(); i++) {
+            assertNotNull("Row " + i + " col " + col + " should not be null", response.getRows().get(i)[col]);
+        }
+    }
+
+    protected void assertSqlAllNulls(SqlResponse response, int col) {
+        for (int i = 0; i < response.getRows().size(); i++) {
+            assertNull("Row " + i + " col " + col + " should be null", response.getRows().get(i)[col]);
+        }
+    }
+
     // ---- PPL assertion helpers ----
 
     protected void assertPplNotEmpty(PPLResponse response) {
@@ -213,6 +297,27 @@ public abstract class AbstractIcebergQueryIT extends OpenSearchIntegTestCase {
 
     protected void assertPplColumnCount(PPLResponse response, int expected) {
         assertEquals("Column count mismatch", expected, response.getColumns().size());
+    }
+
+    protected void assertPplRowCount(PPLResponse response, int expected) {
+        assertEquals("PPL row count mismatch", expected, response.getRows().size());
+    }
+
+    protected double getPplDouble(PPLResponse response, int row, int col) {
+        Object val = response.getRows().get(row)[col];
+        if (val instanceof Number) return ((Number) val).doubleValue();
+        return Double.parseDouble(val.toString());
+    }
+
+    protected long getPplLong(PPLResponse response, int row, int col) {
+        Object val = response.getRows().get(row)[col];
+        if (val instanceof Number) return ((Number) val).longValue();
+        return Long.parseLong(val.toString());
+    }
+
+    protected String getPplString(PPLResponse response, int row, int col) {
+        Object val = response.getRows().get(row)[col];
+        return val == null ? null : val.toString();
     }
 
     // ---- Cluster state helpers ----

@@ -23,6 +23,12 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         assertSqlNotEmpty(response);
         assertSqlColumnCount(response, 3);
         assertSqlMaxRows(response, 20);
+        // ROW_NUMBER should be sequential 1,2,3,...
+        for (int i = 0; i < response.getRows().size(); i++) {
+            assertSqlValueEquals("Row " + i + " ROW_NUMBER", i + 1, response, i, 2);
+        }
+        // trip_distance should be descending (ORDER BY DESC)
+        assertSqlColumnOrdered(response, 1, false);
     }
 
     public void testRank() throws Exception {
@@ -31,7 +37,10 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         );
         assertSqlNotEmpty(response);
         assertSqlColumnCount(response, 3);
-        assertSqlMaxRows(response, 20);
+        // RANK of first row should be 1
+        assertSqlValueEquals("First rank should be 1", 1, response, 0, 2);
+        // trip_distance should be descending
+        assertSqlColumnOrdered(response, 1, false);
     }
 
     public void testDenseRank() throws Exception {
@@ -40,7 +49,8 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         );
         assertSqlNotEmpty(response);
         assertSqlColumnCount(response, 3);
-        assertSqlMaxRows(response, 20);
+        assertSqlValueEquals("First dense_rank should be 1", 1, response, 0, 2);
+        assertSqlColumnOrdered(response, 1, false);
     }
 
     public void testPartitionBy() throws Exception {
@@ -50,7 +60,10 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         );
         assertSqlNotEmpty(response);
         assertSqlColumnCount(response, 3);
-        assertSqlMaxRows(response, 20);
+        // All row numbers should be >= 1
+        assertSqlAllRowsSatisfy(response, 2,
+            v -> ((Number) v).longValue() >= 1,
+            "ROW_NUMBER should be >= 1");
     }
 
     @LuceneTestCase.AwaitsFix(bugUrl = "DataFusion decomposes SUM window into sub-expressions which fails in physical planner")
@@ -76,12 +89,19 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
     }
 
     public void testCountOver() throws Exception {
+        // COUNT(*) OVER (PARTITION BY vendorid) should give the total per vendor
         SqlResponse response = executeSql(
             "SELECT vendorid, COUNT(*) OVER (PARTITION BY vendorid) AS vendor_count FROM " + TABLE_NAME + " LIMIT 20"
         );
         assertSqlNotEmpty(response);
         assertSqlColumnCount(response, 2);
-        assertSqlMaxRows(response, 20);
+        // vendor_count should be either 1666 or 1667
+        assertSqlAllRowsSatisfy(response, 1,
+            v -> {
+                long cnt = ((Number) v).longValue();
+                return cnt == 1666 || cnt == 1667;
+            },
+            "vendor_count should be 1666 or 1667");
     }
 
     public void testLag() throws Exception {
@@ -91,7 +111,15 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         );
         assertSqlNotEmpty(response);
         assertSqlColumnCount(response, 3);
-        assertSqlMaxRows(response, 20);
+        // First row's LAG should be NULL (no previous)
+        assertNull("First LAG should be NULL", getSqlValue(response, 0, 2));
+        // Subsequent rows: prev_dist should equal the previous row's trip_distance
+        for (int i = 1; i < response.getRows().size(); i++) {
+            double prevRowDist = getSqlDouble(response, i - 1, 1);
+            double lagVal = getSqlDouble(response, i, 2);
+            assertEquals("Row " + i + ": LAG should equal previous row's trip_distance",
+                prevRowDist, lagVal, 0.001);
+        }
     }
 
     public void testLead() throws Exception {
@@ -101,7 +129,13 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         );
         assertSqlNotEmpty(response);
         assertSqlColumnCount(response, 3);
-        assertSqlMaxRows(response, 20);
+        // For rows 0..N-2: LEAD should equal the next row's trip_distance
+        for (int i = 0; i < response.getRows().size() - 1; i++) {
+            double nextRowDist = getSqlDouble(response, i + 1, 1);
+            double leadVal = getSqlDouble(response, i, 2);
+            assertEquals("Row " + i + ": LEAD should equal next row's trip_distance",
+                nextRowDist, leadVal, 0.001);
+        }
     }
 
     public void testNtile() throws Exception {
@@ -110,6 +144,12 @@ public class WindowFunctionIT extends AbstractIcebergQueryIT {
         );
         assertSqlNotEmpty(response);
         assertSqlColumnCount(response, 3);
-        assertSqlMaxRows(response, 20);
+        // NTILE(4) should produce values 1-4
+        assertSqlAllRowsSatisfy(response, 2,
+            v -> {
+                long q = ((Number) v).longValue();
+                return q >= 1 && q <= 4;
+            },
+            "NTILE(4) should be 1-4");
     }
 }
