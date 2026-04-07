@@ -103,23 +103,26 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
             }
         }
 
-        // 3. Convert Calcite RelNode to DataFusion SQL
+        // 3. Extract table name from the Calcite plan
+        String tableName = extractTableName(logicalPlan);
+
+        // 4. Convert Calcite RelNode to DataFusion SQL
         String sqlQuery;
         try {
             SqlDialect dialect = DataFusionSqlDialect.DEFAULT;
             RelToSqlConverter converter = new RelToSqlConverter(dialect);
             SqlNode sqlNode = converter.visitRoot(logicalPlan).asStatement();
             sqlQuery = sqlNode.toSqlString(dialect).getSql();
+            // RelToSqlConverter may produce schema-qualified names (e.g. "opensearch"."nyc_taxi")
+            // but DataFusion registers tables with just the leaf name. Replace all qualified refs.
+            sqlQuery = stripSchemaQualifiers(sqlQuery, tableName);
             logger.debug("[IcebergTableExecutor] Generated SQL for DataFusion: {}", sqlQuery);
         } catch (Exception e) {
             throw new RuntimeException("Failed to convert query plan to SQL", e);
         }
 
-        // 4. Build storage config from CatalogConfig
+        // 5. Build storage config from CatalogConfig
         Map<String, String> storageConfig = buildStorageConfig(connector, icebergTable, scanPlan);
-
-        // 5. Extract table name from the Calcite plan (must match Substrait reference)
-        String tableName = extractTableName(logicalPlan);
 
         logger.debug("[IcebergTableExecutor] Storage config: region={}, bucket={}, credentials={}, endpoint={}",
             storageConfig.get("s3Region"), storageConfig.get("s3Bucket"),
@@ -147,6 +150,18 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
             if (result != null) return result;
         }
         return null;
+    }
+
+    /**
+     * Strips schema qualifiers from the generated SQL so table references match
+     * the leaf name registered in DataFusion. PPL wraps tables under "opensearch"
+     * schema, producing {@code "opensearch"."nyc_taxi"} — DataFusion only knows "nyc_taxi".
+     */
+    private String stripSchemaQualifiers(String sql, String tableName) {
+        String quotedTable = "\"" + tableName + "\"";
+        // "schema"."table" → "table"
+        sql = sql.replaceAll("\"\\w+\"\\." + java.util.regex.Pattern.quote(quotedTable), quotedTable);
+        return sql;
     }
 
     private String extractTableName(RelNode node) {

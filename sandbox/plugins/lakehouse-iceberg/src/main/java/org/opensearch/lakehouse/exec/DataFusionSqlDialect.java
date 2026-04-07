@@ -11,8 +11,14 @@ package org.opensearch.lakehouse.exec;
 import org.apache.calcite.config.NullCollation;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlDialect;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlWriter;
 import org.apache.calcite.sql.dialect.PostgresqlSqlDialect;
+
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * SQL dialect for Apache DataFusion.
@@ -49,8 +55,73 @@ public class DataFusionSqlDialect extends PostgresqlSqlDialect {
         return false;
     }
 
+    /** DataFusion uses LIMIT/OFFSET, not FETCH FIRST n ROWS ONLY. */
+    @Override
+    public void unparseOffsetFetch(SqlWriter writer, SqlNode offset, SqlNode fetch) {
+        unparseFetchUsingLimit(writer, offset, fetch);
+    }
+
+    /** Calcite function names that differ in DataFusion. */
+    private static final Map<String, String> FUNCTION_RENAMES = Map.of(
+        "SIGN", "SIGNUM",
+        "TRUNCATE", "TRUNC"
+    );
+
+    /** Functions that DataFusion implements via date_part('unit', expr). */
+    private static final Set<String> DATE_PART_FUNCTIONS = Set.of(
+        "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND", "DAYOFWEEK", "DAY_OF_WEEK"
+    );
+
+    /** Functions that map to binary operators in DataFusion. */
+    private static final Map<String, String> BINARY_OP_FUNCTIONS = Map.of(
+        "MOD", " % ",
+        "DIVIDE", " / "
+    );
+
+    /** Remap function names that DataFusion uses differently from Calcite/PostgreSQL. */
     @Override
     public void unparseCall(SqlWriter writer, SqlCall call, int leftPrec, int rightPrec) {
+        String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
+
+        // MOD(a,b) → a % b, DIVIDE(a,b) → a / b
+        String binOp = BINARY_OP_FUNCTIONS.get(name);
+        if (binOp != null && call.operandCount() == 2) {
+            call.operand(0).unparse(writer, leftPrec, rightPrec);
+            writer.print(binOp);
+            call.operand(1).unparse(writer, leftPrec, rightPrec);
+            return;
+        }
+
+        // YEAR(x) → date_part('year', x)
+        if (DATE_PART_FUNCTIONS.contains(name) && call.operandCount() == 1) {
+            String part = ("DAYOFWEEK".equals(name) || "DAY_OF_WEEK".equals(name)) ? "dow" : name.toLowerCase(Locale.ROOT);
+            writer.print("date_part('" + part + "', ");
+            call.operand(0).unparse(writer, 0, 0);
+            writer.print(")");
+            return;
+        }
+
+        // DATE(x) → CAST(x AS DATE)
+        if ("DATE".equals(name) && call.operandCount() == 1) {
+            writer.print("CAST(");
+            call.operand(0).unparse(writer, 0, 0);
+            writer.print(" AS DATE)");
+            return;
+        }
+
+        // Simple renames: SIGN→SIGNUM, TRUNCATE→TRUNC
+        String renamed = FUNCTION_RENAMES.get(name);
+        if (renamed != null) {
+            writer.print(renamed);
+            SqlWriter.Frame frame = writer.startList("(", ")");
+            for (int i = 0; i < call.operandCount(); i++) {
+                writer.sep(",");
+                call.operand(i).unparse(writer, 0, 0);
+            }
+            writer.endList(frame);
+            return;
+        }
+
         super.unparseCall(writer, call, leftPrec, rightPrec);
     }
 }
