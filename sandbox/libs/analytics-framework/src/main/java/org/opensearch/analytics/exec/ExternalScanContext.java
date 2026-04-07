@@ -10,16 +10,45 @@ package org.opensearch.analytics.exec;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Carries the resolved scan context from an external table plugin (e.g., Iceberg)
  * to the native execution backend (e.g., DataFusion).
  */
 public class ExternalScanContext {
+
+    /**
+     * Global backend executor for distributed worker queries.
+     * Registered by the plan executor when the backend becomes available.
+     * Used by distributed worker transport actions to execute file scans.
+     */
+    private static volatile Function<ExternalScanContext, Iterable<Object[]>> globalBackendExecutor;
+
+    /**
+     * Registers the global backend executor for distributed worker queries.
+     *
+     * @param executor function that executes an {@link ExternalScanContext} and returns result rows
+     */
+    public static void setGlobalBackendExecutor(Function<ExternalScanContext, Iterable<Object[]>> executor) {
+        globalBackendExecutor = executor;
+    }
+
+    /** Returns the global backend executor, or {@code null} if not yet registered. */
+    public static Function<ExternalScanContext, Iterable<Object[]>> getGlobalBackendExecutor() {
+        return globalBackendExecutor;
+    }
+
     private final String tableName;
     private final List<String> dataFilePaths;
     private final String sqlQuery;
     private final Map<String, String> storageConfig;
+
+    /**
+     * Pre-computed results from distributed execution. When non-null, the plan executor
+     * should return these directly instead of calling {@code executeRemoteQuery()}.
+     */
+    private volatile Iterable<Object[]> preComputedResults;
 
     /**
      * Creates a new scan context.
@@ -56,4 +85,19 @@ public class ExternalScanContext {
      *        s3SessionToken (optional), s3Endpoint (optional).
      */
     public Map<String, String> getStorageConfig() { return storageConfig; }
+
+    /**
+     * Returns pre-computed results from distributed execution, or {@code null}
+     * if the query should be executed via the normal single-node backend path.
+     */
+    public Iterable<Object[]> getPreComputedResults() { return preComputedResults; }
+
+    /**
+     * Sets pre-computed results from distributed execution. When set, the plan executor
+     * will return these directly instead of delegating to the backend's
+     * {@code executeRemoteQuery()}.
+     *
+     * @param results the pre-computed result rows from distributed execution
+     */
+    public void setPreComputedResults(Iterable<Object[]> results) { this.preComputedResults = results; }
 }

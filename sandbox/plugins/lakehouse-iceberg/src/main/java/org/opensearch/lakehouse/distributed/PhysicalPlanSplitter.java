@@ -1,0 +1,429 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+package org.opensearch.lakehouse.distributed;
+
+import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.logical.LogicalAggregate;
+import org.apache.calcite.rel.logical.LogicalFilter;
+import org.apache.calcite.rel.logical.LogicalProject;
+import org.apache.calcite.rel.logical.LogicalSort;
+import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
+import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLiteral;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.SqlDialect;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.lakehouse.exec.DataFusionSqlDialect;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Splits a Calcite logical plan into two SQL strings for distributed execution:
+ * <ul>
+ *   <li><b>workerSql</b>: Executed on each worker node against a subset of files.
+ *       Contains scan + filter + partial aggregation (no ORDER BY, no LIMIT).</li>
+ *   <li><b>coordinatorSql</b>: Executed on the coordinator against the merged
+ *       partial results. Contains final aggregation + ORDER BY + LIMIT.</li>
+ * </ul>
+ *
+ * <p>The key insight is that aggregates must be decomposed for distributed execution:
+ * <ul>
+ *   <li>{@code COUNT(*)} on worker becomes {@code COUNT(*) AS __c0};
+ *       coordinator merges with {@code SUM(__c0)}</li>
+ *   <li>{@code SUM(col)} on worker becomes {@code SUM(col) AS __c1};
+ *       coordinator merges with {@code SUM(__c1)}</li>
+ *   <li>{@code MIN(col)} / {@code MAX(col)} are pass-through</li>
+ *   <li>{@code AVG(col)} is decomposed into {@code SUM(col)} and {@code COUNT(col)};
+ *       coordinator computes {@code CAST(SUM(__s) AS DOUBLE) / SUM(__n)}</li>
+ * </ul>
+ */
+public final class PhysicalPlanSplitter {
+
+    private static final Logger logger = LogManager.getLogger(PhysicalPlanSplitter.class);
+
+    /** Name of the virtual table in coordinator SQL that holds partial worker results. */
+    static final String PARTIAL_TABLE = "__partial";
+
+    private PhysicalPlanSplitter() {}
+
+    /**
+     * Result of splitting a query plan into worker and coordinator SQL.
+     */
+    public static class SplitPlan {
+        private final String workerSql;
+        private final String coordinatorSql;
+        private final boolean canDistribute;
+
+        /**
+         * Creates a new split plan.
+         *
+         * @param workerSql      SQL for workers (null if cannot distribute)
+         * @param coordinatorSql SQL for coordinator (null if cannot distribute)
+         * @param canDistribute  whether the query can be distributed
+         */
+        public SplitPlan(String workerSql, String coordinatorSql, boolean canDistribute) {
+            this.workerSql = workerSql;
+            this.coordinatorSql = coordinatorSql;
+            this.canDistribute = canDistribute;
+        }
+
+        /** SQL to execute on each worker (partial aggregation, no sort/limit). */
+        public String getWorkerSql() { return workerSql; }
+
+        /** SQL to execute on coordinator against merged partial results. */
+        public String getCoordinatorSql() { return coordinatorSql; }
+
+        /** Whether the query can be distributed. False for unsupported aggregates. */
+        public boolean canDistribute() { return canDistribute; }
+
+        @Override
+        public String toString() {
+            return "SplitPlan{canDistribute=" + canDistribute
+                + ", workerSql=" + workerSql
+                + ", coordinatorSql=" + coordinatorSql + "}";
+        }
+    }
+
+    /**
+     * Splits a Calcite RelNode into worker and coordinator SQL strings.
+     *
+     * @param plan      the Calcite logical plan (root node)
+     * @param tableName the table name as registered in DataFusion
+     * @return the split plan with worker and coordinator SQL
+     */
+    public static SplitPlan split(RelNode plan, String tableName) {
+        // Walk the plan to extract components
+        LogicalSort sort = null;
+        LogicalProject topProject = null;
+        LogicalAggregate aggregate = null;
+
+        RelNode current = plan;
+
+        // Peel off the top-level sort (ORDER BY + LIMIT)
+        if (current instanceof LogicalSort) {
+            sort = (LogicalSort) current;
+            current = sort.getInput();
+        }
+
+        // Peel off a top-level project (column aliases, expressions)
+        if (current instanceof LogicalProject) {
+            topProject = (LogicalProject) current;
+            current = topProject.getInput();
+        }
+
+        // Check for aggregate
+        if (current instanceof LogicalAggregate) {
+            aggregate = (LogicalAggregate) current;
+        }
+
+        if (aggregate == null) {
+            // SCAN-ONLY query: worker does everything except ORDER BY + LIMIT
+            return splitScanOnly(plan, tableName, sort);
+        }
+
+        // AGGREGATE query: analyze aggregate calls for decomposition
+        return splitAggregate(plan, tableName, aggregate, topProject, sort);
+    }
+
+    /**
+     * Splits a scan-only (no aggregation) query.
+     * Worker: original SQL without ORDER BY and LIMIT
+     * Coordinator: SELECT * FROM __partial ORDER BY ... LIMIT ...
+     */
+    private static SplitPlan splitScanOnly(RelNode plan, String tableName, LogicalSort sort) {
+        String fullSql = relToSql(plan, tableName);
+
+        if (sort == null) {
+            // No sort/limit: worker does everything, coordinator is pass-through
+            return new SplitPlan(fullSql, "SELECT * FROM " + PARTIAL_TABLE, true);
+        }
+
+        // Generate worker SQL from the sort's input (everything below the sort)
+        String workerSql = relToSql(sort.getInput(), tableName);
+
+        // Build coordinator SQL with ORDER BY + LIMIT from the sort
+        StringBuilder coordSql = new StringBuilder("SELECT * FROM ").append(PARTIAL_TABLE);
+        appendOrderByAndLimit(coordSql, sort);
+
+        return new SplitPlan(workerSql, coordSql.toString(), true);
+    }
+
+    /**
+     * Splits an aggregate query into partial (worker) and final (coordinator) phases.
+     */
+    private static SplitPlan splitAggregate(
+        RelNode plan, String tableName,
+        LogicalAggregate aggregate, LogicalProject topProject, LogicalSort sort
+    ) {
+        List<AggregateCall> aggCalls = aggregate.getAggCallList();
+        int groupCount = aggregate.getGroupSet().cardinality();
+
+        // Collect group key field names from the aggregate's input row type
+        List<String> inputFieldNames = aggregate.getInput().getRowType().getFieldNames();
+        List<String> groupColumns = new ArrayList<>();
+        int[] groupIndices = aggregate.getGroupSet().toArray();
+        for (int idx : groupIndices) {
+            groupColumns.add(quoteIdentifier(inputFieldNames.get(idx)));
+        }
+
+        // Analyze aggregate calls and build partial/final expressions
+        List<String> workerSelectExprs = new ArrayList<>(groupColumns);
+        List<String> coordSelectExprs = new ArrayList<>(groupColumns);
+        List<String> coordFinalExprs = new ArrayList<>(); // for the final SELECT aliases
+
+        int aliasCounter = 0;
+        boolean hasUnsupported = false;
+
+        // Track original output names for the coordinator to alias correctly
+        List<String> aggOutputFieldNames = aggregate.getRowType().getFieldNames();
+
+        for (int i = 0; i < aggCalls.size(); i++) {
+            AggregateCall call = aggCalls.get(i);
+            SqlKind kind = call.getAggregation().getKind();
+            String outputName = aggOutputFieldNames.get(groupCount + i);
+
+            switch (kind) {
+                case COUNT: {
+                    String alias = "__c" + aliasCounter++;
+                    if (call.getArgList().isEmpty()) {
+                        // COUNT(*)
+                        workerSelectExprs.add("COUNT(*) AS " + quoteIdentifier(alias));
+                    } else {
+                        // COUNT(col)
+                        String colName = inputFieldNames.get(call.getArgList().get(0));
+                        workerSelectExprs.add("COUNT(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(alias));
+                    }
+                    coordSelectExprs.add("SUM(" + quoteIdentifier(alias) + ") AS " + quoteIdentifier(outputName));
+                    break;
+                }
+                case SUM:
+                case SUM0: {
+                    String alias = "__c" + aliasCounter++;
+                    String colName = inputFieldNames.get(call.getArgList().get(0));
+                    workerSelectExprs.add("SUM(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(alias));
+                    coordSelectExprs.add("SUM(" + quoteIdentifier(alias) + ") AS " + quoteIdentifier(outputName));
+                    break;
+                }
+                case MIN: {
+                    String alias = "__c" + aliasCounter++;
+                    String colName = inputFieldNames.get(call.getArgList().get(0));
+                    workerSelectExprs.add("MIN(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(alias));
+                    coordSelectExprs.add("MIN(" + quoteIdentifier(alias) + ") AS " + quoteIdentifier(outputName));
+                    break;
+                }
+                case MAX: {
+                    String alias = "__c" + aliasCounter++;
+                    String colName = inputFieldNames.get(call.getArgList().get(0));
+                    workerSelectExprs.add("MAX(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(alias));
+                    coordSelectExprs.add("MAX(" + quoteIdentifier(alias) + ") AS " + quoteIdentifier(outputName));
+                    break;
+                }
+                case AVG: {
+                    // Decompose AVG(col) into SUM(col) and COUNT(col)
+                    String sumAlias = "__c" + aliasCounter++;
+                    String countAlias = "__c" + aliasCounter++;
+                    String colName = inputFieldNames.get(call.getArgList().get(0));
+                    workerSelectExprs.add("SUM(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(sumAlias));
+                    workerSelectExprs.add("COUNT(" + quoteIdentifier(colName) + ") AS " + quoteIdentifier(countAlias));
+                    coordSelectExprs.add(
+                        "CAST(SUM(" + quoteIdentifier(sumAlias) + ") AS DOUBLE) / SUM("
+                            + quoteIdentifier(countAlias) + ") AS " + quoteIdentifier(outputName)
+                    );
+                    break;
+                }
+                default:
+                    // Unsupported aggregate (MEDIAN, PERCENTILE, etc.)
+                    logger.warn("[PhysicalPlanSplitter] Unsupported aggregate for distribution: {}", kind);
+                    hasUnsupported = true;
+                    break;
+            }
+        }
+
+        if (hasUnsupported) {
+            return new SplitPlan(null, null, false);
+        }
+
+        // Build worker SQL: SELECT partial_aggs FROM table WHERE ... GROUP BY group_cols
+        // We need the filter part from below the aggregate
+        String filterClause = extractFilterClause(aggregate.getInput(), tableName);
+        StringBuilder workerSql = new StringBuilder("SELECT ");
+        workerSql.append(String.join(", ", workerSelectExprs));
+        workerSql.append(" FROM ").append(quoteIdentifier(tableName));
+        if (filterClause != null && !filterClause.isEmpty()) {
+            workerSql.append(" WHERE ").append(filterClause);
+        }
+        if (!groupColumns.isEmpty()) {
+            workerSql.append(" GROUP BY ").append(String.join(", ", groupColumns));
+        }
+
+        // Build coordinator SQL: SELECT final_aggs FROM __partial GROUP BY group_cols ORDER BY ... LIMIT ...
+        StringBuilder coordSql = new StringBuilder("SELECT ");
+
+        // If there's a topProject, we need to handle column rewriting
+        if (topProject != null) {
+            coordSql.append(buildCoordinatorSelectWithProject(topProject, coordSelectExprs, groupColumns, aggregate));
+        } else {
+            coordSql.append(String.join(", ", coordSelectExprs));
+        }
+        coordSql.append(" FROM ").append(PARTIAL_TABLE);
+        if (!groupColumns.isEmpty()) {
+            coordSql.append(" GROUP BY ").append(String.join(", ", groupColumns));
+        }
+        if (sort != null) {
+            appendOrderByAndLimit(coordSql, sort);
+        }
+
+        logger.debug("[PhysicalPlanSplitter] Worker SQL: {}", workerSql);
+        logger.debug("[PhysicalPlanSplitter] Coordinator SQL: {}", coordSql);
+
+        return new SplitPlan(workerSql.toString(), coordSql.toString(), true);
+    }
+
+    /**
+     * Builds the coordinator SELECT list when there's a top project above the aggregate.
+     * The project may rename or reorder columns.
+     */
+    private static String buildCoordinatorSelectWithProject(
+        LogicalProject project,
+        List<String> coordSelectExprs,
+        List<String> groupColumns,
+        LogicalAggregate aggregate
+    ) {
+        // The project's expressions reference the aggregate's output by index.
+        // We map each project output to the corresponding coordinator expression.
+        List<RexNode> projectExprs = project.getProjects();
+        List<String> projectFieldNames = project.getRowType().getFieldNames();
+        int groupCount = groupColumns.size();
+
+        List<String> result = new ArrayList<>();
+        for (int i = 0; i < projectExprs.size(); i++) {
+            RexNode expr = projectExprs.get(i);
+            if (expr instanceof RexInputRef) {
+                int refIdx = ((RexInputRef) expr).getIndex();
+                if (refIdx < groupCount) {
+                    // Reference to a group key
+                    result.add(groupColumns.get(refIdx) + " AS " + quoteIdentifier(projectFieldNames.get(i)));
+                } else {
+                    // Reference to an aggregate output
+                    int aggIdx = refIdx - groupCount;
+                    if (aggIdx < coordSelectExprs.size() - groupCount) {
+                        result.add(coordSelectExprs.get(groupCount + aggIdx));
+                    } else {
+                        result.add(coordSelectExprs.get(refIdx));
+                    }
+                }
+            } else {
+                // Complex expression — fall back to simple mapping
+                if (i < coordSelectExprs.size()) {
+                    result.add(coordSelectExprs.get(i));
+                }
+            }
+        }
+
+        return String.join(", ", result);
+    }
+
+    /**
+     * Extracts the WHERE clause from a filter node below an aggregate.
+     * Returns the filter condition as a SQL string, or null if no filter.
+     */
+    private static String extractFilterClause(RelNode node, String tableName) {
+        if (node instanceof LogicalFilter) {
+            LogicalFilter filter = (LogicalFilter) node;
+            // Use RelToSqlConverter to convert the filter's condition subtree
+            // We generate SQL for the entire filter+scan, then extract the WHERE clause
+            String fullSql = relToSql(filter, tableName);
+            int whereIdx = fullSql.toUpperCase().indexOf(" WHERE ");
+            if (whereIdx >= 0) {
+                return fullSql.substring(whereIdx + 7);
+            }
+        }
+        // Walk down to find filter
+        for (RelNode input : node.getInputs()) {
+            String result = extractFilterClause(input, tableName);
+            if (result != null) return result;
+        }
+        return null;
+    }
+
+    /**
+     * Converts a RelNode to a SQL string using the DataFusion dialect.
+     * Strips schema qualifiers from the table name.
+     */
+    static String relToSql(RelNode node, String tableName) {
+        SqlDialect dialect = DataFusionSqlDialect.DEFAULT;
+        RelToSqlConverter converter = new RelToSqlConverter(dialect);
+        SqlNode sqlNode = converter.visitRoot(node).asStatement();
+        String sql = sqlNode.toSqlString(dialect).getSql();
+
+        // Strip schema qualifiers: "schema"."table" -> "table"
+        String quotedTable = "\"" + tableName + "\"";
+        sql = sql.replaceAll("\"\\w+\"\\." + java.util.regex.Pattern.quote(quotedTable), quotedTable);
+        return sql;
+    }
+
+    /**
+     * Appends ORDER BY and LIMIT clauses from a LogicalSort to a SQL builder.
+     */
+    private static void appendOrderByAndLimit(StringBuilder sql, LogicalSort sort) {
+        List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
+        if (!collations.isEmpty()) {
+            sql.append(" ORDER BY ");
+            List<String> orderTerms = new ArrayList<>();
+            List<String> fieldNames = sort.getInput().getRowType().getFieldNames();
+            for (RelFieldCollation c : collations) {
+                String colName = quoteIdentifier(fieldNames.get(c.getFieldIndex()));
+                String dir = c.getDirection() == RelFieldCollation.Direction.ASCENDING ? "ASC" : "DESC";
+                String nullDir;
+                if (c.nullDirection == RelFieldCollation.NullDirection.FIRST) {
+                    nullDir = " NULLS FIRST";
+                } else if (c.nullDirection == RelFieldCollation.NullDirection.LAST) {
+                    nullDir = " NULLS LAST";
+                } else {
+                    nullDir = "";
+                }
+                orderTerms.add(colName + " " + dir + nullDir);
+            }
+            sql.append(String.join(", ", orderTerms));
+        }
+
+        if (sort.fetch != null) {
+            long limit = -1;
+            if (sort.fetch instanceof RexLiteral) {
+                limit = ((Number) ((RexLiteral) sort.fetch).getValue()).longValue();
+            }
+            if (limit >= 0) {
+                sql.append(" LIMIT ").append(limit);
+            }
+        }
+
+        if (sort.offset != null) {
+            long offset = 0;
+            if (sort.offset instanceof RexLiteral) {
+                offset = ((Number) ((RexLiteral) sort.offset).getValue()).longValue();
+            }
+            if (offset > 0) {
+                sql.append(" OFFSET ").append(offset);
+            }
+        }
+    }
+
+    /**
+     * Double-quotes an identifier for DataFusion SQL.
+     */
+    private static String quoteIdentifier(String name) {
+        return "\"" + name.replace("\"", "\"\"") + "\"";
+    }
+}

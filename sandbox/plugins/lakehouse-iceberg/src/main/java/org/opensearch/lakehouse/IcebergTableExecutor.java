@@ -22,6 +22,8 @@ import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.CatalogConfig;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
+import org.opensearch.lakehouse.distributed.DistributedQueryCoordinator;
+import org.opensearch.lakehouse.distributed.PhysicalPlanSplitter;
 import org.opensearch.lakehouse.scan.CalciteToIcebergPredicateConverter;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.lakehouse.schema.IcebergCalciteTable;
@@ -131,7 +133,32 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
         logger.debug("[IcebergTableExecutor] ExternalScanContext: table={}, files={}, sqlQuery={}, storageConfigKeys={}",
             tableName, scanPlan.getDataFilePaths().size(), sqlQuery, storageConfig.keySet());
 
-        return new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), sqlQuery, storageConfig);
+        ExternalScanContext scanContext = new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), sqlQuery, storageConfig);
+
+        // 6. Analyze query for distributed execution via PhysicalPlanSplitter
+        DistributedQueryCoordinator coordinator = LakehouseState.instance().distributedCoordinator();
+        if (coordinator != null && coordinator.shouldDistribute(scanPlan.getFiles())) {
+            try {
+                PhysicalPlanSplitter.SplitPlan splitPlan = PhysicalPlanSplitter.split(logicalPlan, tableName);
+                logger.debug("[IcebergTableExecutor] Split plan: {}", splitPlan);
+
+                if (splitPlan.canDistribute()) {
+                    logger.info("[IcebergTableExecutor] Using distributed execution for {} files: workerSql={}, coordinatorSql={}",
+                        scanPlan.fileCount(), splitPlan.getWorkerSql(), splitPlan.getCoordinatorSql());
+                    Iterable<Object[]> distributedResults = coordinator.execute(
+                        splitPlan, scanPlan.getFiles(), storageConfig, tableName
+                    );
+                    scanContext.setPreComputedResults(distributedResults);
+                    logger.info("[IcebergTableExecutor] Distributed execution completed successfully");
+                } else {
+                    logger.info("[IcebergTableExecutor] Query cannot be distributed (unsupported aggregates), using single-node execution");
+                }
+            } catch (Exception e) {
+                logger.warn("[IcebergTableExecutor] Distributed execution failed, falling back to single-node: {}", e.getMessage(), e);
+            }
+        }
+
+        return scanContext;
     }
 
     private Expression extractIcebergFilter(RelNode node) {

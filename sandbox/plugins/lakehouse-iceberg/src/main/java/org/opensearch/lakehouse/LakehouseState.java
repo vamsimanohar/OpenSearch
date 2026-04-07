@@ -13,6 +13,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
+import org.opensearch.lakehouse.distributed.DistributedQueryCoordinator;
 import org.opensearch.lakehouse.scan.IcebergScanPlanner;
 
 import java.security.AccessControlContext;
@@ -42,6 +43,13 @@ public final class LakehouseState {
     private final ExecutorService scanExecutor;
     private final IcebergScanPlanner scanPlanner;
 
+    /**
+     * Distributed query coordinator for scatter-gather execution across cluster nodes.
+     * Set by {@link org.opensearch.lakehouse.distributed.TransportLakehouseAction} when
+     * ClusterService and TransportService are available. {@code null} until plugin initialization completes.
+     */
+    private volatile DistributedQueryCoordinator distributedCoordinator;
+
     @SuppressWarnings("removal")
     private LakehouseState() {
         this.catalogConnector = new IcebergCatalogConnector();
@@ -62,6 +70,25 @@ public final class LakehouseState {
     /** Returns the shared scan planner. */
     public IcebergScanPlanner scanPlanner() {
         return scanPlanner;
+    }
+
+    /**
+     * Returns the distributed query coordinator, or {@code null} if not yet initialized.
+     */
+    public DistributedQueryCoordinator distributedCoordinator() {
+        return distributedCoordinator;
+    }
+
+    /**
+     * Registers the distributed query coordinator. Called from
+     * {@link org.opensearch.lakehouse.distributed.TransportLakehouseAction} when the
+     * ClusterService and TransportService become available.
+     *
+     * @param coordinator the distributed query coordinator
+     */
+    public void setDistributedCoordinator(DistributedQueryCoordinator coordinator) {
+        this.distributedCoordinator = coordinator;
+        logger.info("[LakehouseState] Distributed query coordinator registered");
     }
 
     /**
