@@ -55,7 +55,7 @@ public class DataFusionSqlDialect extends PostgresqlSqlDialect {
         return false;
     }
 
-    /** DataFusion uses LIMIT/OFFSET, not FETCH FIRST n ROWS ONLY. */
+    // DataFusion uses LIMIT/OFFSET, not FETCH FIRST n ROWS ONLY.
     @Override
     public void unparseOffsetFetch(SqlWriter writer, SqlNode offset, SqlNode fetch) {
         unparseFetchUsingLimit(writer, offset, fetch);
@@ -78,10 +78,41 @@ public class DataFusionSqlDialect extends PostgresqlSqlDialect {
         "DIVIDE", " / "
     );
 
-    /** Remap function names that DataFusion uses differently from Calcite/PostgreSQL. */
+    // Remap function names that DataFusion uses differently from Calcite/PostgreSQL.
     @Override
     public void unparseCall(SqlWriter writer, SqlCall call, int leftPrec, int rightPrec) {
+        // Calcite decomposes TIMESTAMPDIFF(UNIT, start, end) into
+        // CAST(/INT(Reinterpret(end - start), divisor) AS INTEGER).
+        // Reinterpret converts an interval to its millisecond value, which has
+        // SPECIAL syntax that cannot be unparsed. Convert to epoch arithmetic
+        // that DataFusion understands.
+        if (call.getKind() == SqlKind.REINTERPRET) {
+            SqlNode operand = call.operand(0);
+            if (operand instanceof SqlCall && ((SqlCall) operand).getKind() == SqlKind.MINUS) {
+                // Reinterpret(a - b) → ((date_part('epoch', a) - date_part('epoch', b)) * 1000)
+                SqlCall minus = (SqlCall) operand;
+                writer.print("((date_part('epoch', ");
+                minus.operand(0).unparse(writer, 0, 0);
+                writer.print(") - date_part('epoch', ");
+                minus.operand(1).unparse(writer, 0, 0);
+                writer.print(")) * 1000)");
+            } else {
+                writer.print("(date_part('epoch', ");
+                operand.unparse(writer, 0, 0);
+                writer.print(") * 1000)");
+            }
+            return;
+        }
+
         String name = call.getOperator().getName().toUpperCase(Locale.ROOT);
+
+        // Calcite's /INT (integer division) → regular / for DataFusion
+        if ("/INT".equals(name) && call.operandCount() == 2) {
+            call.operand(0).unparse(writer, leftPrec, rightPrec);
+            writer.print(" / ");
+            call.operand(1).unparse(writer, leftPrec, rightPrec);
+            return;
+        }
 
         // MOD(a,b) → a % b, DIVIDE(a,b) → a / b
         String binOp = BINARY_OP_FUNCTIONS.get(name);
