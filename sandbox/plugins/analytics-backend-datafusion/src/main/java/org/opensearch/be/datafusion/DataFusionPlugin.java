@@ -76,7 +76,9 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         Setting.Property.NodeScope
     );
 
-    private volatile DataFusionService dataFusionService;
+    /** Shared across plugin instance and SPI instances (separate classloader instances). */
+    private static volatile DataFusionService sharedDataFusionService;
+    private static final Object INIT_LOCK = new Object();
 
     /**
      * Creates the DataFusion plugin.
@@ -89,24 +91,25 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
      * lazy-initialize with sensible defaults on first use.
      */
     private DataFusionService ensureDataFusionService() {
-        DataFusionService svc = dataFusionService;
+        DataFusionService svc = sharedDataFusionService;
         if (svc != null) {
             return svc;
         }
-        synchronized (this) {
-            if (dataFusionService == null) {
-                long memPool = Runtime.getRuntime().maxMemory() / 4;
-                long spillLimit = Runtime.getRuntime().maxMemory() / 8;
+        synchronized (INIT_LOCK) {
+            if (sharedDataFusionService == null) {
+                long maxMem = Runtime.getRuntime().maxMemory();
+                long memPool = getConfiguredLong("datafusion_memory_pool_limit_bytes", maxMem / 4);
+                long spillLimit = getConfiguredLong("datafusion_spill_memory_limit_bytes", maxMem / 8);
                 String spillDir = System.getProperty("java.io.tmpdir");
-                dataFusionService = DataFusionService.builder()
+                sharedDataFusionService = DataFusionService.builder()
                     .memoryPoolLimit(memPool)
                     .spillMemoryLimit(spillLimit)
                     .spillDirectory(spillDir)
                     .build();
-                dataFusionService.start();
+                sharedDataFusionService.start();
                 logger.info("DataFusion service lazy-initialized (SPI path) — memory pool {}B, spill limit {}B", memPool, spillLimit);
             }
-            return dataFusionService;
+            return sharedDataFusionService;
         }
     }
 
@@ -125,20 +128,62 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
         Settings settings = environment.settings();
-        long memoryPoolLimit = DATAFUSION_MEMORY_POOL_LIMIT.get(settings);
-        long spillMemoryLimit = DATAFUSION_SPILL_MEMORY_LIMIT.get(settings);
-        // TODO : Get the spill directory from configuration
+        // System properties (-D flags) override OpenSearch settings as a convenient config mechanism
+        long memoryPoolLimit = getConfiguredLong("datafusion_memory_pool_limit_bytes",
+            DATAFUSION_MEMORY_POOL_LIMIT.get(settings));
+        long spillMemoryLimit = getConfiguredLong("datafusion_spill_memory_limit_bytes",
+            DATAFUSION_SPILL_MEMORY_LIMIT.get(settings));
         String spillDir = environment.dataFiles()[0].getParent().resolve("tmp").toAbsolutePath().toString();
 
-        dataFusionService = DataFusionService.builder()
-            .memoryPoolLimit(memoryPoolLimit)
-            .spillMemoryLimit(spillMemoryLimit)
-            .spillDirectory(spillDir)
-            .build();
-        dataFusionService.start();
-        logger.debug("DataFusion plugin initialized — memory pool {}B, spill limit {}B", memoryPoolLimit, spillMemoryLimit);
+        synchronized (INIT_LOCK) {
+            if (sharedDataFusionService == null) {
+                sharedDataFusionService = DataFusionService.builder()
+                    .memoryPoolLimit(memoryPoolLimit)
+                    .spillMemoryLimit(spillMemoryLimit)
+                    .spillDirectory(spillDir)
+                    .build();
+                sharedDataFusionService.start();
+                logger.info("DataFusion plugin initialized — memory pool {}B, spill limit {}B", memoryPoolLimit, spillMemoryLimit);
+            } else {
+                logger.info("DataFusion service already initialized (SPI path ran first) — memory pool configured but not applied");
+            }
+        }
 
-        return Collections.singletonList(dataFusionService);
+        return Collections.singletonList(sharedDataFusionService);
+    }
+
+    @Override
+    public List<Setting<?>> getSettings() {
+        return List.of(DATAFUSION_MEMORY_POOL_LIMIT, DATAFUSION_SPILL_MEMORY_LIMIT);
+    }
+
+    /** Read a long from system property or env var, falling back to default. Used by SPI lazy-init path. */
+    @SuppressWarnings("removal")
+    private static long getConfiguredLong(String key, long defaultValue) {
+        try {
+            String val = java.security.AccessController.doPrivileged(
+                (java.security.PrivilegedAction<String>) () -> {
+                    String v = System.getProperty(key);
+                    return v;
+                }
+            );
+            logger.info("getConfiguredLong: key={}, sysprop={}", key, val);
+            if (val == null || val.isEmpty()) {
+                val = java.security.AccessController.doPrivileged(
+                    (java.security.PrivilegedAction<String>) () -> System.getenv(key.toUpperCase(java.util.Locale.ROOT))
+                );
+                logger.info("getConfiguredLong: key={}, envvar={}", key.toUpperCase(java.util.Locale.ROOT), val);
+            }
+            if (val != null && !val.isEmpty()) {
+                long parsed = Long.parseLong(val);
+                logger.info("Config {} = {} (from system property/env)", key, parsed);
+                return parsed;
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to read config {}: {}", key, e.getMessage(), e);
+        }
+        logger.info("getConfiguredLong: key={} falling back to default={}", key, defaultValue);
+        return defaultValue;
     }
 
     @Override
@@ -148,7 +193,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
     @Override
     public EngineReaderManager<DatafusionReader> createReaderManager(DataFormat format, ShardPath shardPath) throws IOException {
-        return new DatafusionReaderManager(format, shardPath, dataFusionService);
+        return new DatafusionReaderManager(format, shardPath, sharedDataFusionService);
     }
 
     /**
@@ -173,8 +218,8 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         if (dfReader == null) {
             throw new IllegalStateException("No DatafusionReader available in the acquired reader");
         }
-        DatafusionContext context = new DatafusionContext(ctx.getTask(), dfReader, dataFusionService.getNativeRuntime());
-        DatafusionSearchExecEngine engine = new DatafusionSearchExecEngine(context, dataFusionService::newChildAllocator);
+        DatafusionContext context = new DatafusionContext(ctx.getTask(), dfReader, sharedDataFusionService.getNativeRuntime());
+        DatafusionSearchExecEngine engine = new DatafusionSearchExecEngine(context, sharedDataFusionService::newChildAllocator);
         engine.prepare(ctx);
         return engine;
     }
@@ -282,8 +327,8 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
     @Override
     public void close() throws IOException {
-        if (dataFusionService != null) {
-            dataFusionService.close();
+        if (sharedDataFusionService != null) {
+            sharedDataFusionService.close();
         }
     }
 }

@@ -189,6 +189,19 @@ public class CalciteToIcebergPredicateConverterTests extends OpenSearchTestCase 
         assertEquals(Operation.TRUE, result.op());
     }
 
+    public void testNotLikeReturnsTrueFallback() {
+        // NOT LIKE is unsupported — should return alwaysTrue(), NOT alwaysFalse()
+        RexNode nameRef = rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.VARCHAR), 1);
+        RexNode pattern = rexBuilder.makeLiteral("%.google.%");
+        RexNode like = rexBuilder.makeCall(SqlStdOperatorTable.LIKE, nameRef, pattern);
+        RexNode notLike = rexBuilder.makeCall(SqlStdOperatorTable.NOT, like);
+
+        Expression result = CalciteToIcebergPredicateConverter.convert(notLike, rowType);
+
+        // NOT(unsupported) must still be alwaysTrue, not alwaysFalse
+        assertEquals(Operation.TRUE, result.op());
+    }
+
     public void testNonRexCallReturnsTrueFallback() {
         // A bare RexInputRef is not a RexCall, should return alwaysTrue()
         RexNode bareRef = rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.INTEGER), 0);
