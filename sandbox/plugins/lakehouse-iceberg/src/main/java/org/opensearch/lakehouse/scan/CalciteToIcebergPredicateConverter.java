@@ -61,7 +61,13 @@ public final class CalciteToIcebergPredicateConverter {
             case OR:
                 return convertLogical(call, rowType, false);
             case NOT:
-                return Expressions.not(convert(call.getOperands().get(0), rowType));
+                Expression inner = convert(call.getOperands().get(0), rowType);
+                // If the inner expression couldn't be converted (alwaysTrue fallback),
+                // don't negate it — NOT(alwaysTrue) = alwaysFalse would incorrectly prune all files.
+                if (inner.op() == Expression.Operation.TRUE) {
+                    return Expressions.alwaysTrue();
+                }
+                return Expressions.not(inner);
             case IS_NULL:
                 return convertIsNull(call, rowType);
             case IS_NOT_NULL:
