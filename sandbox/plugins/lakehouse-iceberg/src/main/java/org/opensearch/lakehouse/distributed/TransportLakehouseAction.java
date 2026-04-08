@@ -18,6 +18,10 @@ import org.opensearch.common.Nullable;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.lakehouse.LakehouseState;
+import org.opensearch.lakehouse.distributed.exchange.ExchangePullAction;
+import org.opensearch.lakehouse.distributed.exchange.ExchangePullRequest;
+import org.opensearch.lakehouse.distributed.exchange.ExchangePullResponse;
+import org.opensearch.lakehouse.distributed.exchange.WorkerOutputManager;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.StreamTransportService;
@@ -87,6 +91,26 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             logger.info("[TransportLakehouseAction] Arrow Flight streaming not available (feature flag off)");
         }
 
+        // Register exchange pull handler — allows other nodes to pull stage output from this worker
+        transportService.registerRequestHandler(
+            ExchangePullAction.NAME,
+            ThreadPool.Names.GENERIC,
+            ExchangePullRequest::new,
+            (request, channel, task) -> {
+                String qid = request.getQueryId();
+                String sid = request.getStageId();
+                byte[] output = WorkerOutputManager.instance().getOutput(qid, sid);
+                if (output != null) {
+                    logger.info("[ExchangePull] Serving output for queryId={}, stageId={}: {} bytes", qid, sid, output.length);
+                    channel.sendResponse(new ExchangePullResponse(output));
+                } else {
+                    logger.warn("[ExchangePull] No output found for queryId={}, stageId={}", qid, sid);
+                    channel.sendResponse(new ExchangePullResponse(new byte[0]));
+                }
+            }
+        );
+        logger.info("[TransportLakehouseAction] Registered ExchangePull handler for worker-to-worker data exchange");
+
         // Initialize the distributed query coordinator with both transport types
         DistributedQueryCoordinator coordinator = new DistributedQueryCoordinator(
             clusterService, transportService, streamTransportService
@@ -138,7 +162,8 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             String tableName = request.getTableName();
 
             logger.info("[Worker] ====== WORKER EXECUTION START (streaming) ======");
-            logger.info("[Worker] table={}, files={}, sql={}", tableName, filePaths.length, sqlQuery);
+            logger.info("[Worker] table={}, files={}, sql={}, queryId={}, stageId={}",
+                tableName, filePaths.length, sqlQuery, request.getQueryId(), request.getStageId());
             for (int i = 0; i < Math.min(filePaths.length, 5); i++) {
                 logger.info("[Worker]   file[{}]: {}", i, filePaths[i]);
             }
@@ -161,6 +186,13 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
                 byte[] ipcBytes = ipcExecutor.apply(scanContext);
                 long tIpc1 = System.nanoTime();
                 if (ipcBytes != null && ipcBytes.length > 0) {
+                    // Store output locally for pull-based exchange if queryId is set
+                    if (request.hasQueryId()) {
+                        WorkerOutputManager.instance().registerOutput(
+                            request.getQueryId(), request.getStageId(), ipcBytes);
+                        logger.info("[Worker] Stored IPC output in WorkerOutputManager: queryId={}, stageId={}, {} bytes",
+                            request.getQueryId(), request.getStageId(), ipcBytes.length);
+                    }
                     channel.sendResponseBatch(new LakehouseWorkerResponse(ipcBytes));
                     channel.completeStream();
                     long tWorker1 = System.nanoTime();
@@ -247,7 +279,8 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
         String tableName = request.getTableName();
 
         logger.info("[Worker] ====== WORKER EXECUTION START (standard) ======");
-        logger.info("[Worker] table={}, files={}, sql={}", tableName, filePaths.length, sqlQuery);
+        logger.info("[Worker] table={}, files={}, sql={}, queryId={}, stageId={}",
+            tableName, filePaths.length, sqlQuery, request.getQueryId(), request.getStageId());
         for (int i = 0; i < Math.min(filePaths.length, 5); i++) {
             logger.info("[Worker]   file[{}]: {}", i, filePaths[i]);
         }
@@ -270,6 +303,13 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             byte[] ipcBytes = ipcExecutor.apply(scanContext);
             long tIpc1 = System.nanoTime();
             if (ipcBytes != null && ipcBytes.length > 0) {
+                // Store output locally for pull-based exchange if queryId is set
+                if (request.hasQueryId()) {
+                    WorkerOutputManager.instance().registerOutput(
+                        request.getQueryId(), request.getStageId(), ipcBytes);
+                    logger.info("[Worker] Stored IPC output in WorkerOutputManager: queryId={}, stageId={}, {} bytes",
+                        request.getQueryId(), request.getStageId(), ipcBytes.length);
+                }
                 logger.info("[Worker] [TIMING] IPC execution: {} ms, total: {} ms — {} bytes",
                     (tIpc1 - tIpc0) / 1_000_000, (tIpc1 - tWorker0) / 1_000_000, ipcBytes.length);
                 logger.info("[Worker] ====== WORKER EXECUTION END (IPC) ======");

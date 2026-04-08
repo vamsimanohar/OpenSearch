@@ -19,7 +19,11 @@ import org.opensearch.lakehouse.distributed.FilePartitioner;
 import org.opensearch.lakehouse.distributed.LakehouseWorkerAction;
 import org.opensearch.lakehouse.distributed.LakehouseWorkerRequest;
 import org.opensearch.lakehouse.distributed.LakehouseWorkerResponse;
+import org.opensearch.lakehouse.distributed.exchange.ExchangePullAction;
+import org.opensearch.lakehouse.distributed.exchange.ExchangePullRequest;
+import org.opensearch.lakehouse.distributed.exchange.ExchangePullResponse;
 import org.opensearch.lakehouse.distributed.exchange.ExchangeService;
+import org.opensearch.lakehouse.distributed.exchange.WorkerOutputManager;
 import org.opensearch.lakehouse.distributed.stage.InputSpec;
 import org.opensearch.lakehouse.distributed.stage.Stage;
 import org.opensearch.lakehouse.distributed.stage.StageDAG;
@@ -36,21 +40,25 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 /**
- * Executes a StageDAG with phased dependency tracking.
+ * Executes a StageDAG with phased dependency tracking and pull-based exchange.
  *
  * <p>Stages execute in topological order. Leaf stages (scans) run first
- * in parallel. Once a stage completes, its output is registered in the
- * ExchangeService. Downstream stages start only when all their dependencies
- * have completed.
+ * in parallel on worker nodes. Each worker stores its IPC output in
+ * {@link WorkerOutputManager} on its local node.
  *
- * <p>FINAL stages execute on the coordinator node using the DataFusion
- * native merge (same as current IPC merge path).
+ * <p>FINAL stages execute on the coordinator node. The coordinator pulls
+ * IPC bytes from each worker via {@link ExchangePullAction} transport,
+ * then merges using DataFusion native merge.
+ *
+ * <p>The push-based {@link ExchangeService} is still used as a fallback
+ * (workers also send IPC bytes in their transport response).
  */
 public final class StageScheduler {
 
@@ -85,7 +93,9 @@ public final class StageScheduler {
                                        List<IcebergScanPlan.FileInfo> files,
                                        Map<String, String> storageConfig) {
         long t0 = System.nanoTime();
-        logger.info("[StageScheduler] ====== MULTI-STAGE EXECUTION START ======");
+        String queryId = UUID.randomUUID().toString();
+
+        logger.info("[StageScheduler] ====== MULTI-STAGE EXECUTION START (queryId={}) ======", queryId);
         logger.info("[StageScheduler] DAG: {} stages, root={}", dag.stageCount(), dag.getRootStageId());
 
         List<DiscoveryNode> dataNodes = getDataNodes();
@@ -97,6 +107,9 @@ public final class StageScheduler {
             executions.put(stage.getId(), new StageExecution(stage.getId()));
             exchangeService.registerOutputScheme(stage.getId(), stage.getOutputPartitioning());
         }
+
+        // Track which nodes ran each stage (for pull-based exchange)
+        Map<StageId, List<NodeAssignment>> stageNodeAssignments = new LinkedHashMap<>();
 
         Iterable<Object[]> finalResult = null;
 
@@ -120,9 +133,9 @@ public final class StageScheduler {
                 exec.transitionTo(StageExecution.State.RUNNING);
 
                 if (stage.getType() == Stage.StageType.FINAL) {
-                    finalResult = executeFinalStage(stage, exec);
+                    finalResult = executeFinalStage(stage, exec, queryId, stageNodeAssignments);
                 } else {
-                    executeWorkerStage(stage, exec, files, storageConfig, dataNodes);
+                    executeWorkerStage(stage, exec, files, storageConfig, dataNodes, queryId, stageNodeAssignments);
                 }
 
                 logger.info("[StageScheduler] Stage {} completed in {} ms",
@@ -133,11 +146,12 @@ public final class StageScheduler {
             throw new RuntimeException("Multi-stage execution failed", e);
         } finally {
             exchangeService.clear();
+            cleanupWorkerOutputs(queryId);
         }
 
         long t1 = System.nanoTime();
-        logger.info("[StageScheduler] ====== MULTI-STAGE EXECUTION END ({} ms) ======",
-            (t1 - t0) / 1_000_000);
+        logger.info("[StageScheduler] ====== MULTI-STAGE EXECUTION END (queryId={}, {} ms) ======",
+            queryId, (t1 - t0) / 1_000_000);
 
         if (finalResult == null) {
             throw new IllegalStateException("No final results from root stage " + dag.getRootStageId());
@@ -148,11 +162,16 @@ public final class StageScheduler {
     private void executeWorkerStage(Stage stage, StageExecution exec,
                                      List<IcebergScanPlan.FileInfo> files,
                                      Map<String, String> storageConfig,
-                                     List<DiscoveryNode> dataNodes) {
+                                     List<DiscoveryNode> dataNodes,
+                                     String queryId,
+                                     Map<StageId, List<NodeAssignment>> stageNodeAssignments) {
         List<List<IcebergScanPlan.FileInfo>> partitions = FilePartitioner.partition(files, dataNodes.size());
 
         CountDownLatch latch = new CountDownLatch(partitions.size());
         AtomicReference<Exception> firstError = new AtomicReference<>();
+        List<NodeAssignment> assignments = Collections.synchronizedList(new ArrayList<>());
+
+        String stageIdStr = stage.getId().toString();
 
         for (int i = 0; i < partitions.size(); i++) {
             DiscoveryNode targetNode = dataNodes.get(i);
@@ -162,12 +181,15 @@ public final class StageScheduler {
                 .map(IcebergScanPlan.FileInfo::getPath)
                 .toArray(String[]::new);
 
+            // Include queryId and stageId so worker stores output in WorkerOutputManager
             LakehouseWorkerRequest request = new LakehouseWorkerRequest(
-                filePaths, stage.getSql(), storageConfig, stage.getTableName()
+                filePaths, stage.getSql(), storageConfig, stage.getTableName(),
+                queryId, stageIdStr
             );
 
-            logger.info("[StageScheduler] {} task[{}] -> {}: {} files, sql={}",
-                stage.getId(), i, targetNode.getName(), filePaths.length, stage.getSql());
+            logger.info("[StageScheduler] {} task[{}] -> {} ({}): {} files, queryId={}, stageId={}, sql={}",
+                stage.getId(), i, targetNode.getName(), targetNode.getId(), filePaths.length,
+                queryId, stageIdStr, stage.getSql());
 
             final int taskIdx = i;
             transportService.sendRequest(targetNode, LakehouseWorkerAction.NAME, request,
@@ -179,9 +201,13 @@ public final class StageScheduler {
 
                     @Override
                     public void handleResponse(LakehouseWorkerResponse response) {
+                        // Record which node ran this stage task
+                        assignments.add(new NodeAssignment(targetNode.getId(), targetNode));
+
+                        // Also store in ExchangeService as fallback
                         if (response.hasIpcBytes()) {
                             exchangeService.addStageOutput(stage.getId(), response.getIpcBytes());
-                            logger.info("[StageScheduler] {} task[{}] returned {} IPC bytes from {}",
+                            logger.info("[StageScheduler] {} task[{}] returned {} IPC bytes from {} (also stored on worker for pull)",
                                 stage.getId(), taskIdx, response.getIpcBytes().length, targetNode.getName());
                         }
                         latch.countDown();
@@ -215,24 +241,53 @@ public final class StageScheduler {
             throw new RuntimeException(stage.getId() + " failed", error);
         }
 
+        // Record node assignments for this stage (used by downstream stages to pull)
+        stageNodeAssignments.put(stage.getId(), new ArrayList<>(assignments));
+
         exec.transitionTo(StageExecution.State.FINISHED);
-        logger.info("[StageScheduler] {} finished: {} IPC outputs collected",
-            stage.getId(), exchangeService.getOutputCount(stage.getId()));
+        logger.info("[StageScheduler] {} finished: {} workers assigned, {} IPC outputs in ExchangeService (fallback)",
+            stage.getId(), assignments.size(), exchangeService.getOutputCount(stage.getId()));
     }
 
-    private Iterable<Object[]> executeFinalStage(Stage stage, StageExecution exec) {
+    private Iterable<Object[]> executeFinalStage(Stage stage, StageExecution exec,
+                                                   String queryId,
+                                                   Map<StageId, List<NodeAssignment>> stageNodeAssignments) {
         InputSpec input = stage.getInputSpec();
         if (!(input instanceof InputSpec.ExchangeInput exchangeInput)) {
             throw new IllegalStateException("Final stage must have exchange input");
         }
 
-        // Collect all upstream IPC batches
+        // Try pull-based exchange: pull IPC bytes from workers
         List<byte[]> allBatches = new ArrayList<>();
+        boolean pullSucceeded = false;
+
         for (Map.Entry<StageId, String> entry : exchangeInput.getSourceTableNames().entrySet()) {
-            byte[][] outputs = exchangeService.getAllOutputs(entry.getKey());
-            logger.info("[StageScheduler] Final stage collecting from {}: {} IPC batches",
-                entry.getKey(), outputs.length);
-            Collections.addAll(allBatches, outputs);
+            StageId sourceStageId = entry.getKey();
+            List<NodeAssignment> workerNodes = stageNodeAssignments.getOrDefault(sourceStageId, List.of());
+
+            if (!workerNodes.isEmpty()) {
+                logger.info("[StageScheduler] Final stage pulling from {} workers for {}",
+                    workerNodes.size(), sourceStageId);
+
+                List<byte[]> pulled = pullFromWorkers(queryId, sourceStageId.toString(), workerNodes);
+                if (!pulled.isEmpty()) {
+                    allBatches.addAll(pulled);
+                    pullSucceeded = true;
+                    logger.info("[StageScheduler] Pulled {} IPC batches from workers for {}",
+                        pulled.size(), sourceStageId);
+                }
+            }
+        }
+
+        // Fallback to ExchangeService if pull didn't work
+        if (!pullSucceeded) {
+            logger.info("[StageScheduler] Pull-based exchange returned no data, falling back to ExchangeService");
+            for (Map.Entry<StageId, String> entry : exchangeInput.getSourceTableNames().entrySet()) {
+                byte[][] outputs = exchangeService.getAllOutputs(entry.getKey());
+                logger.info("[StageScheduler] Final stage collecting from {} (ExchangeService fallback): {} IPC batches",
+                    entry.getKey(), outputs.length);
+                Collections.addAll(allBatches, outputs);
+            }
         }
 
         // Use the global backend executor for DataFusion merge
@@ -248,13 +303,85 @@ public final class StageScheduler {
         );
         mergeContext.setIpcBatches(ipcBatches);
 
-        logger.info("[StageScheduler] Final stage merge: {} IPC batches, sql={}",
-            ipcBatches.length, stage.getSql());
+        logger.info("[StageScheduler] Final stage merge: {} IPC batches (pull={}), sql={}",
+            ipcBatches.length, pullSucceeded, stage.getSql());
 
         Iterable<Object[]> result = executor.apply(mergeContext);
 
         exec.transitionTo(StageExecution.State.FINISHED);
         return result;
+    }
+
+    /**
+     * Pulls IPC output from worker nodes via the ExchangePull transport action.
+     */
+    private List<byte[]> pullFromWorkers(String queryId, String stageId, List<NodeAssignment> workers) {
+        List<byte[]> results = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch latch = new CountDownLatch(workers.size());
+        AtomicReference<Exception> firstError = new AtomicReference<>();
+
+        for (NodeAssignment worker : workers) {
+            ExchangePullRequest pullReq = new ExchangePullRequest(queryId, stageId);
+
+            logger.info("[StageScheduler] Pulling from worker {} for queryId={}, stageId={}",
+                worker.node().getName(), queryId, stageId);
+
+            transportService.sendRequest(worker.node(), ExchangePullAction.NAME, pullReq,
+                new TransportResponseHandler<ExchangePullResponse>() {
+                    @Override
+                    public ExchangePullResponse read(StreamInput in) throws IOException {
+                        return new ExchangePullResponse(in);
+                    }
+
+                    @Override
+                    public void handleResponse(ExchangePullResponse response) {
+                        if (response.hasData()) {
+                            results.add(response.getIpcBytes());
+                            logger.info("[StageScheduler] Pulled {} bytes from {}",
+                                response.getIpcBytes().length, worker.node().getName());
+                        } else {
+                            logger.warn("[StageScheduler] No data pulled from {} for queryId={}, stageId={}",
+                                worker.node().getName(), queryId, stageId);
+                        }
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public void handleException(TransportException exp) {
+                        logger.error("[StageScheduler] Pull failed from {}", worker.node().getName(), exp);
+                        firstError.compareAndSet(null, exp);
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public String executor() { return ThreadPool.Names.GENERIC; }
+                }
+            );
+        }
+
+        try {
+            boolean done = latch.await(STAGE_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+            if (!done) {
+                logger.warn("[StageScheduler] Pull timed out for queryId={}, stageId={}", queryId, stageId);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.warn("[StageScheduler] Pull interrupted for queryId={}, stageId={}", queryId, stageId);
+        }
+
+        if (firstError.get() != null) {
+            logger.warn("[StageScheduler] Pull had errors, will fall back to ExchangeService", firstError.get());
+            return List.of();
+        }
+
+        return results;
+    }
+
+    /**
+     * Cleans up WorkerOutputManager on the local node after query completes.
+     */
+    private void cleanupWorkerOutputs(String queryId) {
+        WorkerOutputManager.instance().cleanup(queryId);
     }
 
     private List<DiscoveryNode> getDataNodes() {
@@ -264,4 +391,7 @@ public final class StageScheduler {
 
     /** Returns the exchange service used for inter-stage data routing. */
     public ExchangeService getExchangeService() { return exchangeService; }
+
+    /** Records which node ran a stage task. */
+    record NodeAssignment(String nodeId, DiscoveryNode node) {}
 }

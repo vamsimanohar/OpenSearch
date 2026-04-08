@@ -20,10 +20,7 @@ import java.util.Map;
  * Transport request sent from the coordinator node to a worker node for
  * distributed Iceberg query execution. Contains the file paths assigned
  * to this worker, the SQL query to execute, S3 storage configuration,
- * and the table name.
- *
- * <p>Unlike the Substrait-based approach, this request carries a SQL string
- * as the wire format. The worker executes the SQL directly via DataFusion.
+ * the table name, and optional multi-stage metadata (queryId, stageId).
  */
 public class LakehouseWorkerRequest extends ActionRequest {
 
@@ -31,9 +28,11 @@ public class LakehouseWorkerRequest extends ActionRequest {
     private final String sqlQuery;
     private final Map<String, String> storageConfig;
     private final String tableName;
+    private final String queryId;
+    private final String stageId;
 
     /**
-     * Creates a new worker request.
+     * Creates a new worker request (backward-compatible, no multi-stage metadata).
      *
      * @param filePaths     S3 or file paths for this worker's file subset
      * @param sqlQuery      SQL query string for the worker to execute
@@ -41,16 +40,35 @@ public class LakehouseWorkerRequest extends ActionRequest {
      * @param tableName     table name for DataFusion table registration
      */
     public LakehouseWorkerRequest(String[] filePaths, String sqlQuery, Map<String, String> storageConfig, String tableName) {
+        this(filePaths, sqlQuery, storageConfig, tableName, "", "");
+    }
+
+    /**
+     * Creates a new worker request with multi-stage metadata.
+     *
+     * @param filePaths     S3 or file paths for this worker's file subset
+     * @param sqlQuery      SQL query string for the worker to execute
+     * @param storageConfig storage configuration (e.g., s3Region, s3Bucket, credentials)
+     * @param tableName     table name for DataFusion table registration
+     * @param queryId       unique query execution ID for pull-based exchange
+     * @param stageId       stage ID within the query DAG
+     */
+    public LakehouseWorkerRequest(String[] filePaths, String sqlQuery,
+                                   Map<String, String> storageConfig, String tableName,
+                                   String queryId, String stageId) {
         this.filePaths = filePaths;
         this.sqlQuery = sqlQuery;
         this.storageConfig = storageConfig;
         this.tableName = tableName;
+        this.queryId = queryId != null ? queryId : "";
+        this.stageId = stageId != null ? stageId : "";
     }
 
     /**
      * Deserialization constructor.
      *
      * @param in the stream input to deserialize from
+     * @throws IOException if deserialization fails
      */
     public LakehouseWorkerRequest(StreamInput in) throws IOException {
         super(in);
@@ -58,6 +76,8 @@ public class LakehouseWorkerRequest extends ActionRequest {
         this.sqlQuery = in.readString();
         this.storageConfig = in.readMap(StreamInput::readString, StreamInput::readString);
         this.tableName = in.readString();
+        this.queryId = in.readString();
+        this.stageId = in.readString();
     }
 
     @Override
@@ -83,25 +103,28 @@ public class LakehouseWorkerRequest extends ActionRequest {
         out.writeString(sqlQuery);
         out.writeMap(storageConfig, StreamOutput::writeString, StreamOutput::writeString);
         out.writeString(tableName);
+        out.writeString(queryId);
+        out.writeString(stageId);
     }
 
     /** Returns the S3 or file paths assigned to this worker. */
-    public String[] getFilePaths() {
-        return filePaths;
-    }
+    public String[] getFilePaths() { return filePaths; }
 
     /** Returns the SQL query string for the worker to execute. */
-    public String getSqlQuery() {
-        return sqlQuery;
-    }
+    public String getSqlQuery() { return sqlQuery; }
 
-    /** Returns the storage configuration map (e.g., s3Region, s3Bucket, credentials). */
-    public Map<String, String> getStorageConfig() {
-        return storageConfig;
-    }
+    /** Returns the storage configuration map. */
+    public Map<String, String> getStorageConfig() { return storageConfig; }
 
     /** Returns the table name for DataFusion table registration. */
-    public String getTableName() {
-        return tableName;
-    }
+    public String getTableName() { return tableName; }
+
+    /** Returns the query execution ID (empty string if not a multi-stage query). */
+    public String getQueryId() { return queryId; }
+
+    /** Returns the stage ID (empty string if not a multi-stage query). */
+    public String getStageId() { return stageId; }
+
+    /** Returns true if this request has multi-stage metadata (queryId is set). */
+    public boolean hasQueryId() { return queryId != null && !queryId.isEmpty(); }
 }
