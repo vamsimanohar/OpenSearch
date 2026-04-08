@@ -22,10 +22,14 @@ import org.opensearch.lakehouse.distributed.exchange.ExchangePullAction;
 import org.opensearch.lakehouse.distributed.exchange.ExchangePullRequest;
 import org.opensearch.lakehouse.distributed.exchange.ExchangePullResponse;
 import org.opensearch.lakehouse.distributed.exchange.WorkerOutputManager;
+import org.opensearch.cluster.node.DiscoveryNode;
+import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.StreamTransportService;
 import org.opensearch.transport.TransportChannel;
+import org.opensearch.transport.TransportException;
+import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.TransportService;
 import org.opensearch.transport.stream.StreamErrorCode;
 import org.opensearch.transport.stream.StreamException;
@@ -33,7 +37,11 @@ import org.opensearch.transport.stream.StreamException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
@@ -59,6 +67,9 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
     /** Number of rows per batch when streaming results back to the coordinator. */
     private static final int STREAM_BATCH_SIZE = 1000;
 
+    private final TransportService workerTransportService;
+    private final ClusterService workerClusterService;
+
     /**
      * Guice-injected constructor. Registers this handler with both the standard transport
      * service (for {@code client().execute()} validation) and the Arrow Flight streaming
@@ -77,6 +88,8 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
         @Nullable StreamTransportService streamTransportService
     ) {
         super(LakehouseWorkerAction.NAME, transportService, actionFilters, LakehouseWorkerRequest::new);
+        this.workerTransportService = transportService;
+        this.workerClusterService = clusterService;
 
         // Register streaming handler on Arrow Flight transport if available
         if (streamTransportService != null) {
@@ -273,6 +286,11 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
      * Falls back to legacy Object[][] format if IPC executor is not available.
      */
     private LakehouseWorkerResponse executeWorkerQuery(LakehouseWorkerRequest request) {
+        // Route INTERMEDIATE stage requests to exchange-based execution
+        if (request.hasExchangeInputs()) {
+            return executeWithExchangeInputs(request);
+        }
+
         long tWorker0 = System.nanoTime();
         String[] filePaths = request.getFilePaths();
         String sqlQuery = request.getSqlQuery();
@@ -352,5 +370,117 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             (tWorker1 - tExec0) / 1_000_000, (tWorker1 - tWorker0) / 1_000_000, rows.length, columnNames.length);
         logger.info("[Worker] ====== WORKER EXECUTION END (rows) ======");
         return new LakehouseWorkerResponse(rows, columnNames);
+    }
+
+    /**
+     * Executes an INTERMEDIATE stage: pulls IPC from upstream workers,
+     * registers as MemTable, executes SQL, returns result.
+     */
+    private LakehouseWorkerResponse executeWithExchangeInputs(LakehouseWorkerRequest request) {
+        long t0 = System.nanoTime();
+        String queryId = request.getQueryId();
+        String stageId = request.getStageId();
+
+        logger.info("[Worker] ====== INTERMEDIATE STAGE START: queryId={}, stageId={} ======", queryId, stageId);
+        logger.info("[Worker] sql={}, exchangeInputs={}", request.getSqlQuery(), request.getExchangeInputs().size());
+
+        // Pull IPC from all upstream source stages
+        List<byte[]> allUpstreamIpc = new ArrayList<>();
+        for (LakehouseWorkerRequest.ExchangeInput exchangeInput : request.getExchangeInputs()) {
+            List<byte[]> pulled = pullFromUpstream(queryId, exchangeInput);
+            logger.info("[Worker] Pulled {} IPC batches from upstream stage {} (table={})",
+                pulled.size(), exchangeInput.getSourceStageId(), exchangeInput.getMemTableName());
+            allUpstreamIpc.addAll(pulled);
+        }
+
+        if (allUpstreamIpc.isEmpty()) {
+            logger.warn("[Worker] No upstream data pulled — returning empty response");
+            return new LakehouseWorkerResponse(new byte[0]);
+        }
+
+        // Build merge context: SQL executes against upstream IPC as MemTable
+        byte[][] ipcBatches = allUpstreamIpc.toArray(new byte[0][]);
+        ExternalScanContext mergeContext = new ExternalScanContext(
+            request.getTableName(), List.of(), request.getSqlQuery(), Map.of()
+        );
+        mergeContext.setIpcBatches(ipcBatches);
+
+        // Execute via backend
+        Function<ExternalScanContext, byte[]> ipcExecutor = ExternalScanContext.getGlobalIpcExecutor();
+        if (ipcExecutor == null) {
+            throw new IllegalStateException("IPC executor not available for intermediate stage");
+        }
+
+        byte[] resultIpc = ipcExecutor.apply(mergeContext);
+        long t1 = System.nanoTime();
+
+        if (resultIpc != null && resultIpc.length > 0 && request.hasQueryId()) {
+            WorkerOutputManager.instance().registerOutput(queryId, stageId, resultIpc);
+            logger.info("[Worker] Stored INTERMEDIATE output: queryId={}, stageId={}, {} bytes",
+                queryId, stageId, resultIpc.length);
+        }
+
+        logger.info("[Worker] [TIMING] INTERMEDIATE stage: {} ms — {} upstream batches → {} result bytes",
+            (t1 - t0) / 1_000_000, ipcBatches.length, resultIpc != null ? resultIpc.length : 0);
+        logger.info("[Worker] ====== INTERMEDIATE STAGE END ======");
+
+        return new LakehouseWorkerResponse(resultIpc != null ? resultIpc : new byte[0]);
+    }
+
+    /**
+     * Pulls IPC data from upstream nodes for an exchange input.
+     */
+    private List<byte[]> pullFromUpstream(String queryId, LakehouseWorkerRequest.ExchangeInput exchangeInput) {
+        List<byte[]> results = Collections.synchronizedList(new ArrayList<>());
+        List<String> nodeIds = exchangeInput.getSourceNodeIds();
+        CountDownLatch latch = new CountDownLatch(nodeIds.size());
+
+        for (String nodeId : nodeIds) {
+            DiscoveryNode node = workerClusterService.state().nodes().get(nodeId);
+            if (node == null) {
+                logger.warn("[Worker] Cannot find node {} for pull", nodeId);
+                latch.countDown();
+                continue;
+            }
+
+            ExchangePullRequest pullReq = new ExchangePullRequest(queryId, exchangeInput.getSourceStageId());
+            logger.info("[Worker] Pulling from {} for stage {}", node.getName(), exchangeInput.getSourceStageId());
+
+            workerTransportService.sendRequest(node, ExchangePullAction.NAME, pullReq,
+                new TransportResponseHandler<ExchangePullResponse>() {
+                    @Override
+                    public ExchangePullResponse read(StreamInput in) throws IOException {
+                        return new ExchangePullResponse(in);
+                    }
+
+                    @Override
+                    public void handleResponse(ExchangePullResponse response) {
+                        if (response.hasData()) {
+                            results.add(response.getIpcBytes());
+                            logger.info("[Worker] Pulled {} bytes from {}", response.getIpcBytes().length, node.getName());
+                        }
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public void handleException(TransportException exp) {
+                        logger.error("[Worker] Pull failed from {}", node.getName(), exp);
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public String executor() { return ThreadPool.Names.GENERIC; }
+                }
+            );
+        }
+
+        try {
+            latch.await(5, TimeUnit.MINUTES);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.warn("[Worker] Pull interrupted");
+        }
+
+        return results;
     }
 }

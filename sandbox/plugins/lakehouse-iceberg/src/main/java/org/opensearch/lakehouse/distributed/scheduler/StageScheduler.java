@@ -132,10 +132,17 @@ public final class StageScheduler {
 
                 exec.transitionTo(StageExecution.State.RUNNING);
 
-                if (stage.getType() == Stage.StageType.FINAL) {
-                    finalResult = executeFinalStage(stage, exec, queryId, stageNodeAssignments);
-                } else {
-                    executeWorkerStage(stage, exec, files, storageConfig, dataNodes, queryId, stageNodeAssignments);
+                switch (stage.getType()) {
+                    case FINAL:
+                        finalResult = executeFinalStage(stage, exec, queryId, stageNodeAssignments);
+                        break;
+                    case INTERMEDIATE:
+                        executeIntermediateStage(stage, exec, dataNodes, queryId, stageNodeAssignments);
+                        break;
+                    case SCAN:
+                    default:
+                        executeWorkerStage(stage, exec, files, storageConfig, dataNodes, queryId, stageNodeAssignments);
+                        break;
                 }
 
                 logger.info("[StageScheduler] Stage {} completed in {} ms",
@@ -247,6 +254,100 @@ public final class StageScheduler {
         exec.transitionTo(StageExecution.State.FINISHED);
         logger.info("[StageScheduler] {} finished: {} workers assigned, {} IPC outputs in ExchangeService (fallback)",
             stage.getId(), assignments.size(), exchangeService.getOutputCount(stage.getId()));
+    }
+
+    private void executeIntermediateStage(Stage stage, StageExecution exec,
+                                             List<DiscoveryNode> dataNodes,
+                                             String queryId,
+                                             Map<StageId, List<NodeAssignment>> stageNodeAssignments) {
+        InputSpec input = stage.getInputSpec();
+        if (!(input instanceof InputSpec.ExchangeInput exchangeInput)) {
+            throw new IllegalStateException("INTERMEDIATE stage must have exchange input");
+        }
+
+        String stageIdStr = stage.getId().toString();
+
+        // Build exchange inputs: for each source stage, include which nodes ran it
+        List<LakehouseWorkerRequest.ExchangeInput> workerExchangeInputs = new ArrayList<>();
+        for (Map.Entry<StageId, String> entry : exchangeInput.getSourceTableNames().entrySet()) {
+            StageId sourceStageId = entry.getKey();
+            String memTableName = entry.getValue();
+            List<NodeAssignment> sourceNodes = stageNodeAssignments.getOrDefault(sourceStageId, List.of());
+            List<String> nodeIds = sourceNodes.stream().map(NodeAssignment::nodeId).toList();
+
+            workerExchangeInputs.add(new LakehouseWorkerRequest.ExchangeInput(
+                sourceStageId.toString(), memTableName, nodeIds
+            ));
+            logger.info("[StageScheduler] INTERMEDIATE {} pulls from {} ({} nodes) as table '{}'",
+                stage.getId(), sourceStageId, nodeIds.size(), memTableName);
+        }
+
+        // Dispatch to all data nodes (each worker pulls from all upstream nodes)
+        CountDownLatch latch = new CountDownLatch(dataNodes.size());
+        AtomicReference<Exception> firstError = new AtomicReference<>();
+        List<NodeAssignment> assignments = Collections.synchronizedList(new ArrayList<>());
+
+        for (int i = 0; i < dataNodes.size(); i++) {
+            DiscoveryNode targetNode = dataNodes.get(i);
+
+            LakehouseWorkerRequest request = new LakehouseWorkerRequest(
+                new String[0], stage.getSql(), Map.of(), stage.getTableName(),
+                queryId, stageIdStr, workerExchangeInputs
+            );
+
+            logger.info("[StageScheduler] INTERMEDIATE {} task[{}] -> {}: sql={}",
+                stage.getId(), i, targetNode.getName(), stage.getSql());
+
+            final int taskIdx = i;
+            transportService.sendRequest(targetNode, LakehouseWorkerAction.NAME, request,
+                new TransportResponseHandler<LakehouseWorkerResponse>() {
+                    @Override
+                    public LakehouseWorkerResponse read(StreamInput in) throws IOException {
+                        return new LakehouseWorkerResponse(in);
+                    }
+
+                    @Override
+                    public void handleResponse(LakehouseWorkerResponse response) {
+                        assignments.add(new NodeAssignment(targetNode.getId(), targetNode));
+                        if (response.hasIpcBytes()) {
+                            exchangeService.addStageOutput(stage.getId(), response.getIpcBytes());
+                            logger.info("[StageScheduler] INTERMEDIATE {} task[{}] returned {} IPC bytes from {}",
+                                stage.getId(), taskIdx, response.getIpcBytes().length, targetNode.getName());
+                        }
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public void handleException(TransportException exp) {
+                        logger.error("[StageScheduler] INTERMEDIATE {} worker failed on {}",
+                            stage.getId(), targetNode.getName(), exp);
+                        firstError.compareAndSet(null, exp);
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public String executor() { return ThreadPool.Names.GENERIC; }
+                }
+            );
+        }
+
+        try {
+            boolean done = latch.await(STAGE_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+            if (!done) throw new RuntimeException(stage.getId() + " timed out");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(stage.getId() + " interrupted", e);
+        }
+
+        Exception error = firstError.get();
+        if (error != null) {
+            exec.fail(error);
+            throw new RuntimeException(stage.getId() + " failed", error);
+        }
+
+        stageNodeAssignments.put(stage.getId(), new ArrayList<>(assignments));
+        exec.transitionTo(StageExecution.State.FINISHED);
+        logger.info("[StageScheduler] INTERMEDIATE {} finished: {} workers", stage.getId(), assignments.size());
     }
 
     private Iterable<Object[]> executeFinalStage(Stage stage, StageExecution exec,
