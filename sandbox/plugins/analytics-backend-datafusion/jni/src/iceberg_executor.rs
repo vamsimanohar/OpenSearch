@@ -46,6 +46,10 @@ pub async fn execute_iceberg_query(
     info!("[DataFusion-Rust] execute_iceberg_query: table={}, files={}, sql_len={}, bucket={}, has_global_runtime={}",
         table_name, file_paths.len(), sql_query.len(), s3_config.bucket, global_runtime.is_some());
 
+    if file_paths.is_empty() {
+        return Err(DataFusionError::Plan("No file paths provided for Iceberg query".to_string()));
+    }
+
     // Build a RuntimeEnv — share the global memory pool + disk manager if available,
     // otherwise create a standalone one (for testing / fallback).
     let runtime_env = match global_runtime {
