@@ -26,6 +26,9 @@ import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.type.RelDataType;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
 
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -114,7 +117,18 @@ public class OpenSearchBoundaryTableScan extends TableScan implements Enumerable
     public Enumerable<Object[]> bind(DataContext dataContext) {
         try {
             Iterable<Object[]> result = (Iterable<Object[]>) planExecutor.execute(logicalFragment, dataContext);
-            return Linq4j.asEnumerable(result);
+            // Calcite's Enumerable expects TIMESTAMP values as long (epoch millis),
+            // but DataFusion returns LocalDateTime. Convert before passing to Calcite.
+            List<Object[]> converted = new ArrayList<>();
+            for (Object[] row : result) {
+                for (int i = 0; i < row.length; i++) {
+                    if (row[i] instanceof LocalDateTime) {
+                        row[i] = ((LocalDateTime) row[i]).toInstant(ZoneOffset.UTC).toEpochMilli();
+                    }
+                }
+                converted.add(row);
+            }
+            return Linq4j.asEnumerable(converted);
         } catch (Exception e) {
             throw new RuntimeException(
                 "Engine execution failed for table ["

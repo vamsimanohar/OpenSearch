@@ -8,6 +8,14 @@
 
 package org.opensearch.be.datafusion.jni;
 
+import org.opensearch.common.SuppressForbidden;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+
 /**
  * Core JNI bridge to native DataFusion library.
  * All native method declarations are centralized here.
@@ -22,8 +30,27 @@ public final class NativeBridge {
 
     private NativeBridge() {}
 
+    @SuppressForbidden(reason = "Needs temp directory to extract native library from classpath")
     private static synchronized void loadNativeLibrary() {
         if (loaded) return;
+        String libFileName = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("mac")
+            ? "libopensearch_datafusion_jni.dylib"
+            : "libopensearch_datafusion_jni.so";
+        // Try extracting from classpath resource first (bundled in plugin jar)
+        try (InputStream is = NativeBridge.class.getResourceAsStream("/native/" + libFileName)) {
+            if (is != null) {
+                Path tempDir = Files.createTempDirectory("opensearch-datafusion-native-");
+                Path tempLib = tempDir.resolve(libFileName);
+                Files.copy(is, tempLib, StandardCopyOption.REPLACE_EXISTING);
+                System.load(tempLib.toAbsolutePath().toString());
+                tempLib.toFile().deleteOnExit();
+                tempDir.toFile().deleteOnExit();
+                loaded = true;
+                return;
+            }
+        } catch (IOException e) {
+            // Fall through to System.loadLibrary
+        }
         try {
             System.loadLibrary("opensearch_datafusion_jni");
             loaded = true;
@@ -94,6 +121,38 @@ public final class NativeBridge {
         long readerPtr,
         String tableName,
         byte[] substraitPlan,
+        long runtimePtr,
+        org.opensearch.core.action.ActionListener<Long> listener
+    );
+
+    // ---- Iceberg / S3 query execution ----
+
+    /**
+     * Executes a SQL query against S3-backed Parquet files via DataFusion.
+     * Used for Iceberg external table queries where files are on S3, not local disk.
+     *
+     * @param s3Region         AWS region
+     * @param s3Bucket         S3 bucket name
+     * @param s3AccessKeyId    AWS access key ID, or null for default credentials
+     * @param s3SecretAccessKey AWS secret access key, or null for default credentials
+     * @param s3SessionToken   AWS session token, or null
+     * @param s3Endpoint       S3 endpoint override, or null (for local testing with MinIO etc.)
+     * @param filePaths        array of S3 Parquet file paths to scan
+     * @param tableName        table name for DataFusion table registration
+     * @param sqlQuery         SQL query string for DataFusion to execute
+     * @param runtimePtr       native DataFusion runtime pointer
+     * @param listener         callback receiving the stream pointer (Long) or error
+     */
+    public static native void executeIcebergQueryAsync(
+        String s3Region,
+        String s3Bucket,
+        String s3AccessKeyId,
+        String s3SecretAccessKey,
+        String s3SessionToken,
+        String s3Endpoint,
+        String[] filePaths,
+        String tableName,
+        String sqlQuery,
         long runtimePtr,
         org.opensearch.core.action.ActionListener<Long> listener
     );

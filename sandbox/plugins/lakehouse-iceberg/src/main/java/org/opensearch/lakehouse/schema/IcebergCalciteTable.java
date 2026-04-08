@@ -1,0 +1,76 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+package org.opensearch.lakehouse.schema;
+
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.schema.impl.AbstractTable;
+import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.iceberg.Schema;
+import org.apache.iceberg.Table;
+import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.Types;
+import org.opensearch.analytics.schema.ExternalTable;
+import org.opensearch.lakehouse.catalog.CatalogConfig;
+
+/**
+ * A Calcite {@link AbstractTable} backed by an Apache Iceberg table.
+ * The constructor pins the current snapshot so that every query operator
+ * sees a consistent view of the table.
+ */
+public class IcebergCalciteTable extends AbstractTable implements ExternalTable {
+    private final Table icebergTable;
+    private final long pinnedSnapshotId;
+    private final CatalogConfig catalogConfig;
+
+    /**
+     * Creates a Calcite table backed by the given Iceberg table, pinning the current snapshot.
+     *
+     * @param icebergTable  the Iceberg table to wrap
+     * @param catalogConfig the catalog config for storage access
+     */
+    public IcebergCalciteTable(Table icebergTable, CatalogConfig catalogConfig) {
+        this.icebergTable = icebergTable;
+        this.pinnedSnapshotId = icebergTable.currentSnapshot() != null ? icebergTable.currentSnapshot().snapshotId() : -1L;
+        this.catalogConfig = catalogConfig;
+    }
+
+    @Override
+    public RelDataType getRowType(RelDataTypeFactory typeFactory) {
+        RelDataTypeFactory.Builder builder = typeFactory.builder();
+        Schema schema = icebergTable.schema();
+        for (Types.NestedField field : schema.columns()) {
+            RelDataType calciteType;
+            if (field.type().typeId() == Type.TypeID.DECIMAL) {
+                Types.DecimalType dt = (Types.DecimalType) field.type();
+                calciteType = typeFactory.createSqlType(SqlTypeName.DECIMAL, dt.precision(), dt.scale());
+            } else {
+                calciteType = typeFactory.createSqlType(IcebergTypeMapper.toCalcite(field.type()));
+            }
+            if (field.isOptional()) {
+                calciteType = typeFactory.createTypeWithNullability(calciteType, true);
+            }
+            builder.add(field.name(), calciteType);
+        }
+        return builder.build();
+    }
+
+    /** Returns the underlying Iceberg table. */
+    public Table getIcebergTable() {
+        return icebergTable;
+    }
+
+    /** Returns the pinned snapshot ID, or {@code -1} if no snapshot exists. */
+    public long getPinnedSnapshotId() {
+        return pinnedSnapshotId;
+    }
+
+    /** Returns the catalog config for storage access. */
+    public CatalogConfig getCatalogConfig() { return catalogConfig; }
+}

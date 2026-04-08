@@ -1,0 +1,201 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+apply plugin: 'opensearch.internal-cluster-test'
+
+opensearchplugin {
+    name = 'lakehouse-iceberg'
+    description = 'Read external Apache Iceberg tables via PPL and SQL'
+    classname = 'org.opensearch.lakehouse.LakehousePlugin'
+    extendedPlugins = ['analytics-engine']
+}
+
+repositories {
+    maven {
+        name = 'OpenSearch Snapshots'
+        url = 'https://ci.opensearch.org/ci/dbc/snapshots/maven/'
+    }
+}
+
+// Guava comes transitively from calcite-core — forbidden on compile classpaths
+// by OpenSearch. Test sources need it (Calcite API exposes ImmutableList, etc.).
+// Bypass via custom configuration, following the analytics-engine pattern.
+configurations {
+    calciteTestCompile
+    testCompileClasspath { exclude group: 'com.google.guava' }
+}
+sourceSets.test.compileClasspath += configurations.calciteTestCompile
+
+dependencies {
+    // Iceberg SDK
+    implementation "org.apache.iceberg:iceberg-api:1.7.1"
+    implementation "org.apache.iceberg:iceberg-core:1.7.1"
+    implementation "org.apache.iceberg:iceberg-aws:1.7.1"
+    implementation "org.apache.iceberg:iceberg-bundled-guava:1.7.1"
+    implementation "org.apache.iceberg:iceberg-parquet:1.7.1"
+
+    // Hadoop client (api + runtime cover hadoop-common, hadoop-auth, shaded deps)
+    implementation "org.apache.hadoop:hadoop-client-api:3.4.2"
+    runtimeOnly "org.apache.hadoop:hadoop-client-runtime:3.4.2"
+    implementation "org.apache.iceberg:iceberg-data:1.7.1"
+
+    // Iceberg transitive dependencies (OpenSearch plugin system strips transitives)
+    runtimeOnly "org.apache.iceberg:iceberg-common:1.7.1"
+    runtimeOnly "io.airlift:aircompressor:0.27"
+    runtimeOnly "com.github.ben-manes.caffeine:caffeine:2.9.3"
+    runtimeOnly "dev.failsafe:failsafe:3.3.2"
+    runtimeOnly "org.roaringbitmap:RoaringBitmap:1.3.0"
+    runtimeOnly "org.apache.avro:avro:1.12.0"
+    runtimeOnly "org.apache.commons:commons-compress:1.26.2"
+
+    // Parquet bundle (single jar avoids overlapping shaded classes between parquet-column/hadoop)
+    runtimeOnly "org.apache.parquet:parquet-hadoop-bundle:1.13.1"
+
+    // hadoop-client-runtime includes shaded: woodstox, guava, commons-config, re2j, etc.
+
+    // AWS SDK
+    implementation "software.amazon.awssdk:glue:${versions.aws}"
+    implementation "software.amazon.awssdk:s3:${versions.aws}"
+    implementation "software.amazon.awssdk:sts:${versions.aws}"
+    implementation "software.amazon.awssdk:auth:${versions.aws}"
+    implementation "software.amazon.awssdk:regions:${versions.aws}"
+    implementation "software.amazon.awssdk:identity-spi:${versions.aws}"
+    implementation "software.amazon.awssdk:utils:${versions.aws}"
+    implementation "software.amazon.awssdk:aws-core:${versions.aws}"
+    implementation "software.amazon.awssdk:sdk-core:${versions.aws}"
+
+    // AWS SDK transitive deps (OpenSearch plugin system strips transitives)
+    runtimeOnly "software.amazon.awssdk:http-client-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:url-connection-client:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:apache-client:${versions.aws}"
+    runtimeOnly "org.apache.httpcomponents:httpclient:4.5.14"
+    runtimeOnly "org.apache.httpcomponents:httpcore:4.4.16"
+    runtimeOnly "commons-logging:commons-logging:1.2"
+    runtimeOnly "software.amazon.awssdk:profiles:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:endpoints-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:protocol-core:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:json-utils:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-json-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-query-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-xml-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:third-party-jackson-core:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:metrics-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:annotations:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:checksums:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:checksums-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:retries:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:retries-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth-aws:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:crt-core:${versions.aws}"
+
+    // Analytics engine (compile-only, provided at runtime)
+    compileOnly project(':sandbox:plugins:analytics-engine')
+    compileOnly project(':sandbox:plugins:analytics-backend-datafusion')
+    compileOnly project(':sandbox:libs:analytics-framework')
+
+    // Calcite (via analytics-framework) for test compilation
+    testImplementation project(':sandbox:libs:analytics-framework')
+    // Guava for test compilation — Calcite API exposes Guava types
+    calciteTestCompile "com.google.guava:guava:${versions.guava}"
+
+    // Internal cluster test dependencies for SQL + PPL integration tests
+    internalClusterTestImplementation project(':sandbox:plugins:analytics-engine')
+    internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-datafusion')
+    internalClusterTestImplementation project(':sandbox:plugins:dsl-query-executor')
+    internalClusterTestImplementation project(':sandbox:libs:analytics-framework')
+    // PPL test infrastructure (TestPPLPlugin, PPLRequest, PPLResponse, etc.)
+    internalClusterTestImplementation files(project(':sandbox:plugins:analytics-engine').sourceSets.test.output)
+    // unified-query libs needed by the PPL test infrastructure classes (transitive=false to avoid conflicts)
+    internalClusterTestImplementation("org.opensearch.query:unified-query-api:3.6.0.0-SNAPSHOT") { transitive = false }
+    internalClusterTestImplementation("org.opensearch.query:unified-query-common:3.6.0.0-SNAPSHOT") { transitive = false }
+    internalClusterTestImplementation("org.opensearch.query:unified-query-core:3.6.0.0-SNAPSHOT") { transitive = false }
+    internalClusterTestImplementation("org.opensearch.query:unified-query-ppl:3.6.0.0-SNAPSHOT") { transitive = false }
+    internalClusterTestImplementation "org.antlr:antlr4-runtime:4.13.1"
+    // Calcite deps for TestSqlTransportAction (avatica-core for CalciteConnectionConfigImpl)
+    internalClusterTestImplementation("org.apache.calcite.avatica:avatica-core:1.27.0") { transitive = false }
+    internalClusterTestImplementation("org.immutables:value-annotations:2.8.8") { transitive = false }
+    // Gson needed by PPLBuiltinOperators at runtime
+    internalClusterTestImplementation("com.google.code.gson:gson:${versions.gson}") { transitive = false }
+}
+
+// Separate source set + configuration for data generation (avoids OpenSearch jar-hell)
+sourceSets {
+    dataGen {
+        java {
+            srcDir 'src/dataGen/java'
+        }
+    }
+}
+
+configurations {
+    dataGenFixture
+}
+dependencies {
+    dataGenFixture "org.apache.iceberg:iceberg-core:1.7.1"
+    dataGenFixture "org.apache.iceberg:iceberg-api:1.7.1"
+    dataGenFixture "org.apache.iceberg:iceberg-data:1.7.1"
+    dataGenFixture "org.apache.iceberg:iceberg-parquet:1.7.1"
+    dataGenFixture "org.apache.iceberg:iceberg-bundled-guava:1.7.1"
+    dataGenFixture "org.apache.iceberg:iceberg-common:1.7.1"
+    dataGenFixture "org.apache.hadoop:hadoop-common:3.4.2"
+    dataGenFixture "org.apache.parquet:parquet-column:1.13.1"
+    dataGenFixture "org.apache.parquet:parquet-hadoop:1.13.1"
+    dataGenFixture "org.apache.hadoop:hadoop-mapreduce-client-core:3.4.2"
+}
+sourceSets.dataGen.compileClasspath = configurations.dataGenFixture
+sourceSets.dataGen.runtimeClasspath = configurations.dataGenFixture + sourceSets.dataGen.output
+
+task generateIcebergTestData(type: JavaExec) {
+    description = 'Creates a local Iceberg table with sample data at /tmp/iceberg-test-warehouse'
+    classpath = sourceSets.dataGen.runtimeClasspath
+    mainClass = 'org.opensearch.lakehouse.GenerateTestData'
+    dependsOn compileDataGenJava
+}
+
+// parquet-avro is needed by iceberg-data's GenericReader, but its jar includes shaded fastutil
+// classes that overlap with parquet-hadoop-bundle. We repackage it without the shaded classes.
+configurations {
+    parquetAvroOriginal {
+        transitive = false
+    }
+}
+dependencies {
+    parquetAvroOriginal "org.apache.parquet:parquet-avro:1.13.1"
+}
+tasks.register('cleanParquetAvro', Jar) {
+    archiveBaseName = 'parquet-avro-cleaned'
+    archiveVersion = '1.13.1'
+    from(zipTree(configurations.parquetAvroOriginal.singleFile)) {
+        exclude 'shaded/**'
+        exclude 'META-INF/MANIFEST.MF'
+    }
+}
+tasks.named('bundlePlugin').configure {
+    dependsOn 'cleanParquetAvro'
+    from tasks.named('cleanParquetAvro')
+}
+
+// Arrow memory needs access to java.nio internals
+tasks.named('internalClusterTest').configure {
+    jvmArgs += ["--add-opens", "java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"]
+}
+
+configurations.all {
+    resolutionStrategy {
+        force "com.google.guava:guava:33.4.0-jre"
+        force "com.google.guava:failureaccess:1.0.2"
+        force "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
+        force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+        force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+        force "org.slf4j:slf4j-api:${versions.slf4j}"
+        force "commons-logging:commons-logging:1.3.5"
+        force "commons-codec:commons-codec:1.15"
+    }
+}

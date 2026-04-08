@@ -33,9 +33,10 @@ dependencies {
   implementation "org.checkerframework:checker-qual:3.43.0"
 
   // Jackson — required by Arrow's schema import (C Data Interface)
+  // jackson-annotations and jackson-databind are provided by analytics-engine (parent classloader)
   implementation "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
-  implementation "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
-  implementation "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+  compileOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+  compileOnly "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
 }
 
 // Rust native library build

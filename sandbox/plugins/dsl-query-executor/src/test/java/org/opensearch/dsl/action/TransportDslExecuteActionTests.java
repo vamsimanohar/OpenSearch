@@ -72,7 +72,7 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
         assertTrue(listener.failure.get().getMessage().contains("exactly one concrete index"));
     }
 
-    public void testDoExecuteFailsWhenIndexNotInClusterState() {
+    public void testDoExecuteFailsWhenIndexNotInClusterStateOrSchema() {
         ClusterService clusterService = mock(ClusterService.class);
         when(clusterService.state()).thenReturn(mock(ClusterState.class));
 
@@ -92,7 +92,9 @@ public class TransportDslExecuteActionTests extends OpenSearchTestCase {
 
         assertNull(listener.response.get());
         assertNotNull(listener.failure.get());
-        assertTrue(listener.failure.get() instanceof IndexNotFoundException);
+        // IndexNotFoundException triggers external-table fallback; schema also lacks the index
+        assertTrue(listener.failure.get() instanceof IllegalArgumentException);
+        assertTrue(listener.failure.get().getMessage().contains("bogus-index"));
     }
 
     private TestListener executeWith(TransportDslExecuteAction action, String index) {
