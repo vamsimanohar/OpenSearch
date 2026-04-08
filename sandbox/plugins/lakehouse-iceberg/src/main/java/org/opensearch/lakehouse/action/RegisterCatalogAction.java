@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import static org.opensearch.rest.RestRequest.Method.PUT;
 
@@ -38,6 +39,7 @@ public class RegisterCatalogAction extends BaseRestHandler {
 
     private static final Logger logger = LogManager.getLogger(RegisterCatalogAction.class);
     private static final String SOURCE = "register-lakehouse-catalog";
+    private static final Pattern VALID_NAME = Pattern.compile("[a-zA-Z0-9_-]+");
 
     private final ClusterService clusterService;
 
@@ -65,6 +67,11 @@ public class RegisterCatalogAction extends BaseRestHandler {
         String catalogName = request.param("name");
         if (catalogName == null || catalogName.isBlank()) {
             throw new IllegalArgumentException("Catalog name is required");
+        }
+        if (!VALID_NAME.matcher(catalogName).matches()) {
+            throw new IllegalArgumentException(
+                "Catalog name must match [a-zA-Z0-9_-]+, got: " + catalogName
+            );
         }
 
         Map<String, String> config = new HashMap<>();
