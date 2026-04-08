@@ -8,9 +8,23 @@
 
 package org.opensearch.lakehouse;
 
+import org.apache.calcite.jdbc.CalciteSchema;
+import org.apache.calcite.schema.SchemaPlus;
+import org.opensearch.Version;
+import org.opensearch.analytics.schema.ExternalTable;
+import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.cluster.metadata.Metadata;
+import org.opensearch.common.settings.Setting;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class LakehousePluginTests extends OpenSearchTestCase {
 
@@ -18,5 +32,115 @@ public class LakehousePluginTests extends OpenSearchTestCase {
         try (LakehousePlugin plugin = new LakehousePlugin()) {
             assertNotNull(plugin);
         }
+    }
+
+    public void testGetSettingsReturnsAllSettings() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            List<Setting<?>> settings = plugin.getSettings();
+            assertNotNull(settings);
+            assertEquals(12, settings.size());
+        }
+    }
+
+    public void testClaimsLakehouseIndex() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            IndexMetadata idx = indexMetadata("iceberg_table", Settings.builder().put("index.lakehouse.enabled", true));
+            assertTrue(plugin.claims(idx));
+        }
+    }
+
+    public void testDoesNotClaimNormalIndex() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            IndexMetadata idx = indexMetadata("normal_index", Settings.builder());
+            assertFalse(plugin.claims(idx));
+        }
+    }
+
+    public void testSupportsIcebergFormat() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            ExternalTable icebergTable = mock(ExternalTable.class);
+            when(icebergTable.format()).thenReturn("iceberg");
+            assertTrue(plugin.supports(icebergTable));
+        }
+    }
+
+    public void testDoesNotSupportOtherFormats() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            ExternalTable deltaTable = mock(ExternalTable.class);
+            when(deltaTable.format()).thenReturn("delta");
+            assertFalse(plugin.supports(deltaTable));
+        }
+    }
+
+    public void testPrepareScanThrowsUnsupported() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            ExternalTable table = mock(ExternalTable.class);
+            expectThrows(UnsupportedOperationException.class, () -> plugin.prepareScan(null, table));
+        }
+    }
+
+    public void testContributeSchemaWithNoLakehouseIndices() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            IndexMetadata normalIdx = indexMetadata("normal_index", Settings.builder());
+            ClusterState state = clusterState(Map.of("normal_index", normalIdx));
+            SchemaPlus schema = CalciteSchema.createRootSchema(true).plus();
+
+            plugin.contributeSchema(schema, state);
+
+            assertNull("Normal index should not be registered", schema.getTable("normal_index"));
+        }
+    }
+
+    public void testContributeSchemaWithLakehouseIndex() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            IndexMetadata lakehouseIdx = indexMetadata(
+                "my_iceberg",
+                Settings.builder()
+                    .put("index.lakehouse.enabled", true)
+                    .put("index.lakehouse.type", "glue")
+                    .put("index.lakehouse.warehouse", "s3://bucket")
+                    .put("index.lakehouse.namespace", "db")
+                    .put("index.lakehouse.table", "events")
+            );
+            ClusterState state = clusterState(Map.of("my_iceberg", lakehouseIdx));
+            SchemaPlus schema = CalciteSchema.createRootSchema(true).plus();
+
+            plugin.contributeSchema(schema, state);
+
+            assertNotNull("Lakehouse index should be registered", schema.getTable("my_iceberg"));
+        }
+    }
+
+    public void testGetCatalogConnector() {
+        assertNotNull(LakehousePlugin.getCatalogConnector());
+    }
+
+    public void testSupportsNullFormat() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            ExternalTable table = mock(ExternalTable.class);
+            when(table.format()).thenReturn(null);
+            assertFalse(plugin.supports(table));
+        }
+    }
+
+    private static ClusterState clusterState(Map<String, IndexMetadata> indices) {
+        Metadata.Builder metadataBuilder = Metadata.builder();
+        for (Map.Entry<String, IndexMetadata> entry : indices.entrySet()) {
+            metadataBuilder.put(entry.getValue(), false);
+        }
+        ClusterState state = mock(ClusterState.class);
+        Metadata metadata = metadataBuilder.build();
+        when(state.metadata()).thenReturn(metadata);
+        return state;
+    }
+
+    private static IndexMetadata indexMetadata(String name, Settings.Builder extraSettings) {
+        Settings settings = Settings.builder()
+            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+            .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+            .put(extraSettings.build())
+            .build();
+        return IndexMetadata.builder(name).settings(settings).build();
     }
 }
