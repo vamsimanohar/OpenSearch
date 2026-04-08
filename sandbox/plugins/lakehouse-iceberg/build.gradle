@@ -14,6 +14,9 @@ opensearchplugin {
 }
 
 dependencies {
+    // Server APIs (Plugin, Settings, SecureSetting — provided at runtime)
+    compileOnly project(':server')
+
     // Analytics engine and framework (compile-only, provided at runtime by analytics-engine plugin)
     compileOnly project(':sandbox:plugins:analytics-engine')
     compileOnly project(':sandbox:libs:analytics-framework')
