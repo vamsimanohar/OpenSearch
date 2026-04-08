@@ -24,10 +24,12 @@ import java.util.List;
  * <p>
  * Iceberg tables are registered as OpenSearch indices with special settings
  * ({@code index.lakehouse.enabled=true}), which gives them automatic security
- * plugin integration (RBAC, DLS, FLS, audit logging).
+ * plugin integration (RBAC, DLS, FLS, audit logging). All table configuration
+ * (catalog type, region, warehouse, namespace, table) is index-scoped.
  * <p>
- * Catalog configuration is stored in node-scoped settings ({@code lakehouse.catalog.{name}.*}),
- * with credentials in the opensearch-keystore for security.
+ * Authentication supports three modes via {@code index.lakehouse.auth_type}:
+ * {@code role} (IAM assume-role), {@code keys} (keystore-backed credentials),
+ * or {@code default} (environment credentials chain).
  * <p>
  * Implements both {@link SchemaContributor} (to register Iceberg tables into Calcite) and
  * {@link ExternalTableExecutor} (to build scan plans for those tables). Both interfaces are
