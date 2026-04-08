@@ -1,0 +1,4 @@
+grant {
+    permission java.util.PropertyPermission "datafusion_*", "read";
+    permission java.lang.RuntimePermission "getenv.*";
+};

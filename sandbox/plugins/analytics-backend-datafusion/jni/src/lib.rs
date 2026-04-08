@@ -371,6 +371,186 @@ pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_execut
     });
 }
 
+// Executes an Iceberg SQL query and returns all results as Arrow IPC stream bytes.
+// Used by distributed query workers for efficient transport of results.
+#[jni_safe(default = std::ptr::null_mut())]
+#[no_mangle]
+pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_executeIcebergQueryToIpc(
+    mut env: JNIEnv,
+    _class: JClass,
+    s3_region: JString,
+    s3_bucket: JString,
+    s3_access_key_id: JString,
+    s3_secret_access_key: JString,
+    s3_session_token: JString,
+    s3_endpoint: JString,
+    file_paths: JObjectArray,
+    table_name: JString,
+    sql_query: JString,
+    runtime_ptr: jlong,
+) -> jni::sys::jbyteArray {
+    let tokio_rt_mgr = match get_tokio_rt_manager() {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = env.throw_new("java/lang/IllegalStateException", e.to_string());
+            return std::ptr::null_mut();
+        }
+    };
+
+    let region: String = match env.get_string(&s3_region) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid S3 region: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+    let bucket: String = if s3_bucket.is_null() {
+        String::new()
+    } else {
+        match env.get_string(&s3_bucket) {
+            Ok(s) => s.into(),
+            Err(_) => String::new(),
+        }
+    };
+    let access_key_id: Option<String> = if s3_access_key_id.is_null() {
+        None
+    } else {
+        env.get_string(&s3_access_key_id).ok().map(|s| s.into())
+    };
+    let secret_access_key: Option<String> = if s3_secret_access_key.is_null() {
+        None
+    } else {
+        env.get_string(&s3_secret_access_key).ok().map(|s| s.into())
+    };
+    let session_token: Option<String> = if s3_session_token.is_null() {
+        None
+    } else {
+        env.get_string(&s3_session_token).ok().map(|s| s.into())
+    };
+    let endpoint: Option<String> = if s3_endpoint.is_null() {
+        None
+    } else {
+        env.get_string(&s3_endpoint).ok().map(|s| s.into())
+    };
+    let paths = match parse_string_arr(env, file_paths) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", e.to_string());
+            return std::ptr::null_mut();
+        }
+    };
+    let table_name_str: String = match env.get_string(&JString::from(table_name)) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid table name: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+    let sql_query_str: String = match env.get_string(&sql_query) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", format!("Invalid SQL: {}", e));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let result = tokio_rt_mgr.io_runtime.block_on(api::execute_iceberg_query_to_ipc(
+        &region,
+        &bucket,
+        access_key_id.as_deref(),
+        secret_access_key.as_deref(),
+        session_token.as_deref(),
+        endpoint.as_deref(),
+        paths,
+        &table_name_str,
+        &sql_query_str,
+        runtime_ptr as i64,
+    ));
+
+    match result {
+        Ok(bytes) => match env.byte_array_from_slice(&bytes) {
+            Ok(arr) => arr.into_raw(),
+            Err(e) => {
+                let _ = env.throw_new("java/lang/RuntimeException", format!("Failed to create byte array: {}", e));
+                std::ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            error!("IPC query execution failed: {}", e);
+            let _ = env.throw_new("java/lang/RuntimeException", e.to_string());
+            std::ptr::null_mut()
+        }
+    }
+}
+
+// Merges Arrow IPC batches from distributed workers using coordinator SQL.
+// Returns a stream pointer via ActionListener, same pattern as executeIcebergQueryAsync.
+#[jni_safe]
+#[no_mangle]
+pub extern "system" fn Java_org_opensearch_be_datafusion_jni_NativeBridge_mergeIpcBatches(
+    mut env: JNIEnv,
+    _class: JClass,
+    ipc_data: JObjectArray,
+    coordinator_sql: JString,
+    table_name: JString,
+    runtime_ptr: jlong,
+    listener: JObject,
+) {
+    let tokio_rt_mgr = match get_tokio_rt_manager() {
+        Ok(m) => m,
+        Err(e) => {
+            set_action_listener_error(env, listener, &e);
+            return;
+        }
+    };
+
+    // Parse byte[][] into Vec<Vec<u8>>
+    let ipc_vec = match parse_byte_array_array(env, ipc_data) {
+        Ok(v) => v,
+        Err(e) => {
+            set_action_listener_error(env, listener, &e);
+            return;
+        }
+    };
+    let sql_str: String = match env.get_string(&coordinator_sql) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Invalid SQL: {}", e)));
+            return;
+        }
+    };
+    let table_name_str: String = match env.get_string(&JString::from(table_name)) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Invalid table name: {}", e)));
+            return;
+        }
+    };
+    let listener_ref = match env.new_global_ref(&listener) {
+        Ok(r) => r,
+        Err(e) => {
+            set_action_listener_error(env, listener, &DataFusionError::Execution(format!("Failed to create global ref: {}", e)));
+            return;
+        }
+    };
+
+    let result = tokio_rt_mgr.io_runtime.block_on(api::merge_ipc_batches(
+        ipc_vec,
+        &sql_str,
+        &table_name_str,
+        tokio_rt_mgr,
+        runtime_ptr as i64,
+    ));
+
+    with_jni_env(|env| match result {
+        Ok(stream_ptr) => set_action_listener_ok_global(env, &listener_ref, stream_ptr as jlong),
+        Err(e) => {
+            error!("IPC merge failed: {}", e);
+            set_action_listener_error_global(env, &listener_ref, &e);
+        }
+    });
+}
+
 // Get schema for the stream
 #[jni_safe]
 #[no_mangle]

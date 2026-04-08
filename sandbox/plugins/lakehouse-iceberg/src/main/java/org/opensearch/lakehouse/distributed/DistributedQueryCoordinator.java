@@ -10,6 +10,7 @@ package org.opensearch.lakehouse.distributed;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.service.ClusterService;
@@ -31,6 +32,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 /**
  * Orchestrates distributed Iceberg query execution across cluster nodes using
@@ -129,7 +131,13 @@ public class DistributedQueryCoordinator {
             responses = fanOutViaStandard(partitions, dataNodes, splitPlan, storageConfig, tableName);
         }
 
-        // Collect all partial results
+        // Try native DataFusion merge via Arrow IPC if all workers returned IPC bytes
+        Iterable<Object[]> ipcResult = tryIpcMerge(responses, splitPlan, tableName);
+        if (ipcResult != null) {
+            return ipcResult;
+        }
+
+        // Fallback: collect Object[][] rows and merge in Java
         List<Object[]> partialResults = new ArrayList<>();
         for (LakehouseWorkerResponse response : responses) {
             for (Object[] row : response.getRows()) {
@@ -141,6 +149,72 @@ public class DistributedQueryCoordinator {
             partialResults.size(), partitions.size(), splitPlan.getMergeType());
 
         return CoordinatorMerger.merge(partialResults, splitPlan);
+    }
+
+    /**
+     * Attempts to merge worker results using native DataFusion via Arrow IPC.
+     * Returns merged results if all workers returned IPC bytes and the global
+     * backend executor is available; returns {@code null} to fall back to Java merge.
+     *
+     * @param responses  worker responses
+     * @param splitPlan  the split plan with coordinator SQL
+     * @param tableName  the original table name
+     * @return merged results, or {@code null} if IPC merge is not possible
+     */
+    private Iterable<Object[]> tryIpcMerge(
+        List<LakehouseWorkerResponse> responses,
+        PhysicalPlanSplitter.SplitPlan splitPlan,
+        String tableName
+    ) {
+        if (responses.isEmpty()) {
+            return null;
+        }
+
+        // Check if ALL responses carry IPC bytes
+        for (LakehouseWorkerResponse response : responses) {
+            if (!response.hasIpcBytes()) {
+                logger.debug("[DistributedQueryCoordinator] Response missing IPC bytes, falling back to Java merge");
+                return null;
+            }
+        }
+
+        // Check if the global backend executor is available
+        Function<ExternalScanContext, Iterable<Object[]>> executor = ExternalScanContext.getGlobalBackendExecutor();
+        if (executor == null) {
+            logger.debug("[DistributedQueryCoordinator] No global backend executor, falling back to Java merge");
+            return null;
+        }
+
+        // Collect IPC byte arrays from all workers
+        byte[][] ipcBatches = new byte[responses.size()][];
+        long totalBytes = 0;
+        for (int i = 0; i < responses.size(); i++) {
+            ipcBatches[i] = responses.get(i).getIpcBytes();
+            totalBytes += ipcBatches[i].length;
+        }
+
+        String coordinatorSql = splitPlan.getCoordinatorSql();
+        logger.info("[DistributedQueryCoordinator] IPC merge: {} workers, {} total bytes, coordinatorSql={}",
+            ipcBatches.length, totalBytes, coordinatorSql);
+
+        // Create a merge context: the backend executor detects ipcBatches != null
+        // and routes to DataFusionPlugin.executeMergeQuery() via NativeBridge.mergeIpcBatches()
+        ExternalScanContext mergeContext = new ExternalScanContext(
+            PhysicalPlanSplitter.PARTIAL_TABLE,
+            List.of(),
+            coordinatorSql,
+            Map.of()
+        );
+        mergeContext.setIpcBatches(ipcBatches);
+
+        try {
+            Iterable<Object[]> result = executor.apply(mergeContext);
+            logger.info("[DistributedQueryCoordinator] IPC merge completed successfully");
+            return result;
+        } catch (Exception e) {
+            logger.warn("[DistributedQueryCoordinator] IPC merge failed, falling back to Java merge", e);
+            return null;
+        }
     }
 
     /**

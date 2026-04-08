@@ -226,6 +226,11 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
     @Override
     public Iterable<Object[]> executeRemoteQuery(ExternalScanContext scanContext) {
+        // Coordinator merge path: IPC batches from distributed workers
+        if (scanContext.getIpcBatches() != null) {
+            return executeMergeQuery(scanContext);
+        }
+
         DataFusionService dfService = ensureDataFusionService();
 
         Map<String, String> config = scanContext.getStorageConfig();
@@ -264,14 +269,72 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         // Call DataFusion via JNI — returns a stream pointer.
         // Pass the global runtime pointer so the Iceberg executor shares the
         // memory pool and disk manager (enabling spill-to-disk for large aggregations).
+        long streamPtr = executeIcebergQueryJni(dfService, s3Region, s3Bucket,
+            s3AccessKeyId, s3SecretAccessKey, s3SessionToken, s3Endpoint,
+            filePaths, tableName, sqlQuery);
+
+        return streamToRows(dfService, streamPtr);
+    }
+
+    /**
+     * Executes a worker query and returns Arrow IPC bytes for efficient transport.
+     * @param scanContext the resolved scan context from an external table plugin
+     * @return Arrow IPC stream bytes
+     */
+    @Override
+    public byte[] executeRemoteQueryToIpc(ExternalScanContext scanContext) {
+        DataFusionService dfService = ensureDataFusionService();
+
+        Map<String, String> config = scanContext.getStorageConfig();
+        String s3Region = config.getOrDefault("s3Region", "us-east-1");
+        String s3Bucket = config.get("s3Bucket");
+        String s3AccessKeyId = config.get("s3AccessKeyId");
+        String s3SecretAccessKey = config.get("s3SecretAccessKey");
+        String s3SessionToken = config.get("s3SessionToken");
+        String s3Endpoint = config.get("s3Endpoint");
+
+        String[] filePaths = scanContext.getDataFilePaths().toArray(new String[0]);
+        String tableName = scanContext.getTableName();
+        String sqlQuery = scanContext.getSqlQuery();
+
+        if (filePaths.length == 0) {
+            logger.info("[DataFusionPlugin] No data files for table [{}] — returning empty IPC", tableName);
+            return new byte[0];
+        }
+
+        logger.info("[DataFusionPlugin] executeRemoteQueryToIpc: table={}, files={}, sql_len={}",
+            tableName, filePaths.length, sqlQuery.length());
+
         NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
-        long runtimePtr = runtimeHandle.get();
-        CompletableFuture<Long> future = new CompletableFuture<>();
-        NativeBridge.executeIcebergQueryAsync(
+        byte[] ipcBytes = NativeBridge.executeIcebergQueryToIpc(
             s3Region, s3Bucket,
             s3AccessKeyId, s3SecretAccessKey, s3SessionToken, s3Endpoint,
             filePaths, tableName, sqlQuery,
-            runtimePtr,
+            runtimeHandle.get()
+        );
+
+        logger.info("[DataFusionPlugin] IPC result: {} bytes for table [{}]",
+            ipcBytes != null ? ipcBytes.length : 0, tableName);
+        return ipcBytes;
+    }
+
+    /**
+     * Merges Arrow IPC batches from distributed workers using coordinator SQL via DataFusion.
+     */
+    private Iterable<Object[]> executeMergeQuery(ExternalScanContext scanContext) {
+        DataFusionService dfService = ensureDataFusionService();
+        byte[][] ipcBatches = scanContext.getIpcBatches();
+        String coordinatorSql = scanContext.getSqlQuery();
+        String tableName = scanContext.getTableName();
+
+        logger.info("[DataFusionPlugin] executeMergeQuery: {} worker batches, table={}, sql_len={}",
+            ipcBatches.length, tableName, coordinatorSql.length());
+
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        CompletableFuture<Long> future = new CompletableFuture<>();
+        NativeBridge.mergeIpcBatches(
+            ipcBatches, coordinatorSql, tableName,
+            runtimeHandle.get(),
             new ActionListener<>() {
                 @Override
                 public void onResponse(Long streamPtr) { future.complete(streamPtr); }
@@ -280,17 +343,56 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
             }
         );
 
-        logger.debug("[DataFusionPlugin] Waiting for JNI async result...");
         long streamPtr;
         try {
             streamPtr = future.join();
+        } catch (Exception e) {
+            logger.error("[DataFusionPlugin] Merge execution failed: {}", e.getMessage(), e);
+            throw new RuntimeException("Distributed merge query failed via DataFusion", e);
+        }
+
+        return streamToRows(dfService, streamPtr);
+    }
+
+    /**
+     * Calls the JNI Iceberg query and returns the stream pointer.
+     */
+    private long executeIcebergQueryJni(
+        DataFusionService dfService,
+        String s3Region, String s3Bucket,
+        String s3AccessKeyId, String s3SecretAccessKey, String s3SessionToken, String s3Endpoint,
+        String[] filePaths, String tableName, String sqlQuery
+    ) {
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        CompletableFuture<Long> future = new CompletableFuture<>();
+        NativeBridge.executeIcebergQueryAsync(
+            s3Region, s3Bucket,
+            s3AccessKeyId, s3SecretAccessKey, s3SessionToken, s3Endpoint,
+            filePaths, tableName, sqlQuery,
+            runtimeHandle.get(),
+            new ActionListener<>() {
+                @Override
+                public void onResponse(Long streamPtr) { future.complete(streamPtr); }
+                @Override
+                public void onFailure(Exception e) { future.completeExceptionally(e); }
+            }
+        );
+
+        try {
+            long streamPtr = future.join();
             logger.debug("[DataFusionPlugin] JNI returned stream pointer: {}", streamPtr);
+            return streamPtr;
         } catch (Exception e) {
             logger.error("[DataFusionPlugin] JNI execution failed: {}", e.getMessage(), e);
             throw new RuntimeException("Iceberg query execution failed via DataFusion", e);
         }
+    }
 
-        // Stream Arrow batches and convert to Object[] rows
+    /**
+     * Reads an Arrow stream pointer into Object[] rows.
+     */
+    private Iterable<Object[]> streamToRows(DataFusionService dfService, long streamPtr) {
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
         StreamHandle streamHandle = new StreamHandle(streamPtr, runtimeHandle);
         BufferAllocator allocator = dfService.newChildAllocator();
         DatafusionResultStream resultStream = new DatafusionResultStream(streamHandle, allocator);
@@ -309,7 +411,6 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
                     Object[] rowValues = new Object[fieldNames.size()];
                     for (int col = 0; col < fieldNames.size(); col++) {
                         Object val = batch.getFieldValue(fieldNames.get(col), row);
-                        // Convert Arrow types to standard Java types for JSON serialization
                         if (val instanceof org.apache.arrow.vector.util.Text) {
                             val = val.toString();
                         }
@@ -321,7 +422,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         } finally {
             resultStream.close();
         }
-        logger.info("[DataFusionPlugin] Iceberg query returned {} rows in {} batches via native execution", rows.size(), batchCount);
+        logger.info("[DataFusionPlugin] Query returned {} rows in {} batches", rows.size(), batchCount);
         return rows;
     }
 

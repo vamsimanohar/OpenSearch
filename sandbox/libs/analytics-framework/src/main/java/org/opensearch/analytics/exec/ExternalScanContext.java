@@ -26,6 +26,12 @@ public class ExternalScanContext {
     private static volatile Function<ExternalScanContext, Iterable<Object[]>> globalBackendExecutor;
 
     /**
+     * Global IPC executor for distributed worker queries.
+     * Returns Arrow IPC bytes instead of Object[] rows, for efficient network transport.
+     */
+    private static volatile Function<ExternalScanContext, byte[]> globalIpcExecutor;
+
+    /**
      * Registers the global backend executor for distributed worker queries.
      *
      * @param executor function that executes an {@link ExternalScanContext} and returns result rows
@@ -39,6 +45,20 @@ public class ExternalScanContext {
         return globalBackendExecutor;
     }
 
+    /**
+     * Registers the global IPC executor for distributed worker queries.
+     *
+     * @param executor function that executes an {@link ExternalScanContext} and returns Arrow IPC bytes
+     */
+    public static void setGlobalIpcExecutor(Function<ExternalScanContext, byte[]> executor) {
+        globalIpcExecutor = executor;
+    }
+
+    /** Returns the global IPC executor, or {@code null} if not yet registered. */
+    public static Function<ExternalScanContext, byte[]> getGlobalIpcExecutor() {
+        return globalIpcExecutor;
+    }
+
     private final String tableName;
     private final List<String> dataFilePaths;
     private final String sqlQuery;
@@ -49,6 +69,12 @@ public class ExternalScanContext {
      * should return these directly instead of calling {@code executeRemoteQuery()}.
      */
     private volatile Iterable<Object[]> preComputedResults;
+
+    /**
+     * Arrow IPC byte arrays from distributed workers, for coordinator merge.
+     * When non-null, the backend executor should merge these instead of scanning files.
+     */
+    private byte[][] ipcBatches;
 
     /**
      * Creates a new scan context.
@@ -100,4 +126,13 @@ public class ExternalScanContext {
      * @param results the pre-computed result rows from distributed execution
      */
     public void setPreComputedResults(Iterable<Object[]> results) { this.preComputedResults = results; }
+
+    /** Returns the Arrow IPC byte arrays for coordinator merge, or {@code null}. */
+    public byte[][] getIpcBatches() { return ipcBatches; }
+
+    /**
+     * Sets Arrow IPC byte arrays from distributed workers for coordinator merge.
+     * @param ipcBatches the IPC byte arrays, one per worker
+     */
+    public void setIpcBatches(byte[][] ipcBatches) { this.ipcBatches = ipcBatches; }
 }

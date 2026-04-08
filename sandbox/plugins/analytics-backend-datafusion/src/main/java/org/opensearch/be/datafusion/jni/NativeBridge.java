@@ -157,6 +157,57 @@ public final class NativeBridge {
         org.opensearch.core.action.ActionListener<Long> listener
     );
 
+    // ---- Iceberg / S3 query execution (IPC result format) ----
+
+    /**
+     * Executes a SQL query against S3-backed Parquet files and returns all results
+     * as Arrow IPC stream bytes. Used by distributed query workers for efficient
+     * transport of results over the network.
+     *
+     * @param s3Region         AWS region
+     * @param s3Bucket         S3 bucket name
+     * @param s3AccessKeyId    AWS access key ID, or null for default credentials
+     * @param s3SecretAccessKey AWS secret access key, or null for default credentials
+     * @param s3SessionToken   AWS session token, or null
+     * @param s3Endpoint       S3 endpoint override, or null
+     * @param filePaths        array of S3/file Parquet file paths to scan
+     * @param tableName        table name for DataFusion table registration
+     * @param sqlQuery         SQL query string for DataFusion to execute
+     * @param runtimePtr       native DataFusion runtime pointer
+     * @return Arrow IPC stream bytes containing all result batches
+     */
+    public static native byte[] executeIcebergQueryToIpc(
+        String s3Region,
+        String s3Bucket,
+        String s3AccessKeyId,
+        String s3SecretAccessKey,
+        String s3SessionToken,
+        String s3Endpoint,
+        String[] filePaths,
+        String tableName,
+        String sqlQuery,
+        long runtimePtr
+    );
+
+    /**
+     * Merges Arrow IPC batches from distributed workers by executing coordinator SQL
+     * against the combined in-memory data. The coordinator SQL performs final aggregation,
+     * sort+limit, or other merge operations.
+     *
+     * @param ipcData         array of Arrow IPC byte arrays, one per worker
+     * @param coordinatorSql  SQL query to run on the combined partial results
+     * @param tableName       table name to register the combined data under
+     * @param runtimePtr      native DataFusion runtime pointer
+     * @param listener        callback receiving the stream pointer (Long) or error
+     */
+    public static native void mergeIpcBatches(
+        byte[][] ipcData,
+        String coordinatorSql,
+        String tableName,
+        long runtimePtr,
+        org.opensearch.core.action.ActionListener<Long> listener
+    );
+
     // ---- Stream operations ----
 
     /**

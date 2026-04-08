@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 use datafusion::error::DataFusionError;
-use jni::objects::{GlobalRef, JObject, JObjectArray, JString, JValue};
+use jni::objects::{GlobalRef, JByteArray, JObject, JObjectArray, JString, JValue};
 use jni::sys::jlong;
 use jni::JNIEnv;
 use log::error;
@@ -50,6 +50,21 @@ pub fn parse_string_arr(env: &mut JNIEnv, arr: JObjectArray) -> Result<Vec<Strin
         let jstr = JString::from(obj);
         let s: String = env.get_string(&jstr).map_err(|e| DataFusionError::Execution(e.to_string()))?.into();
         result.push(s);
+    }
+    Ok(result)
+}
+
+/// Parse a Java byte[][] (Object[] of byte[]) into Vec<Vec<u8>>.
+pub fn parse_byte_array_array(env: &mut JNIEnv, arr: JObjectArray) -> Result<Vec<Vec<u8>>, DataFusionError> {
+    let len = env.get_array_length(&arr).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    let mut result = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let obj = env.get_object_array_element(&arr, i)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to get byte[] at index {}: {}", i, e)))?;
+        let byte_arr = unsafe { JByteArray::from_raw(obj.as_raw()) };
+        let bytes = env.convert_byte_array(byte_arr)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to convert byte[] at index {}: {}", i, e)))?;
+        result.push(bytes);
     }
     Ok(result)
 }

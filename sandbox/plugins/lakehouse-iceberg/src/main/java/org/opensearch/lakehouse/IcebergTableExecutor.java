@@ -54,13 +54,15 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
     @Override
     @SuppressWarnings("removal")
     public ExternalScanContext prepareScan(RelNode logicalPlan, ExternalTable externalTable) {
+        long t0 = System.nanoTime();
         if (!(externalTable instanceof IcebergCalciteTable)) {
             throw new IllegalArgumentException("Expected IcebergCalciteTable but got: " + externalTable.getClass().getSimpleName());
         }
         IcebergCalciteTable icebergTable = (IcebergCalciteTable) externalTable;
         Table table = icebergTable.getIcebergTable();
-        logger.info("[IcebergTableExecutor] Preparing scan for Iceberg table: {}", table.name());
-        logger.debug("[IcebergTableExecutor] Calcite logical plan:\n{}", logicalPlan.explain());
+        logger.info("[IcebergTableExecutor] ========== PREPARE SCAN START ==========");
+        logger.info("[IcebergTableExecutor] Table: {}", table.name());
+        logger.info("[IcebergTableExecutor] Calcite logical plan:\n{}", logicalPlan.explain());
 
         IcebergCatalogConnector connector = LakehouseState.instance().catalogConnector();
 

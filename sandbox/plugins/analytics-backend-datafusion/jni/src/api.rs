@@ -150,18 +150,21 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arrow_array::{Array, StructArray};
+use arrow::ipc::reader::StreamReader as IpcStreamReader;
+use arrow_array::{Array, RecordBatch, StructArray};
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_schema::ffi::FFI_ArrowSchema;
 use datafusion::common::DataFusionError;
 use datafusion::datasource::listing::ListingTableUrl;
+use datafusion::datasource::MemTable;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion::execution::memory_pool::{GreedyMemoryPool, TrackConsumersPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use datafusion::execution::{SessionState, SessionStateBuilder};
+use datafusion::execution::SessionStateBuilder;
+use datafusion::physical_plan::execute_stream;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::execution::RecordBatchStream;
-use datafusion::prelude::SessionConfig;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::TryStreamExt;
 
 use crate::cross_rt_stream::CrossRtStream;
@@ -390,6 +393,152 @@ pub async fn execute_iceberg_query(
     .await?;
 
     Ok(result)
+}
+
+/// Executes an Iceberg query and returns results as Arrow IPC stream bytes.
+///
+/// Unlike `execute_iceberg_query` which returns a stream pointer for incremental
+/// consumption, this variant collects all results and serializes them as Arrow IPC
+/// bytes. Used by distributed query workers for efficient network transport.
+pub async fn execute_iceberg_query_to_ipc(
+    s3_region: &str,
+    s3_bucket: &str,
+    s3_access_key_id: Option<&str>,
+    s3_secret_access_key: Option<&str>,
+    s3_session_token: Option<&str>,
+    s3_endpoint: Option<&str>,
+    file_paths: Vec<String>,
+    table_name: &str,
+    sql_query: &str,
+    runtime_ptr: i64,
+) -> Result<Vec<u8>, DataFusionError> {
+    let s3_config = S3Config {
+        region: s3_region.to_string(),
+        bucket: s3_bucket.to_string(),
+        access_key_id: s3_access_key_id.map(|s| s.to_string()),
+        secret_access_key: s3_secret_access_key.map(|s| s.to_string()),
+        session_token: s3_session_token.map(|s| s.to_string()),
+        endpoint: s3_endpoint.map(|s| s.to_string()),
+    };
+
+    let global_runtime: Option<&DataFusionRuntime> = if runtime_ptr != 0 {
+        Some(unsafe { &*(runtime_ptr as *const DataFusionRuntime) })
+    } else {
+        None
+    };
+
+    crate::iceberg_executor::execute_iceberg_query_to_ipc(
+        s3_config,
+        file_paths,
+        table_name.to_string(),
+        sql_query.to_string(),
+        global_runtime,
+    )
+    .await
+}
+
+/// Merges Arrow IPC batches from multiple distributed workers by running
+/// coordinator SQL against the combined data.
+///
+/// Deserializes each worker's IPC bytes into RecordBatches, combines them into an
+/// in-memory table, then executes the coordinator SQL (final aggregation, sort, etc.)
+/// via DataFusion. Returns a stream pointer for the result, same as `execute_query`.
+pub async fn merge_ipc_batches(
+    ipc_data: Vec<Vec<u8>>,
+    coordinator_sql: &str,
+    table_name: &str,
+    manager: &RuntimeManager,
+    runtime_ptr: i64,
+) -> Result<i64, DataFusionError> {
+    use arrow_schema::SchemaRef;
+
+    log::info!(
+        "[DataFusion-Rust] merge_ipc_batches: {} worker results, sql_len={}, table={}",
+        ipc_data.len(),
+        coordinator_sql.len(),
+        table_name
+    );
+
+    // Deserialize all IPC byte arrays into RecordBatches
+    let mut all_batches: Vec<RecordBatch> = Vec::new();
+    let mut schema: Option<SchemaRef> = None;
+
+    for (i, ipc_bytes) in ipc_data.iter().enumerate() {
+        let cursor = std::io::Cursor::new(ipc_bytes);
+        let reader = IpcStreamReader::try_new(cursor, None)?;
+        if schema.is_none() {
+            schema = Some(reader.schema());
+        }
+        let mut batch_count = 0;
+        for batch_result in reader {
+            all_batches.push(batch_result?);
+            batch_count += 1;
+        }
+        log::info!(
+            "[DataFusion-Rust] Worker {}: deserialized {} batches from {} IPC bytes",
+            i, batch_count, ipc_bytes.len()
+        );
+    }
+
+    let schema = schema.ok_or_else(|| {
+        DataFusionError::Execution("No IPC data provided for merge".to_string())
+    })?;
+
+    let total_rows: usize = all_batches.iter().map(|b| b.num_rows()).sum();
+    log::info!(
+        "[DataFusion-Rust] Total: {} batches, {} rows from {} workers",
+        all_batches.len(),
+        total_rows,
+        ipc_data.len()
+    );
+
+    // Create MemTable from all worker batches
+    let mem_table = MemTable::try_new(schema, vec![all_batches])?;
+
+    // Set up DataFusion session sharing the global memory pool
+    let global_runtime: Option<&DataFusionRuntime> = if runtime_ptr != 0 {
+        Some(unsafe { &*(runtime_ptr as *const DataFusionRuntime) })
+    } else {
+        None
+    };
+
+    let runtime_env = match global_runtime {
+        Some(rt) => RuntimeEnvBuilder::from_runtime_env(&rt.runtime_env).build()?,
+        None => RuntimeEnvBuilder::new().build()?,
+    };
+
+    let state = datafusion::execution::SessionStateBuilder::new()
+        .with_config(SessionConfig::new())
+        .with_runtime_env(Arc::from(runtime_env))
+        .with_default_features()
+        .build();
+
+    let ctx = SessionContext::new_with_state(state);
+    ctx.register_table(table_name, Arc::new(mem_table))?;
+
+    // Execute the coordinator SQL (final aggregation, sort+limit, etc.)
+    let dataframe = ctx.sql(coordinator_sql).await?;
+    let physical_plan = dataframe.create_physical_plan().await?;
+
+    log::info!("[DataFusion-Rust] Coordinator merge plan:");
+    for line in format!(
+        "{}",
+        datafusion::physical_plan::displayable(physical_plan.as_ref()).indent(true)
+    )
+    .lines()
+    {
+        log::info!("[DataFusion-Rust]   {}", line);
+    }
+
+    let df_stream = execute_stream(physical_plan, ctx.task_ctx())?;
+
+    // Wrap in CrossRtStream for CPU isolation
+    let cpu_executor = manager.cpu_executor();
+    let cross_rt_stream =
+        crate::cross_rt_stream::CrossRtStream::new_with_df_error_stream(df_stream, cpu_executor);
+    let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
+
+    Ok(Box::into_raw(Box::new(wrapped)) as i64)
 }
 
 /// Converts SQL to Substrait plan bytes (test only).

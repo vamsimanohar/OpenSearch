@@ -10,8 +10,9 @@ datafusion-common = "52.1.0"
 datafusion-execution = "52.1.0"
 datafusion-substrait = "52.1.0"
 
-arrow = { version = "57.3.0", features = ["ffi"] }
+arrow = { version = "57.3.0", features = ["ffi", "ipc"] }
 arrow-array = "57.3.0"
+arrow-ipc = "57.3.0"
 arrow-schema = "57.3.0"
 
 parquet = "57.3.0"

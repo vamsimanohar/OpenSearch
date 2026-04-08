@@ -18,6 +18,7 @@ datafusion-substrait = { workspace = true }
 
 arrow = { workspace = true }
 arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 
 parquet = { workspace = true }

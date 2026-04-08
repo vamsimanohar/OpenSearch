@@ -77,7 +77,8 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
         if (!backEnds.isEmpty()) {
             AnalyticsSearchBackendPlugin firstBackend = backEnds.values().iterator().next();
             ExternalScanContext.setGlobalBackendExecutor(firstBackend::executeRemoteQuery);
-            logger.info("[DefaultPlanExecutor] Registered global backend executor [{}] for distributed workers", firstBackend.name());
+            ExternalScanContext.setGlobalIpcExecutor(firstBackend::executeRemoteQueryToIpc);
+            logger.info("[DefaultPlanExecutor] Registered global backend executor [{}] for distributed workers (IPC enabled)", firstBackend.name());
         }
     }
 

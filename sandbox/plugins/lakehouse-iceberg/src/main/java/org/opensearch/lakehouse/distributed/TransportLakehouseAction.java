@@ -132,7 +132,6 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             logger.info("[TransportLakehouseAction] Streaming worker received request: table={}, files={}, sql_len={}",
                 tableName, filePaths.length, sqlQuery != null ? sqlQuery.length() : 0);
 
-            // Build the ExternalScanContext from the request data
             ExternalScanContext scanContext = new ExternalScanContext(
                 tableName,
                 Arrays.asList(filePaths),
@@ -140,7 +139,19 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
                 request.getStorageConfig()
             );
 
-            // Retrieve the backend executor
+            // Prefer IPC format — single response with all data
+            Function<ExternalScanContext, byte[]> ipcExecutor = ExternalScanContext.getGlobalIpcExecutor();
+            if (ipcExecutor != null) {
+                byte[] ipcBytes = ipcExecutor.apply(scanContext);
+                if (ipcBytes != null && ipcBytes.length > 0) {
+                    channel.sendResponseBatch(new LakehouseWorkerResponse(ipcBytes));
+                    channel.completeStream();
+                    logger.info("[TransportLakehouseAction] Streaming worker completed (IPC): {} bytes", ipcBytes.length);
+                    return;
+                }
+            }
+
+            // Fallback to legacy row-by-row streaming
             Function<ExternalScanContext, Iterable<Object[]>> executor = ExternalScanContext.getGlobalBackendExecutor();
             if (executor == null) {
                 throw new IllegalStateException(
@@ -149,10 +160,8 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
                 );
             }
 
-            // Execute the query via the backend (DataFusion native engine)
             Iterable<Object[]> result = executor.apply(scanContext);
 
-            // Stream results back in batches
             List<Object[]> batch = new ArrayList<>(STREAM_BATCH_SIZE);
             String[] columnNames = null;
             int totalRows = 0;
@@ -177,7 +186,6 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
                 }
             }
 
-            // Send remaining rows
             if (!batch.isEmpty()) {
                 if (columnNames == null) {
                     columnNames = new String[0];
@@ -190,7 +198,7 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             }
 
             channel.completeStream();
-            logger.info("[TransportLakehouseAction] Streaming worker completed: {} rows in {} batches", totalRows, batchCount);
+            logger.info("[TransportLakehouseAction] Streaming worker completed (rows): {} rows in {} batches", totalRows, batchCount);
 
         } catch (StreamException e) {
             if (e.getErrorCode() == StreamErrorCode.CANCELLED) {
@@ -205,8 +213,8 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
     }
 
     /**
-     * Executes the worker query using the global backend executor.
-     * Shared by both standard transport and streaming paths.
+     * Executes the worker query, preferring IPC format for efficient transport.
+     * Falls back to legacy Object[][] format if IPC executor is not available.
      */
     private LakehouseWorkerResponse executeWorkerQuery(LakehouseWorkerRequest request) {
         String[] filePaths = request.getFilePaths();
@@ -216,7 +224,6 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
         logger.info("[TransportLakehouseAction] Worker received request: table={}, files={}, sql_len={}",
             tableName, filePaths.length, sqlQuery != null ? sqlQuery.length() : 0);
 
-        // Build the ExternalScanContext from the request data
         ExternalScanContext scanContext = new ExternalScanContext(
             tableName,
             Arrays.asList(filePaths),
@@ -224,7 +231,17 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             request.getStorageConfig()
         );
 
-        // Retrieve the backend executor from the global registry
+        // Prefer IPC format for efficient transport
+        Function<ExternalScanContext, byte[]> ipcExecutor = ExternalScanContext.getGlobalIpcExecutor();
+        if (ipcExecutor != null) {
+            byte[] ipcBytes = ipcExecutor.apply(scanContext);
+            if (ipcBytes != null && ipcBytes.length > 0) {
+                logger.info("[TransportLakehouseAction] Worker completed (IPC): {} bytes", ipcBytes.length);
+                return new LakehouseWorkerResponse(ipcBytes);
+            }
+        }
+
+        // Fallback to legacy Object[][] format
         Function<ExternalScanContext, Iterable<Object[]>> executor = ExternalScanContext.getGlobalBackendExecutor();
         if (executor == null) {
             throw new IllegalStateException(
@@ -233,10 +250,8 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             );
         }
 
-        // Execute the query via the backend (DataFusion native engine)
         Iterable<Object[]> result = executor.apply(scanContext);
 
-        // Convert Iterable<Object[]> to arrays for the response
         List<Object[]> rowList = new ArrayList<>();
         String[] columnNames = null;
         for (Object[] row : result) {
@@ -254,8 +269,7 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
         }
 
         Object[][] rows = rowList.toArray(new Object[0][]);
-        logger.info("[TransportLakehouseAction] Worker completed: {} rows, {} columns", rows.length, columnNames.length);
-
+        logger.info("[TransportLakehouseAction] Worker completed (rows): {} rows, {} columns", rows.length, columnNames.length);
         return new LakehouseWorkerResponse(rows, columnNames);
     }
 }

@@ -27,4 +27,15 @@ public interface AnalyticsSearchBackendPlugin extends SearchExecEngineProvider {
     default Iterable<Object[]> executeRemoteQuery(ExternalScanContext scanContext) {
         throw new UnsupportedOperationException(name() + " does not support remote query execution");
     }
+
+    /**
+     * Executes a query against remote data files and returns Arrow IPC bytes.
+     * Used by distributed workers for efficient network transport of results.
+     *
+     * @param scanContext the resolved scan context from an external table plugin
+     * @return Arrow IPC stream bytes, or null if IPC execution is not supported
+     */
+    default byte[] executeRemoteQueryToIpc(ExternalScanContext scanContext) {
+        return null;
+    }
 }
