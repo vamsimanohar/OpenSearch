@@ -20,4 +20,89 @@ dependencies {
     // Analytics engine and framework (compile-only, provided at runtime by analytics-engine plugin)
     compileOnly project(':sandbox:plugins:analytics-engine')
     compileOnly project(':sandbox:libs:analytics-framework')
+
+    // Iceberg SDK
+    implementation "org.apache.iceberg:iceberg-api:1.7.1"
+    implementation "org.apache.iceberg:iceberg-core:1.7.1"
+    implementation "org.apache.iceberg:iceberg-aws:1.7.1"
+    implementation "org.apache.iceberg:iceberg-bundled-guava:1.7.1"
+
+    // Hadoop client (api + runtime cover hadoop-common, hadoop-auth, shaded deps)
+    implementation "org.apache.hadoop:hadoop-client-api:3.4.2"
+    runtimeOnly "org.apache.hadoop:hadoop-client-runtime:3.4.2"
+
+    // Iceberg transitive dependencies (OpenSearch plugin system strips transitives)
+    runtimeOnly "org.apache.iceberg:iceberg-common:1.7.1"
+    runtimeOnly "io.airlift:aircompressor:0.27"
+    runtimeOnly "com.github.ben-manes.caffeine:caffeine:2.9.3"
+    runtimeOnly "dev.failsafe:failsafe:3.3.2"
+    runtimeOnly "org.roaringbitmap:RoaringBitmap:1.3.0"
+
+    // AWS SDK
+    implementation "software.amazon.awssdk:glue:${versions.aws}"
+    implementation "software.amazon.awssdk:s3:${versions.aws}"
+    implementation "software.amazon.awssdk:sts:${versions.aws}"
+    implementation "software.amazon.awssdk:auth:${versions.aws}"
+    implementation "software.amazon.awssdk:regions:${versions.aws}"
+    implementation "software.amazon.awssdk:identity-spi:${versions.aws}"
+    implementation "software.amazon.awssdk:utils:${versions.aws}"
+    implementation "software.amazon.awssdk:aws-core:${versions.aws}"
+    implementation "software.amazon.awssdk:sdk-core:${versions.aws}"
+
+    // AWS SDK transitive deps (OpenSearch plugin system strips transitives)
+    runtimeOnly "software.amazon.awssdk:http-client-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:url-connection-client:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:apache-client:${versions.aws}"
+    runtimeOnly "org.apache.httpcomponents:httpclient:4.5.14"
+    runtimeOnly "org.apache.httpcomponents:httpcore:4.4.16"
+    runtimeOnly "commons-logging:commons-logging:1.2"
+    runtimeOnly "software.amazon.awssdk:profiles:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:endpoints-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:protocol-core:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:json-utils:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-json-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-query-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-xml-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:third-party-jackson-core:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:metrics-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:annotations:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:checksums:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:checksums-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:retries:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:retries-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth-aws:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:crt-core:${versions.aws}"
+}
+
+// JaCoCo coverage enforcement — fail build if line coverage drops below threshold
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            element = 'CLASS'
+            // IcebergCatalogConnector needs live AWS credentials to test
+            excludes = [
+                'org.opensearch.lakehouse.catalog.IcebergCatalogConnector'
+            ]
+            limit {
+                counter = 'LINE'
+                minimum = 0.70
+            }
+        }
+    }
+}
+check.dependsOn jacocoTestCoverageVerification
+
+configurations.all {
+    resolutionStrategy {
+        force "com.google.guava:guava:33.4.0-jre"
+        force "com.google.guava:failureaccess:1.0.2"
+        force "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
+        force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+        force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+        force "org.slf4j:slf4j-api:${versions.slf4j}"
+        force "commons-logging:commons-logging:1.3.5"
+        force "commons-codec:commons-codec:1.15"
+    }
 }

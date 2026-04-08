@@ -19,6 +19,7 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.MappingMetadata;
 
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Builds a Calcite {@link SchemaPlus} from OpenSearch {@link ClusterState} index mappings.
@@ -38,11 +39,25 @@ public class OpenSearchSchemaBuilder {
      * @param clusterState the current cluster state to derive schema from
      */
     public static SchemaPlus buildSchema(ClusterState clusterState) {
+        return buildSchema(clusterState, Set.of());
+    }
+
+    /**
+     * Builds a Calcite SchemaPlus from the given ClusterState, skipping
+     * indices claimed by {@link SchemaContributor} plugins.
+     *
+     * @param clusterState  the current cluster state to derive schema from
+     * @param skipIndices   index names to skip (handled by SchemaContributors)
+     */
+    public static SchemaPlus buildSchema(ClusterState clusterState, Set<String> skipIndices) {
         CalciteSchema rootSchema = CalciteSchema.createRootSchema(true);
         SchemaPlus schemaPlus = rootSchema.plus();
 
         for (Map.Entry<String, IndexMetadata> entry : clusterState.metadata().indices().entrySet()) {
             String indexName = entry.getKey();
+            if (skipIndices.contains(indexName)) {
+                continue;
+            }
             IndexMetadata indexMetadata = entry.getValue();
             MappingMetadata mapping = indexMetadata.mapping();
             if (mapping == null) {
