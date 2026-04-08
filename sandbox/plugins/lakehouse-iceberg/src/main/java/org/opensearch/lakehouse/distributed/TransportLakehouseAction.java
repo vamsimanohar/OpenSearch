@@ -94,6 +94,13 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
         LakehouseState.instance().setDistributedCoordinator(coordinator);
         logger.info("[TransportLakehouseAction] Initialized distributed query coordinator (streaming={})",
             streamTransportService != null);
+
+        // Initialize the multi-stage coordinator (Mini-Trino engine) with fallback
+        MultiStageCoordinator multiStage = new MultiStageCoordinator(
+            clusterService, transportService, coordinator
+        );
+        LakehouseState.instance().setMultiStageCoordinator(multiStage);
+        logger.info("[TransportLakehouseAction] Initialized multi-stage coordinator (Mini-Trino engine)");
     }
 
     /**

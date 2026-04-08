@@ -23,6 +23,7 @@ import org.opensearch.lakehouse.catalog.CatalogConfig;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
 import org.opensearch.lakehouse.distributed.DistributedQueryCoordinator;
+import org.opensearch.lakehouse.distributed.MultiStageCoordinator;
 import org.opensearch.lakehouse.distributed.PhysicalPlanSplitter;
 import org.opensearch.lakehouse.scan.CalciteToIcebergPredicateConverter;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
@@ -157,9 +158,18 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
                     logger.info("[IcebergTableExecutor] >>> DISTRIBUTED EXECUTION for {} files across cluster <<<",
                         scanPlan.fileCount());
                     long tDist0 = System.nanoTime();
-                    Iterable<Object[]> distributedResults = coordinator.execute(
-                        splitPlan, scanPlan.getFiles(), storageConfig, tableName
-                    );
+                    Iterable<Object[]> distributedResults;
+                    MultiStageCoordinator multiStage = LakehouseState.instance().multiStageCoordinator();
+                    if (multiStage != null) {
+                        logger.info("[IcebergTableExecutor] Using multi-stage coordinator (Mini-Trino engine)");
+                        distributedResults = multiStage.execute(
+                            logicalPlan, tableName, scanPlan.getFiles(), storageConfig, splitPlan
+                        );
+                    } else {
+                        distributedResults = coordinator.execute(
+                            splitPlan, scanPlan.getFiles(), storageConfig, tableName
+                        );
+                    }
                     long tDist1 = System.nanoTime();
                     scanContext.setPreComputedResults(distributedResults);
                     logger.info("[IcebergTableExecutor] [TIMING] Distributed execution: {} ms",

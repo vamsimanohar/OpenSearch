@@ -14,6 +14,7 @@ import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
 import org.opensearch.lakehouse.distributed.DistributedQueryCoordinator;
+import org.opensearch.lakehouse.distributed.MultiStageCoordinator;
 import org.opensearch.lakehouse.scan.IcebergScanPlanner;
 
 import java.security.AccessControlContext;
@@ -49,6 +50,12 @@ public final class LakehouseState {
      * ClusterService and TransportService are available. {@code null} until plugin initialization completes.
      */
     private volatile DistributedQueryCoordinator distributedCoordinator;
+
+    /**
+     * Multi-stage distributed query coordinator for pipelined execution with exchange operators.
+     * Set by {@link org.opensearch.lakehouse.distributed.TransportLakehouseAction}.
+     */
+    private volatile MultiStageCoordinator multiStageCoordinator;
 
     @SuppressWarnings("removal")
     private LakehouseState() {
@@ -89,6 +96,23 @@ public final class LakehouseState {
     public void setDistributedCoordinator(DistributedQueryCoordinator coordinator) {
         this.distributedCoordinator = coordinator;
         logger.info("[LakehouseState] Distributed query coordinator registered");
+    }
+
+    /**
+     * Returns the multi-stage coordinator, or {@code null} if not yet initialized.
+     */
+    public MultiStageCoordinator multiStageCoordinator() {
+        return multiStageCoordinator;
+    }
+
+    /**
+     * Registers the multi-stage coordinator.
+     *
+     * @param coordinator the multi-stage coordinator
+     */
+    public void setMultiStageCoordinator(MultiStageCoordinator coordinator) {
+        this.multiStageCoordinator = coordinator;
+        logger.info("[LakehouseState] Multi-stage coordinator registered");
     }
 
     /**
