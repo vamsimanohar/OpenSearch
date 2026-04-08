@@ -226,8 +226,10 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
     @Override
     public Iterable<Object[]> executeRemoteQuery(ExternalScanContext scanContext) {
+        long tRemote0 = System.nanoTime();
         // Coordinator merge path: IPC batches from distributed workers
         if (scanContext.getIpcBatches() != null) {
+            logger.info("[DataFusionPlugin] executeRemoteQuery → merge path (IPC batches present)");
             return executeMergeQuery(scanContext);
         }
 
@@ -252,28 +254,28 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
             return List.of();
         }
 
-        logger.debug("[DataFusionPlugin] executeRemoteQuery: table={}, files={}, sqlQuery={}",
+        logger.info("[DataFusionPlugin] executeRemoteQuery: table={}, files={}, sql={}",
             tableName, filePaths.length, sqlQuery);
-        logger.debug("[DataFusionPlugin] S3 config: region={}, bucket={}, credentials={}, sessionToken={}, endpoint={}",
+        logger.info("[DataFusionPlugin] S3 config: region={}, bucket={}, credentials={}, sessionToken={}, endpoint={}",
             s3Region, s3Bucket,
             s3AccessKeyId != null ? "present" : "absent",
             s3SessionToken != null ? "present" : "absent",
             s3Endpoint != null ? s3Endpoint : "default");
-        if (logger.isDebugEnabled() && filePaths.length > 0) {
-            logger.debug("[DataFusionPlugin] First file path: {}", filePaths[0]);
-            if (filePaths.length > 1) {
-                logger.debug("[DataFusionPlugin] Last file path: {}", filePaths[filePaths.length - 1]);
-            }
-        }
 
         // Call DataFusion via JNI — returns a stream pointer.
-        // Pass the global runtime pointer so the Iceberg executor shares the
-        // memory pool and disk manager (enabling spill-to-disk for large aggregations).
+        long tJni0 = System.nanoTime();
         long streamPtr = executeIcebergQueryJni(dfService, s3Region, s3Bucket,
             s3AccessKeyId, s3SecretAccessKey, s3SessionToken, s3Endpoint,
             filePaths, tableName, sqlQuery);
+        long tJni1 = System.nanoTime();
+        logger.info("[DataFusionPlugin] [TIMING] JNI executeIcebergQuery: {} ms", (tJni1 - tJni0) / 1_000_000);
 
-        return streamToRows(dfService, streamPtr);
+        long tStream0 = System.nanoTime();
+        Iterable<Object[]> rows = streamToRows(dfService, streamPtr);
+        long tStream1 = System.nanoTime();
+        logger.info("[DataFusionPlugin] [TIMING] streamToRows: {} ms, total executeRemoteQuery: {} ms",
+            (tStream1 - tStream0) / 1_000_000, (tStream1 - tRemote0) / 1_000_000);
+        return rows;
     }
 
     /**
@@ -283,6 +285,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
      */
     @Override
     public byte[] executeRemoteQueryToIpc(ExternalScanContext scanContext) {
+        long tIpc0 = System.nanoTime();
         DataFusionService dfService = ensureDataFusionService();
 
         Map<String, String> config = scanContext.getStorageConfig();
@@ -302,19 +305,23 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
             return new byte[0];
         }
 
-        logger.info("[DataFusionPlugin] executeRemoteQueryToIpc: table={}, files={}, sql_len={}",
-            tableName, filePaths.length, sqlQuery.length());
+        logger.info("[DataFusionPlugin] executeRemoteQueryToIpc: table={}, files={}, sql={}",
+            tableName, filePaths.length, sqlQuery);
 
         NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        long tJni0 = System.nanoTime();
         byte[] ipcBytes = NativeBridge.executeIcebergQueryToIpc(
             s3Region, s3Bucket,
             s3AccessKeyId, s3SecretAccessKey, s3SessionToken, s3Endpoint,
             filePaths, tableName, sqlQuery,
             runtimeHandle.get()
         );
+        long tJni1 = System.nanoTime();
 
-        logger.info("[DataFusionPlugin] IPC result: {} bytes for table [{}]",
-            ipcBytes != null ? ipcBytes.length : 0, tableName);
+        logger.info("[DataFusionPlugin] [TIMING] IPC JNI execution: {} ms — {} bytes for table [{}]",
+            (tJni1 - tJni0) / 1_000_000, ipcBytes != null ? ipcBytes.length : 0, tableName);
+        logger.info("[DataFusionPlugin] [TIMING] Total executeRemoteQueryToIpc: {} ms",
+            (tJni1 - tIpc0) / 1_000_000);
         return ipcBytes;
     }
 
@@ -322,16 +329,20 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
      * Merges Arrow IPC batches from distributed workers using coordinator SQL via DataFusion.
      */
     private Iterable<Object[]> executeMergeQuery(ExternalScanContext scanContext) {
+        long tMerge0 = System.nanoTime();
         DataFusionService dfService = ensureDataFusionService();
         byte[][] ipcBatches = scanContext.getIpcBatches();
         String coordinatorSql = scanContext.getSqlQuery();
         String tableName = scanContext.getTableName();
 
-        logger.info("[DataFusionPlugin] executeMergeQuery: {} worker batches, table={}, sql_len={}",
-            ipcBatches.length, tableName, coordinatorSql.length());
+        long totalIpcBytes = 0;
+        for (byte[] batch : ipcBatches) { totalIpcBytes += batch.length; }
+        logger.info("[DataFusionPlugin] executeMergeQuery: {} worker batches, {} total IPC bytes, table={}, sql={}",
+            ipcBatches.length, totalIpcBytes, tableName, coordinatorSql);
 
         NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
         CompletableFuture<Long> future = new CompletableFuture<>();
+        long tJni0 = System.nanoTime();
         NativeBridge.mergeIpcBatches(
             ipcBatches, coordinatorSql, tableName,
             runtimeHandle.get(),
@@ -350,8 +361,15 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
             logger.error("[DataFusionPlugin] Merge execution failed: {}", e.getMessage(), e);
             throw new RuntimeException("Distributed merge query failed via DataFusion", e);
         }
+        long tJni1 = System.nanoTime();
+        logger.info("[DataFusionPlugin] [TIMING] Merge JNI: {} ms", (tJni1 - tJni0) / 1_000_000);
 
-        return streamToRows(dfService, streamPtr);
+        long tStream0 = System.nanoTime();
+        Iterable<Object[]> rows = streamToRows(dfService, streamPtr);
+        long tStream1 = System.nanoTime();
+        logger.info("[DataFusionPlugin] [TIMING] Merge streamToRows: {} ms, total merge: {} ms",
+            (tStream1 - tStream0) / 1_000_000, (tStream1 - tMerge0) / 1_000_000);
+        return rows;
     }
 
     /**

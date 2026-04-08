@@ -54,7 +54,7 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
     @Override
     @SuppressWarnings("removal")
     public ExternalScanContext prepareScan(RelNode logicalPlan, ExternalTable externalTable) {
-        long t0 = System.nanoTime();
+        long tTotal0 = System.nanoTime();
         if (!(externalTable instanceof IcebergCalciteTable)) {
             throw new IllegalArgumentException("Expected IcebergCalciteTable but got: " + externalTable.getClass().getSimpleName());
         }
@@ -80,6 +80,7 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
         if (scanCatalogName != null) {
             connector.setCredentialsOnThread(scanCatalogName);
         }
+        long tManifest0 = System.nanoTime();
         IcebergScanPlan scanPlan;
         try {
             @SuppressWarnings("removal")
@@ -97,8 +98,9 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
                 connector.clearCredentialsOnThread();
             }
         }
-        logger.info("[IcebergTableExecutor] Scan plan: {} files, {} bytes total",
-            scanPlan.fileCount(), scanPlan.getTotalFileSize());
+        long tManifest1 = System.nanoTime();
+        logger.info("[IcebergTableExecutor] [TIMING] Manifest scan: {} ms — {} files, {} bytes total",
+            (tManifest1 - tManifest0) / 1_000_000, scanPlan.fileCount(), scanPlan.getTotalFileSize());
         if (logger.isDebugEnabled()) {
             List<String> filePaths = scanPlan.getDataFilePaths();
             logger.debug("[IcebergTableExecutor] Scan plan file paths ({}):", filePaths.size());
@@ -111,6 +113,7 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
         String tableName = extractTableName(logicalPlan);
 
         // 4. Convert Calcite RelNode to DataFusion SQL
+        long tSql0 = System.nanoTime();
         String sqlQuery;
         try {
             SqlDialect dialect = DataFusionSqlDialect.DEFAULT;
@@ -120,10 +123,12 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
             // RelToSqlConverter may produce schema-qualified names (e.g. "opensearch"."nyc_taxi")
             // but DataFusion registers tables with just the leaf name. Replace all qualified refs.
             sqlQuery = stripSchemaQualifiers(sqlQuery, tableName);
-            logger.debug("[IcebergTableExecutor] Generated SQL for DataFusion: {}", sqlQuery);
         } catch (Exception e) {
             throw new RuntimeException("Failed to convert query plan to SQL", e);
         }
+        long tSql1 = System.nanoTime();
+        logger.info("[IcebergTableExecutor] [TIMING] Calcite→SQL conversion: {} ms — SQL: {}",
+            (tSql1 - tSql0) / 1_000_000, sqlQuery);
 
         // 5. Build storage config from CatalogConfig
         Map<String, String> storageConfig = buildStorageConfig(connector, icebergTable, scanPlan);
@@ -141,25 +146,38 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
         DistributedQueryCoordinator coordinator = LakehouseState.instance().distributedCoordinator();
         if (coordinator != null && coordinator.shouldDistribute(scanPlan.getFiles())) {
             try {
+                long tSplit0 = System.nanoTime();
                 PhysicalPlanSplitter.SplitPlan splitPlan = PhysicalPlanSplitter.split(logicalPlan, tableName);
-                logger.debug("[IcebergTableExecutor] Split plan: {}", splitPlan);
+                long tSplit1 = System.nanoTime();
+                logger.info("[IcebergTableExecutor] [TIMING] Plan splitting: {} ms", (tSplit1 - tSplit0) / 1_000_000);
+                logger.info("[IcebergTableExecutor] Split plan: canDistribute={}, workerSql={}, coordinatorSql={}",
+                    splitPlan.canDistribute(), splitPlan.getWorkerSql(), splitPlan.getCoordinatorSql());
 
                 if (splitPlan.canDistribute()) {
-                    logger.info("[IcebergTableExecutor] Using distributed execution for {} files: workerSql={}, coordinatorSql={}",
-                        scanPlan.fileCount(), splitPlan.getWorkerSql(), splitPlan.getCoordinatorSql());
+                    logger.info("[IcebergTableExecutor] >>> DISTRIBUTED EXECUTION for {} files across cluster <<<",
+                        scanPlan.fileCount());
+                    long tDist0 = System.nanoTime();
                     Iterable<Object[]> distributedResults = coordinator.execute(
                         splitPlan, scanPlan.getFiles(), storageConfig, tableName
                     );
+                    long tDist1 = System.nanoTime();
                     scanContext.setPreComputedResults(distributedResults);
-                    logger.info("[IcebergTableExecutor] Distributed execution completed successfully");
+                    logger.info("[IcebergTableExecutor] [TIMING] Distributed execution: {} ms",
+                        (tDist1 - tDist0) / 1_000_000);
                 } else {
                     logger.info("[IcebergTableExecutor] Query cannot be distributed (unsupported aggregates), using single-node execution");
                 }
             } catch (Exception e) {
                 logger.warn("[IcebergTableExecutor] Distributed execution failed, falling back to single-node: {}", e.getMessage(), e);
             }
+        } else {
+            logger.info("[IcebergTableExecutor] Single-node execution (coordinator={}, files={})",
+                coordinator != null, scanPlan.fileCount());
         }
 
+        long tTotal1 = System.nanoTime();
+        logger.info("[IcebergTableExecutor] [TIMING] Total prepareScan: {} ms", (tTotal1 - tTotal0) / 1_000_000);
+        logger.info("[IcebergTableExecutor] ========== PREPARE SCAN END ==========");
         return scanContext;
     }
 

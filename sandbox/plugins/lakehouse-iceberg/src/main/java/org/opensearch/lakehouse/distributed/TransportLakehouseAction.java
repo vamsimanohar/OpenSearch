@@ -124,13 +124,20 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
      * @param task    the task associated with this request
      */
     private void handleStreamRequest(LakehouseWorkerRequest request, TransportChannel channel, Task task) throws IOException {
+        long tWorker0 = System.nanoTime();
         try {
             String[] filePaths = request.getFilePaths();
             String sqlQuery = request.getSqlQuery();
             String tableName = request.getTableName();
 
-            logger.info("[TransportLakehouseAction] Streaming worker received request: table={}, files={}, sql_len={}",
-                tableName, filePaths.length, sqlQuery != null ? sqlQuery.length() : 0);
+            logger.info("[Worker] ====== WORKER EXECUTION START (streaming) ======");
+            logger.info("[Worker] table={}, files={}, sql={}", tableName, filePaths.length, sqlQuery);
+            for (int i = 0; i < Math.min(filePaths.length, 5); i++) {
+                logger.info("[Worker]   file[{}]: {}", i, filePaths[i]);
+            }
+            if (filePaths.length > 5) {
+                logger.info("[Worker]   ... and {} more files", filePaths.length - 5);
+            }
 
             ExternalScanContext scanContext = new ExternalScanContext(
                 tableName,
@@ -142,11 +149,18 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             // Prefer IPC format — single response with all data
             Function<ExternalScanContext, byte[]> ipcExecutor = ExternalScanContext.getGlobalIpcExecutor();
             if (ipcExecutor != null) {
+                logger.info("[Worker] Using IPC executor path");
+                long tIpc0 = System.nanoTime();
                 byte[] ipcBytes = ipcExecutor.apply(scanContext);
+                long tIpc1 = System.nanoTime();
                 if (ipcBytes != null && ipcBytes.length > 0) {
                     channel.sendResponseBatch(new LakehouseWorkerResponse(ipcBytes));
                     channel.completeStream();
-                    logger.info("[TransportLakehouseAction] Streaming worker completed (IPC): {} bytes", ipcBytes.length);
+                    long tWorker1 = System.nanoTime();
+                    logger.info("[Worker] [TIMING] IPC execution: {} ms, transport: {} ms, total: {} ms — {} bytes",
+                        (tIpc1 - tIpc0) / 1_000_000, (tWorker1 - tIpc1) / 1_000_000,
+                        (tWorker1 - tWorker0) / 1_000_000, ipcBytes.length);
+                    logger.info("[Worker] ====== WORKER EXECUTION END (IPC) ======");
                     return;
                 }
             }
@@ -198,7 +212,10 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             }
 
             channel.completeStream();
-            logger.info("[TransportLakehouseAction] Streaming worker completed (rows): {} rows in {} batches", totalRows, batchCount);
+            long tWorker1 = System.nanoTime();
+            logger.info("[Worker] [TIMING] Row streaming total: {} ms — {} rows in {} batches",
+                (tWorker1 - tWorker0) / 1_000_000, totalRows, batchCount);
+            logger.info("[Worker] ====== WORKER EXECUTION END (rows) ======");
 
         } catch (StreamException e) {
             if (e.getErrorCode() == StreamErrorCode.CANCELLED) {
@@ -217,12 +234,19 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
      * Falls back to legacy Object[][] format if IPC executor is not available.
      */
     private LakehouseWorkerResponse executeWorkerQuery(LakehouseWorkerRequest request) {
+        long tWorker0 = System.nanoTime();
         String[] filePaths = request.getFilePaths();
         String sqlQuery = request.getSqlQuery();
         String tableName = request.getTableName();
 
-        logger.info("[TransportLakehouseAction] Worker received request: table={}, files={}, sql_len={}",
-            tableName, filePaths.length, sqlQuery != null ? sqlQuery.length() : 0);
+        logger.info("[Worker] ====== WORKER EXECUTION START (standard) ======");
+        logger.info("[Worker] table={}, files={}, sql={}", tableName, filePaths.length, sqlQuery);
+        for (int i = 0; i < Math.min(filePaths.length, 5); i++) {
+            logger.info("[Worker]   file[{}]: {}", i, filePaths[i]);
+        }
+        if (filePaths.length > 5) {
+            logger.info("[Worker]   ... and {} more files", filePaths.length - 5);
+        }
 
         ExternalScanContext scanContext = new ExternalScanContext(
             tableName,
@@ -234,14 +258,20 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
         // Prefer IPC format for efficient transport
         Function<ExternalScanContext, byte[]> ipcExecutor = ExternalScanContext.getGlobalIpcExecutor();
         if (ipcExecutor != null) {
+            logger.info("[Worker] Using IPC executor path");
+            long tIpc0 = System.nanoTime();
             byte[] ipcBytes = ipcExecutor.apply(scanContext);
+            long tIpc1 = System.nanoTime();
             if (ipcBytes != null && ipcBytes.length > 0) {
-                logger.info("[TransportLakehouseAction] Worker completed (IPC): {} bytes", ipcBytes.length);
+                logger.info("[Worker] [TIMING] IPC execution: {} ms, total: {} ms — {} bytes",
+                    (tIpc1 - tIpc0) / 1_000_000, (tIpc1 - tWorker0) / 1_000_000, ipcBytes.length);
+                logger.info("[Worker] ====== WORKER EXECUTION END (IPC) ======");
                 return new LakehouseWorkerResponse(ipcBytes);
             }
         }
 
         // Fallback to legacy Object[][] format
+        logger.info("[Worker] Falling back to legacy Object[][] path");
         Function<ExternalScanContext, Iterable<Object[]>> executor = ExternalScanContext.getGlobalBackendExecutor();
         if (executor == null) {
             throw new IllegalStateException(
@@ -250,6 +280,7 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
             );
         }
 
+        long tExec0 = System.nanoTime();
         Iterable<Object[]> result = executor.apply(scanContext);
 
         List<Object[]> rowList = new ArrayList<>();
@@ -269,7 +300,10 @@ public class TransportLakehouseAction extends HandledTransportAction<LakehouseWo
         }
 
         Object[][] rows = rowList.toArray(new Object[0][]);
-        logger.info("[TransportLakehouseAction] Worker completed (rows): {} rows, {} columns", rows.length, columnNames.length);
+        long tWorker1 = System.nanoTime();
+        logger.info("[Worker] [TIMING] Row execution: {} ms, total: {} ms — {} rows, {} columns",
+            (tWorker1 - tExec0) / 1_000_000, (tWorker1 - tWorker0) / 1_000_000, rows.length, columnNames.length);
+        logger.info("[Worker] ====== WORKER EXECUTION END (rows) ======");
         return new LakehouseWorkerResponse(rows, columnNames);
     }
 }

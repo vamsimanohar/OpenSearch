@@ -105,50 +105,68 @@ public class DistributedQueryCoordinator {
         Map<String, String> storageConfig,
         String tableName
     ) {
+        long tExec0 = System.nanoTime();
         List<DiscoveryNode> dataNodes = getDataNodes();
+        long totalFileSize = fileInfos.stream().mapToLong(IcebergScanPlan.FileInfo::getFileSizeInBytes).sum();
 
-        logger.info("[DistributedQueryCoordinator] Distributing query: table={}, files={}, nodes={}, workerSql={}",
-            tableName, fileInfos.size(), dataNodes.size(), splitPlan.getWorkerSql());
-
-        List<List<IcebergScanPlan.FileInfo>> partitions = FilePartitioner.partition(fileInfos, dataNodes.size());
-
-        logger.info("[DistributedQueryCoordinator] Created {} partitions across {} data nodes",
-            partitions.size(), dataNodes.size());
-        if (logger.isDebugEnabled()) {
-            for (int i = 0; i < partitions.size(); i++) {
-                List<IcebergScanPlan.FileInfo> partition = partitions.get(i);
-                long totalSize = partition.stream().mapToLong(IcebergScanPlan.FileInfo::getFileSizeInBytes).sum();
-                logger.debug("[DistributedQueryCoordinator] Partition {} -> node [{}]: {} files, {} bytes",
-                    i, dataNodes.get(i).getName(), partition.size(), totalSize);
-            }
+        logger.info("[Coordinator] ====== SCATTER-GATHER START ======");
+        logger.info("[Coordinator] table={}, files={}, totalSize={} bytes, nodes={}, transport={}",
+            tableName, fileInfos.size(), totalFileSize,
+            dataNodes.size(), streamTransportService != null ? "ArrowFlight" : "Standard");
+        for (int i = 0; i < dataNodes.size(); i++) {
+            logger.info("[Coordinator] dataNode[{}]: {}", i, dataNodes.get(i).getName());
         }
 
-        List<LakehouseWorkerResponse> responses;
+        List<List<IcebergScanPlan.FileInfo>> partitions = FilePartitioner.partition(fileInfos, dataNodes.size());
+        for (int i = 0; i < partitions.size(); i++) {
+            List<IcebergScanPlan.FileInfo> partition = partitions.get(i);
+            long partSize = partition.stream().mapToLong(IcebergScanPlan.FileInfo::getFileSizeInBytes).sum();
+            logger.info("[Coordinator] partition[{}] -> [{}]: {} files, {} bytes", i, dataNodes.get(i).getName(), partition.size(), partSize);
+        }
 
+        logger.info("[Coordinator] ------ SCATTER: sending to {} workers ------", partitions.size());
+        long tScatter0 = System.nanoTime();
+        List<LakehouseWorkerResponse> responses;
         if (streamTransportService != null) {
             responses = fanOutViaStreaming(partitions, dataNodes, splitPlan, storageConfig, tableName);
         } else {
             responses = fanOutViaStandard(partitions, dataNodes, splitPlan, storageConfig, tableName);
         }
+        long tScatter1 = System.nanoTime();
+        logger.info("[Coordinator] ------ GATHER: {} responses in {} ms ------", responses.size(), (tScatter1 - tScatter0) / 1_000_000);
+        for (int i = 0; i < responses.size(); i++) {
+            LakehouseWorkerResponse r = responses.get(i);
+            logger.info("[Coordinator]   response[{}]: hasIPC={}, ipcBytes={}, rows={}",
+                i, r.hasIpcBytes(), r.hasIpcBytes() ? r.getIpcBytes().length : 0, r.getRows().length);
+        }
 
-        // Try native DataFusion merge via Arrow IPC if all workers returned IPC bytes
+        // Try native DataFusion merge via Arrow IPC
+        long tMerge0 = System.nanoTime();
         Iterable<Object[]> ipcResult = tryIpcMerge(responses, splitPlan, tableName);
         if (ipcResult != null) {
+            long tMerge1 = System.nanoTime();
+            logger.info("[Coordinator] ------ MERGE (IPC/DataFusion): {} ms ------", (tMerge1 - tMerge0) / 1_000_000);
+            logger.info("[Coordinator] [TIMING] Total: {} ms (scatter={} ms, merge={} ms)",
+                (tMerge1 - tExec0) / 1_000_000, (tScatter1 - tScatter0) / 1_000_000, (tMerge1 - tMerge0) / 1_000_000);
+            logger.info("[Coordinator] ====== SCATTER-GATHER END ======");
             return ipcResult;
         }
 
-        // Fallback: collect Object[][] rows and merge in Java
+        // Fallback: Java merge
+        logger.info("[Coordinator] ------ MERGE (Java fallback) ------");
         List<Object[]> partialResults = new ArrayList<>();
         for (LakehouseWorkerResponse response : responses) {
             for (Object[] row : response.getRows()) {
                 partialResults.add(row);
             }
         }
-
-        logger.info("[DistributedQueryCoordinator] Collected {} partial rows from {} workers. Merging with type: {}",
-            partialResults.size(), partitions.size(), splitPlan.getMergeType());
-
-        return CoordinatorMerger.merge(partialResults, splitPlan);
+        List<Object[]> merged = CoordinatorMerger.merge(partialResults, splitPlan);
+        long tEnd = System.nanoTime();
+        logger.info("[Coordinator] Java merge: {} partial -> {} result rows, {} ms",
+            partialResults.size(), merged.size(), (tEnd - tMerge0) / 1_000_000);
+        logger.info("[Coordinator] [TIMING] Total: {} ms", (tEnd - tExec0) / 1_000_000);
+        logger.info("[Coordinator] ====== SCATTER-GATHER END ======");
+        return merged;
     }
 
     /**
