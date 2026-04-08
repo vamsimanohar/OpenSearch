@@ -113,37 +113,15 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
         // 3. Extract table name from the Calcite plan
         String tableName = extractTableName(logicalPlan);
 
-        // 4. Convert Calcite RelNode to DataFusion SQL
-        long tSql0 = System.nanoTime();
-        String sqlQuery;
-        try {
-            SqlDialect dialect = DataFusionSqlDialect.DEFAULT;
-            RelToSqlConverter converter = new RelToSqlConverter(dialect);
-            SqlNode sqlNode = converter.visitRoot(logicalPlan).asStatement();
-            sqlQuery = sqlNode.toSqlString(dialect).getSql();
-            // RelToSqlConverter may produce schema-qualified names (e.g. "opensearch"."nyc_taxi")
-            // but DataFusion registers tables with just the leaf name. Replace all qualified refs.
-            sqlQuery = stripSchemaQualifiers(sqlQuery, tableName);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to convert query plan to SQL", e);
-        }
-        long tSql1 = System.nanoTime();
-        logger.info("[IcebergTableExecutor] [TIMING] Calcite→SQL conversion: {} ms — SQL: {}",
-            (tSql1 - tSql0) / 1_000_000, sqlQuery);
-
-        // 5. Build storage config from CatalogConfig
+        // 4. Build storage config from CatalogConfig (needed by both paths)
         Map<String, String> storageConfig = buildStorageConfig(connector, icebergTable, scanPlan);
 
         logger.debug("[IcebergTableExecutor] Storage config: region={}, bucket={}, credentials={}, endpoint={}",
             storageConfig.get("s3Region"), storageConfig.get("s3Bucket"),
             storageConfig.containsKey("s3AccessKeyId") ? "present" : "absent",
             storageConfig.getOrDefault("s3Endpoint", "default"));
-        logger.debug("[IcebergTableExecutor] ExternalScanContext: table={}, files={}, sqlQuery={}, storageConfigKeys={}",
-            tableName, scanPlan.getDataFilePaths().size(), sqlQuery, storageConfig.keySet());
 
-        ExternalScanContext scanContext = new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), sqlQuery, storageConfig);
-
-        // 6. Analyze query for distributed execution via PhysicalPlanSplitter
+        // 5. Try distributed execution first — avoids unnecessary single-node SQL conversion
         DistributedQueryCoordinator coordinator = LakehouseState.instance().distributedCoordinator();
         if (coordinator != null && coordinator.shouldDistribute(scanPlan.getFiles())) {
             try {
@@ -171,11 +149,21 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
                         );
                     }
                     long tDist1 = System.nanoTime();
+                    // Distributed path succeeded — build scanContext with pre-computed results
+                    // Use the coordinator SQL as the sqlQuery (it won't be executed again,
+                    // but ExternalScanContext requires a non-null value)
+                    ExternalScanContext scanContext = new ExternalScanContext(
+                        tableName, scanPlan.getDataFilePaths(), splitPlan.getCoordinatorSql(), storageConfig
+                    );
                     scanContext.setPreComputedResults(distributedResults);
                     logger.info("[IcebergTableExecutor] [TIMING] Distributed execution: {} ms",
                         (tDist1 - tDist0) / 1_000_000);
+                    long tTotal1 = System.nanoTime();
+                    logger.info("[IcebergTableExecutor] [TIMING] Total prepareScan: {} ms", (tTotal1 - tTotal0) / 1_000_000);
+                    logger.info("[IcebergTableExecutor] ========== PREPARE SCAN END (distributed) ==========");
+                    return scanContext;
                 } else {
-                    logger.info("[IcebergTableExecutor] Query cannot be distributed (unsupported aggregates), using single-node execution");
+                    logger.info("[IcebergTableExecutor] Query cannot be distributed (unsupported aggregates), falling through to single-node");
                 }
             } catch (Exception e) {
                 logger.warn("[IcebergTableExecutor] Distributed execution failed, falling back to single-node: {}", e.getMessage(), e);
@@ -184,6 +172,25 @@ public class IcebergTableExecutor implements ExternalTableExecutor {
             logger.info("[IcebergTableExecutor] Single-node execution (coordinator={}, files={})",
                 coordinator != null, scanPlan.fileCount());
         }
+
+        // 6. Single-node path: convert Calcite RelNode to DataFusion SQL
+        //    Only reached if distributed execution was skipped, unsupported, or failed.
+        long tSql0 = System.nanoTime();
+        String sqlQuery;
+        try {
+            SqlDialect dialect = DataFusionSqlDialect.DEFAULT;
+            RelToSqlConverter converter = new RelToSqlConverter(dialect);
+            SqlNode sqlNode = converter.visitRoot(logicalPlan).asStatement();
+            sqlQuery = sqlNode.toSqlString(dialect).getSql();
+            sqlQuery = stripSchemaQualifiers(sqlQuery, tableName);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to convert query plan to SQL", e);
+        }
+        long tSql1 = System.nanoTime();
+        logger.info("[IcebergTableExecutor] [TIMING] Calcite→SQL conversion (single-node): {} ms — SQL: {}",
+            (tSql1 - tSql0) / 1_000_000, sqlQuery);
+
+        ExternalScanContext scanContext = new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), sqlQuery, storageConfig);
 
         long tTotal1 = System.nanoTime();
         logger.info("[IcebergTableExecutor] [TIMING] Total prepareScan: {} ms", (tTotal1 - tTotal0) / 1_000_000);
