@@ -17,7 +17,10 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
+import org.opensearch.analytics.schema.SchemaContributor;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Module;
@@ -36,7 +39,9 @@ import org.opensearch.watcher.ResourceWatcherService;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -55,12 +60,14 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     public AnalyticsPlugin() {}
 
     private final List<AnalyticsSearchBackendPlugin> backEnds = new ArrayList<>();
+    private final List<SchemaContributor> schemaContributors = new ArrayList<>();
     private SqlOperatorTable operatorTable;
 
     @SuppressWarnings("rawtypes")
     @Override
     public void loadExtensions(ExtensionLoader loader) {
         backEnds.addAll(loader.loadExtensions(AnalyticsSearchBackendPlugin.class));
+        schemaContributors.addAll(loader.loadExtensions(SchemaContributor.class));
         operatorTable = aggregateOperatorTables();
     }
 
@@ -80,7 +87,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     ) {
         return List.of(
             new DefaultPlanExecutor(backEnds, null/* TODO: pass indices service */, clusterService),
-            new DefaultEngineContext(clusterService, operatorTable)
+            new DefaultEngineContext(clusterService, operatorTable, schemaContributors)
         );
     }
 
@@ -102,11 +109,25 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     /**
      * Default implementation of {@link EngineContext}.
      */
-    static record DefaultEngineContext(ClusterService clusterService, SqlOperatorTable operatorTable) implements EngineContext {
+    static record DefaultEngineContext(ClusterService clusterService, SqlOperatorTable operatorTable, List<
+        SchemaContributor> schemaContributors) implements EngineContext {
 
         @Override
         public SchemaPlus getSchema() {
-            return OpenSearchSchemaBuilder.buildSchema(clusterService.state());
+            ClusterState state = clusterService.state();
+            Set<String> claimedIndices = new HashSet<>();
+            for (SchemaContributor c : schemaContributors) {
+                for (IndexMetadata idx : state.metadata().indices().values()) {
+                    if (c.claims(idx)) {
+                        claimedIndices.add(idx.getIndex().getName());
+                    }
+                }
+            }
+            SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(state, claimedIndices);
+            for (SchemaContributor c : schemaContributors) {
+                c.contributeSchema(schema, state);
+            }
+            return schema;
         }
     }
 }

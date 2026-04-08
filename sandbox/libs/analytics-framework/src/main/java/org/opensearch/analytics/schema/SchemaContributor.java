@@ -9,6 +9,7 @@
 package org.opensearch.analytics.schema;
 
 import org.apache.calcite.schema.SchemaPlus;
+import org.opensearch.cluster.metadata.IndexMetadata;
 
 /**
  * SPI for plugins that contribute additional tables to the Calcite schema.
@@ -19,10 +20,13 @@ import org.apache.calcite.schema.SchemaPlus;
  * source plugins (e.g., Iceberg, Delta Lake) to register their tables into
  * the Calcite schema without creating compile-time dependencies from the
  * analytics engine to those plugins.
+ * <p>
+ * Implementations may also override {@link #claims(IndexMetadata)} to indicate
+ * that certain OpenSearch indices are owned by the contributor and should be
+ * skipped by the default schema builder.
  *
  * @opensearch.internal
  */
-@FunctionalInterface
 public interface SchemaContributor {
 
     /**
@@ -33,4 +37,16 @@ public interface SchemaContributor {
      *                     server dependency in the library)
      */
     void contributeSchema(SchemaPlus schema, Object clusterState);
+
+    /**
+     * Returns true if this contributor owns the given index and will handle
+     * its schema registration. Indices claimed by any contributor are skipped
+     * by {@code OpenSearchSchemaBuilder}.
+     *
+     * @param indexMetadata the index metadata to check
+     * @return true if this contributor handles this index
+     */
+    default boolean claims(IndexMetadata indexMetadata) {
+        return false;
+    }
 }
