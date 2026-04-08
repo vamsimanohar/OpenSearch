@@ -24,6 +24,7 @@ import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
+import org.opensearch.lakehouse.action.ExplainLakehouseAction;
 import org.opensearch.lakehouse.action.RegisterCatalogAction;
 import org.opensearch.lakehouse.action.RegisterTableAction;
 import org.opensearch.lakehouse.cluster.LakehouseMetadata;
@@ -96,7 +97,8 @@ public class LakehousePlugin extends Plugin implements ActionPlugin {
     ) {
         return List.of(
             new RegisterCatalogAction(clusterService),
-            new RegisterTableAction(clusterService)
+            new RegisterTableAction(clusterService),
+            new ExplainLakehouseAction(clusterService)
         );
     }
 
