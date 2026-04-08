@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import static org.opensearch.rest.RestRequest.Method.PUT;
 
@@ -38,6 +39,7 @@ public class RegisterTableAction extends BaseRestHandler {
 
     private static final Logger logger = LogManager.getLogger(RegisterTableAction.class);
     private static final String SOURCE = "register-lakehouse-table";
+    private static final Pattern VALID_NAME = Pattern.compile("[a-zA-Z0-9_-]+");
 
     private final ClusterService clusterService;
 
@@ -65,6 +67,11 @@ public class RegisterTableAction extends BaseRestHandler {
         String tableName = request.param("name");
         if (tableName == null || tableName.isBlank()) {
             throw new IllegalArgumentException("Table name is required");
+        }
+        if (!VALID_NAME.matcher(tableName).matches()) {
+            throw new IllegalArgumentException(
+                "Table name must match [a-zA-Z0-9_-]+, got: " + tableName
+            );
         }
 
         Map<String, String> binding = new HashMap<>();

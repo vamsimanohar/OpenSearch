@@ -57,7 +57,7 @@ public class IcebergCatalogConnector {
      * @throws IllegalArgumentException          if the name is already registered or the warehouse URI is invalid
      * @throws UnsupportedOperationException     if the catalog type is not yet supported
      */
-    public void registerCatalog(String name, CatalogConfig config) {
+    public synchronized void registerCatalog(String name, CatalogConfig config) {
         if (catalogs.containsKey(name)) {
             throw new IllegalArgumentException("Catalog already registered: " + name);
         }
