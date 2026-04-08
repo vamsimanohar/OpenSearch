@@ -8,10 +8,26 @@
 
 package org.opensearch.analytics.spi;
 
+import org.opensearch.analytics.backend.EngineResultStream;
+import org.opensearch.analytics.exec.ExternalScanContext;
+
 /**
  * SPI extension point for back-end query engines for query planning and execution capabilities
  * as needed by the {@link org.opensearch.analytics.exec.QueryPlanExecutor}
  */
 public interface AnalyticsSearchBackendPlugin extends SearchExecEngineProvider {
 
+    /**
+     * Executes a query against remote data files using the native engine.
+     * The scan context contains the SQL query, file paths, and storage config.
+     * The returned stream is {@link java.io.Closeable} — callers must close it
+     * to release native resources (Arrow allocators, stream handles, etc.).
+     *
+     * @param scanContext the resolved scan context from an external table plugin
+     * @return a closeable stream of result batches
+     * @throws UnsupportedOperationException if this backend does not support remote execution
+     */
+    default EngineResultStream executeRemoteQuery(ExternalScanContext scanContext) {
+        throw new UnsupportedOperationException(name() + " does not support remote query execution");
+    }
 }
