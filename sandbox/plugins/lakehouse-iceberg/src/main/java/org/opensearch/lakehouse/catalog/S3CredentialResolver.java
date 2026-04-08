@@ -9,6 +9,7 @@
 package org.opensearch.lakehouse.catalog;
 
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -17,6 +18,8 @@ import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.auth.StsAssumeRoleCredentialsProvider;
 import software.amazon.awssdk.services.sts.model.AssumeRoleRequest;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.util.Locale;
 
 /**
@@ -80,7 +83,7 @@ public final class S3CredentialResolver {
                 StsClient stsClient = StsClient.builder()
                     .region(Region.of(region))
                     .build();
-                return StsAssumeRoleCredentialsProvider.builder()
+                StsAssumeRoleCredentialsProvider stsProvider = StsAssumeRoleCredentialsProvider.builder()
                     .stsClient(stsClient)
                     .refreshRequest(
                         AssumeRoleRequest.builder()
@@ -89,9 +92,38 @@ public final class S3CredentialResolver {
                             .build()
                     )
                     .build();
+                return new CloseableStsCredentialsProvider(stsClient, stsProvider);
 
             default:
                 throw new IllegalArgumentException("Unknown credential provider type: " + providerType);
+        }
+    }
+
+    /**
+     * Wraps an {@link StsAssumeRoleCredentialsProvider} and its {@link StsClient}
+     * so that both are closed together, preventing the StsClient resource leak.
+     */
+    static final class CloseableStsCredentialsProvider implements AwsCredentialsProvider, Closeable {
+        private final StsClient stsClient;
+        private final StsAssumeRoleCredentialsProvider delegate;
+
+        CloseableStsCredentialsProvider(StsClient stsClient, StsAssumeRoleCredentialsProvider delegate) {
+            this.stsClient = stsClient;
+            this.delegate = delegate;
+        }
+
+        @Override
+        public AwsCredentials resolveCredentials() {
+            return delegate.resolveCredentials();
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                delegate.close();
+            } finally {
+                stsClient.close();
+            }
         }
     }
 }

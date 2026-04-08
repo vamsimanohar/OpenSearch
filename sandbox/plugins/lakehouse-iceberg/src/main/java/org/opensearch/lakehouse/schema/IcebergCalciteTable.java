@@ -11,8 +11,10 @@ package org.opensearch.lakehouse.schema;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.schema.impl.AbstractTable;
+import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.lakehouse.catalog.CatalogConfig;
@@ -44,7 +46,13 @@ public class IcebergCalciteTable extends AbstractTable implements ExternalTable 
         RelDataTypeFactory.Builder builder = typeFactory.builder();
         Schema schema = icebergTable.schema();
         for (Types.NestedField field : schema.columns()) {
-            RelDataType calciteType = typeFactory.createSqlType(IcebergTypeMapper.toCalcite(field.type()));
+            RelDataType calciteType;
+            if (field.type().typeId() == Type.TypeID.DECIMAL) {
+                Types.DecimalType dt = (Types.DecimalType) field.type();
+                calciteType = typeFactory.createSqlType(SqlTypeName.DECIMAL, dt.precision(), dt.scale());
+            } else {
+                calciteType = typeFactory.createSqlType(IcebergTypeMapper.toCalcite(field.type()));
+            }
             if (field.isOptional()) {
                 calciteType = typeFactory.createTypeWithNullability(calciteType, true);
             }

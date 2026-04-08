@@ -54,10 +54,12 @@ public class IcebergQueryExecutor {
         // 2. Convert Calcite plan to Substrait bytes
         byte[] substraitBytes = CalciteSubstraitConverter.toSubstrait(relNode);
 
-        // 3. Extract S3 bucket from first file path
+        // 3. Extract S3 bucket and region from catalog config
         String firstPath = scanPlan.getDataFilePaths().isEmpty() ? "" : scanPlan.getDataFilePaths().get(0);
         String bucket = extractBucket(firstPath);
-        String region = "us-east-1"; // TODO: get from catalog config
+        String region = icebergTable.getCatalogConfig() != null && icebergTable.getCatalogConfig().region() != null
+            ? icebergTable.getCatalogConfig().region()
+            : "us-east-1";
 
         // 4. Build execution context
         return new IcebergExecutionContext(
