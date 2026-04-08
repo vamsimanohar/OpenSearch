@@ -7,6 +7,28 @@
  */
 
 grant {
-    // Network access for Glue catalog and S3 data reads
-    permission java.net.SocketPermission "*", "connect,resolve";
+  // Read ~/.aws/credentials and ~/.aws/config for credential resolution
+  permission java.io.FilePermission "${user.home}/.aws/-", "read";
+  permission java.io.FilePermission "${user.home}", "read";
+
+  // Connect to AWS endpoints (Glue, S3, STS)
+  permission java.net.SocketPermission "*", "connect,resolve";
+
+  // AWS SDK and Iceberg use reflection for client construction (DynConstructors, DynMethods)
+  permission java.lang.RuntimePermission "accessDeclaredMembers";
+  permission java.lang.RuntimePermission "getClassLoader";
+  permission java.lang.RuntimePermission "setContextClassLoader";
+  permission java.lang.reflect.ReflectPermission "suppressAccessChecks";
+
+  // AWS SDK reads aws.* system properties as part of credential chain fallback
+  permission java.util.PropertyPermission "aws.*", "read";
+  permission java.util.PropertyPermission "user.home", "read";
+
+  // Hadoop configuration reads system properties
+  permission java.util.PropertyPermission "hadoop.*", "read";
+  permission java.util.PropertyPermission "HADOOP_*", "read";
+
+  // Hadoop native library detection
+  permission java.util.PropertyPermission "os.name", "read";
+  permission java.util.PropertyPermission "os.arch", "read";
 };

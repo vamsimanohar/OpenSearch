@@ -14,7 +14,11 @@ import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.analytics.exec.ExternalTableExecutor;
 import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.analytics.schema.SchemaContributor;
+import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Setting;
+import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
+import org.opensearch.lakehouse.schema.IcebergSchemaContributor;
 import org.opensearch.plugins.Plugin;
 
 import java.util.List;
@@ -37,6 +41,14 @@ import java.util.List;
  */
 public class LakehousePlugin extends Plugin implements SchemaContributor, ExternalTableExecutor {
 
+    /**
+     * Shared catalog connector — static because SPI creates separate instances
+     * for SchemaContributor and ExternalTableExecutor interfaces.
+     */
+    private static final IcebergCatalogConnector catalogConnector = new IcebergCatalogConnector();
+
+    private static final IcebergSchemaContributor schemaContributor = new IcebergSchemaContributor(catalogConnector);
+
     /** Creates a new LakehousePlugin instance. */
     public LakehousePlugin() {}
 
@@ -46,18 +58,28 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
     }
 
     @Override
+    public boolean claims(IndexMetadata indexMetadata) {
+        return schemaContributor.claims(indexMetadata);
+    }
+
+    @Override
     public boolean supports(ExternalTable externalTable) {
         return "iceberg".equals(externalTable.format());
     }
 
     @Override
     public void contributeSchema(SchemaPlus schema, Object clusterState) {
-        // Will be implemented in a later PR (Iceberg catalog connector + schema discovery)
+        schemaContributor.contributeSchema(schema, (ClusterState) clusterState);
     }
 
     @Override
     public ExternalScanContext prepareScan(RelNode logicalPlan, ExternalTable externalTable) {
         // Will be implemented in a later PR (scan planning)
         throw new UnsupportedOperationException("Iceberg scan planning not yet implemented");
+    }
+
+    /** Returns the shared catalog connector (for use by ExternalTableExecutor in later PRs). */
+    static IcebergCatalogConnector getCatalogConnector() {
+        return catalogConnector;
     }
 }
