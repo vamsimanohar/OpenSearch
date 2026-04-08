@@ -54,7 +54,7 @@ public final class PhysicalPlanSplitter {
     private static final Logger logger = LogManager.getLogger(PhysicalPlanSplitter.class);
 
     /** Name of the virtual table in coordinator SQL that holds partial worker results. */
-    static final String PARTIAL_TABLE = "__partial";
+    public static final String PARTIAL_TABLE = "__partial";
 
     private PhysicalPlanSplitter() {}
 

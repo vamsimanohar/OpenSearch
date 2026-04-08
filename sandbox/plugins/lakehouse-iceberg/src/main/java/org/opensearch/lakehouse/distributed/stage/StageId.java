@@ -10,10 +10,17 @@ package org.opensearch.lakehouse.distributed.stage;
 
 import java.util.Objects;
 
+/** Unique identifier for a stage in the distributed execution plan. */
 public final class StageId {
     private final int id;
 
+    /**
+     * Creates a new StageId with the given numeric identifier.
+     *
+     * @param id the numeric stage identifier
+     */
     public StageId(int id) { this.id = id; }
+    /** Returns the numeric identifier. */
     public int getId() { return id; }
 
     @Override

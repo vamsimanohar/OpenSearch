@@ -15,20 +15,37 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/** A directed acyclic graph of stages representing a distributed execution plan. */
 public final class StageDAG {
     private final List<Stage> stages;
     private final StageId rootStageId;
 
+    /**
+     * Creates a new StageDAG with the given stages and root stage identifier.
+     *
+     * @param stages      the stages in this DAG
+     * @param rootStageId the root stage identifier
+     */
     public StageDAG(List<Stage> stages, StageId rootStageId) {
         this.stages = List.copyOf(stages);
         this.rootStageId = rootStageId;
     }
 
+    /** Returns all stages in this DAG. */
     public List<Stage> getStages() { return stages; }
+    /** Returns the root stage identifier. */
     public StageId getRootStageId() { return rootStageId; }
+    /** Returns the root stage. */
     public Stage getRootStage() { return getStage(rootStageId); }
+    /** Returns the number of stages in this DAG. */
     public int stageCount() { return stages.size(); }
 
+    /**
+     * Returns the stage with the given identifier.
+     *
+     * @param id the stage identifier to look up
+     * @return the matching stage
+     */
     public Stage getStage(StageId id) {
         return stages.stream().filter(s -> s.getId().equals(id)).findFirst()
             .orElseThrow(() -> new IllegalArgumentException("No stage: " + id));
