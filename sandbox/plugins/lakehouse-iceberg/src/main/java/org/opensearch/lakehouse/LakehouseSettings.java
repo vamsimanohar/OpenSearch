@@ -18,75 +18,31 @@ import java.util.List;
 /**
  * Settings for the lakehouse plugin.
  * <p>
- * <b>Catalog settings</b> (node-scoped, from opensearch.yml / keystore):
+ * <b>Index settings</b> (per-index, set at index creation time):
  * <pre>
- *   lakehouse.catalog.{name}.type       — catalog type: glue, hadoop, rest
- *   lakehouse.catalog.{name}.region     — AWS region (for Glue/S3)
- *   lakehouse.catalog.{name}.warehouse  — warehouse path (s3:// or file://)
- *   lakehouse.catalog.{name}.access_key — AWS access key (keystore)
- *   lakehouse.catalog.{name}.secret_key — AWS secret key (keystore)
- *   lakehouse.catalog.{name}.session_token — STS session token (keystore)
+ *   index.lakehouse.enabled        — marks this index as an external lakehouse table
+ *   index.lakehouse.type           — catalog type: glue, hadoop, rest
+ *   index.lakehouse.region         — AWS region (for Glue/S3)
+ *   index.lakehouse.warehouse      — warehouse path (s3:// or file://)
+ *   index.lakehouse.namespace      — Iceberg namespace (e.g., Glue database name)
+ *   index.lakehouse.table          — Iceberg table name within the namespace
+ *   index.lakehouse.auth_type      — authentication type: role, keys, default
+ *   index.lakehouse.role_arn       — IAM role ARN (for auth_type=role)
+ *   index.lakehouse.credential_key — keystore credential name (for auth_type=keys)
  * </pre>
  * <p>
- * <b>Index settings</b> (per-index, set at index creation):
+ * <b>Keystore credentials</b> (node-scoped, for auth_type=keys):
  * <pre>
- *   index.lakehouse.enabled   — marks this index as an external lakehouse table
- *   index.lakehouse.catalog   — references a catalog name from the catalog settings
- *   index.lakehouse.namespace — Iceberg namespace (e.g., Glue database name)
- *   index.lakehouse.table     — Iceberg table name within the namespace
+ *   lakehouse.credentials.{name}.access_key     — AWS access key (keystore)
+ *   lakehouse.credentials.{name}.secret_key     — AWS secret key (keystore)
+ *   lakehouse.credentials.{name}.session_token  — STS session token (keystore, optional)
  * </pre>
  */
 public final class LakehouseSettings {
 
     private LakehouseSettings() {}
 
-    // ── Catalog settings (node-scoped, from opensearch.yml / keystore) ──
-
-    /** Catalog type: glue, hadoop, rest. */
-    public static final Setting.AffixSetting<String> CATALOG_TYPE = Setting.affixKeySetting(
-        "lakehouse.catalog.",
-        "type",
-        key -> Setting.simpleString(key, Property.NodeScope)
-    );
-
-    /** AWS region for Glue/S3 access. */
-    public static final Setting.AffixSetting<String> CATALOG_REGION = Setting.affixKeySetting(
-        "lakehouse.catalog.",
-        "region",
-        key -> Setting.simpleString(key, Property.NodeScope)
-    );
-
-    /** Warehouse location (s3://bucket/path or file:///path). */
-    public static final Setting.AffixSetting<String> CATALOG_WAREHOUSE = Setting.affixKeySetting(
-        "lakehouse.catalog.",
-        "warehouse",
-        key -> Setting.simpleString(key, Property.NodeScope)
-    );
-
-    // ── Catalog secure settings (keystore-backed) ──
-
-    /** AWS access key ID (stored in opensearch-keystore). */
-    public static final Setting.AffixSetting<SecureString> CATALOG_ACCESS_KEY = Setting.affixKeySetting(
-        "lakehouse.catalog.",
-        "access_key",
-        key -> SecureSetting.secureString(key, null)
-    );
-
-    /** AWS secret access key (stored in opensearch-keystore). */
-    public static final Setting.AffixSetting<SecureString> CATALOG_SECRET_KEY = Setting.affixKeySetting(
-        "lakehouse.catalog.",
-        "secret_key",
-        key -> SecureSetting.secureString(key, null)
-    );
-
-    /** AWS STS session token (stored in opensearch-keystore, optional). */
-    public static final Setting.AffixSetting<SecureString> CATALOG_SESSION_TOKEN = Setting.affixKeySetting(
-        "lakehouse.catalog.",
-        "session_token",
-        key -> SecureSetting.secureString(key, null)
-    );
-
-    // ── Index settings (per-index, set at creation time) ──
+    // ── Index settings (per-index, immutable after creation) ──
 
     /** Whether this index represents an external lakehouse table. */
     public static final Setting<Boolean> INDEX_LAKEHOUSE_ENABLED = Setting.boolSetting(
@@ -96,9 +52,23 @@ public final class LakehouseSettings {
         Property.Final
     );
 
-    /** Name of the catalog this table belongs to. */
-    public static final Setting<String> INDEX_LAKEHOUSE_CATALOG = Setting.simpleString(
-        "index.lakehouse.catalog",
+    /** Catalog type: glue, hadoop, rest. */
+    public static final Setting<String> INDEX_LAKEHOUSE_TYPE = Setting.simpleString(
+        "index.lakehouse.type",
+        Property.IndexScope,
+        Property.Final
+    );
+
+    /** AWS region for Glue/S3 access. */
+    public static final Setting<String> INDEX_LAKEHOUSE_REGION = Setting.simpleString(
+        "index.lakehouse.region",
+        Property.IndexScope,
+        Property.Final
+    );
+
+    /** Warehouse location (s3://bucket/path or file:///path). */
+    public static final Setting<String> INDEX_LAKEHOUSE_WAREHOUSE = Setting.simpleString(
+        "index.lakehouse.warehouse",
         Property.IndexScope,
         Property.Final
     );
@@ -117,19 +87,65 @@ public final class LakehouseSettings {
         Property.Final
     );
 
+    /** Authentication type: role, keys, or default. */
+    public static final Setting<String> INDEX_LAKEHOUSE_AUTH_TYPE = Setting.simpleString(
+        "index.lakehouse.auth_type",
+        Property.IndexScope,
+        Property.Final
+    );
+
+    /** IAM role ARN for assume-role authentication (auth_type=role). */
+    public static final Setting<String> INDEX_LAKEHOUSE_ROLE_ARN = Setting.simpleString(
+        "index.lakehouse.role_arn",
+        Property.IndexScope,
+        Property.Final
+    );
+
+    /** Keystore credential name for static key authentication (auth_type=keys). */
+    public static final Setting<String> INDEX_LAKEHOUSE_CREDENTIAL_KEY = Setting.simpleString(
+        "index.lakehouse.credential_key",
+        Property.IndexScope,
+        Property.Final
+    );
+
+    // ── Keystore credentials (node-scoped, for auth_type=keys) ──
+
+    /** AWS access key ID (stored in opensearch-keystore). */
+    public static final Setting.AffixSetting<SecureString> CREDENTIAL_ACCESS_KEY = Setting.affixKeySetting(
+        "lakehouse.credentials.",
+        "access_key",
+        key -> SecureSetting.secureString(key, null)
+    );
+
+    /** AWS secret access key (stored in opensearch-keystore). */
+    public static final Setting.AffixSetting<SecureString> CREDENTIAL_SECRET_KEY = Setting.affixKeySetting(
+        "lakehouse.credentials.",
+        "secret_key",
+        key -> SecureSetting.secureString(key, null)
+    );
+
+    /** AWS STS session token (stored in opensearch-keystore, optional). */
+    public static final Setting.AffixSetting<SecureString> CREDENTIAL_SESSION_TOKEN = Setting.affixKeySetting(
+        "lakehouse.credentials.",
+        "session_token",
+        key -> SecureSetting.secureString(key, null)
+    );
+
     /** Returns all settings to register with the plugin. */
     public static List<Setting<?>> all() {
         return List.of(
-            CATALOG_TYPE,
-            CATALOG_REGION,
-            CATALOG_WAREHOUSE,
-            CATALOG_ACCESS_KEY,
-            CATALOG_SECRET_KEY,
-            CATALOG_SESSION_TOKEN,
             INDEX_LAKEHOUSE_ENABLED,
-            INDEX_LAKEHOUSE_CATALOG,
+            INDEX_LAKEHOUSE_TYPE,
+            INDEX_LAKEHOUSE_REGION,
+            INDEX_LAKEHOUSE_WAREHOUSE,
             INDEX_LAKEHOUSE_NAMESPACE,
-            INDEX_LAKEHOUSE_TABLE
+            INDEX_LAKEHOUSE_TABLE,
+            INDEX_LAKEHOUSE_AUTH_TYPE,
+            INDEX_LAKEHOUSE_ROLE_ARN,
+            INDEX_LAKEHOUSE_CREDENTIAL_KEY,
+            CREDENTIAL_ACCESS_KEY,
+            CREDENTIAL_SECRET_KEY,
+            CREDENTIAL_SESSION_TOKEN
         );
     }
 }
