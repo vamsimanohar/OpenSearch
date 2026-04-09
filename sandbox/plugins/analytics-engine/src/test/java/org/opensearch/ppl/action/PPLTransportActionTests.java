@@ -26,23 +26,23 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit tests for {@link TestPPLTransportAction}.
+ * Unit tests for {@link PPLTransportAction}.
  *
  * <p>Uses the test-only constructor to inject a mock {@code UnifiedQueryService},
  * so we can test the transport action's listener contract in isolation.
  */
 @SuppressWarnings("unchecked")
-public class TestPPLTransportActionTests extends OpenSearchTestCase {
+public class PPLTransportActionTests extends OpenSearchTestCase {
 
     private UnifiedQueryService mockUnifiedQueryService;
-    private TestPPLTransportAction action;
+    private PPLTransportAction action;
 
     @Override
     public void setUp() throws Exception {
         super.setUp();
         mockUnifiedQueryService = mock(UnifiedQueryService.class);
 
-        action = new TestPPLTransportAction(
+        action = new PPLTransportAction(
             mock(TransportService.class),
             new ActionFilters(Collections.emptySet()),
             mockUnifiedQueryService

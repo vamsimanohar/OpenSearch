@@ -19,15 +19,23 @@ import static org.opensearch.action.ValidateActions.addValidationError;
 
 /**
  * Transport-layer request carrying PPL query text for the unified PPL endpoint.
+ *
+ * @opensearch.internal
  */
 public class PPLRequest extends ActionRequest {
 
     private final String pplText;
 
+    /** Creates a request with the given PPL query text.
+     * @param pplText the PPL query text
+     */
     public PPLRequest(String pplText) {
         this.pplText = pplText;
     }
 
+    /** Creates a request from a stream.
+     * @param in the stream input
+     */
     public PPLRequest(StreamInput in) throws IOException {
         super(in);
         this.pplText = in.readString();
@@ -48,6 +56,9 @@ public class PPLRequest extends ActionRequest {
         return validationException;
     }
 
+    /** Returns the PPL query text.
+     * @return the PPL query text
+     */
     public String getPplText() {
         return pplText;
     }

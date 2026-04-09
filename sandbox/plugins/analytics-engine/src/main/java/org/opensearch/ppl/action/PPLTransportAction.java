@@ -30,15 +30,23 @@ import org.opensearch.transport.TransportService;
  *
  * <p>On success, calls {@code listener.onResponse()} with the {@link PPLResponse}.
  * On failure, calls {@code listener.onFailure()} with the exception.
+ *
+ * @opensearch.internal
  */
-public class TestPPLTransportAction extends HandledTransportAction<PPLRequest, PPLResponse> {
+public class PPLTransportAction extends HandledTransportAction<PPLRequest, PPLResponse> {
 
-    private static final Logger logger = LogManager.getLogger(TestPPLTransportAction.class);
+    private static final Logger logger = LogManager.getLogger(PPLTransportAction.class);
 
     private final UnifiedQueryService unifiedQueryService;
 
+    /** Creates the PPL transport action via Guice injection.
+     * @param transportService the transport service
+     * @param actionFilters the action filters
+     * @param engineContext the engine context
+     * @param executor the query plan executor
+     */
     @Inject
-    public TestPPLTransportAction(
+    public PPLTransportAction(
         TransportService transportService,
         ActionFilters actionFilters,
         EngineContext engineContext,
@@ -50,8 +58,12 @@ public class TestPPLTransportAction extends HandledTransportAction<PPLRequest, P
         this.unifiedQueryService = new UnifiedQueryService(pushDownPlanner, engineContext);
     }
 
-    /** Test-only constructor that accepts a pre-built {@link UnifiedQueryService}. */
-    public TestPPLTransportAction(TransportService transportService, ActionFilters actionFilters, UnifiedQueryService unifiedQueryService) {
+    /** Test-only constructor that accepts a pre-built {@link UnifiedQueryService}.
+     * @param transportService the transport service
+     * @param actionFilters the action filters
+     * @param unifiedQueryService the pre-built query service
+     */
+    public PPLTransportAction(TransportService transportService, ActionFilters actionFilters, UnifiedQueryService unifiedQueryService) {
         super(UnifiedPPLExecuteAction.NAME, transportService, actionFilters, PPLRequest::new);
         this.unifiedQueryService = unifiedQueryService;
     }

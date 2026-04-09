@@ -13,7 +13,7 @@ import org.opensearch.core.action.ActionResponse;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.ExtensiblePlugin;
 import org.opensearch.plugins.Plugin;
-import org.opensearch.ppl.action.TestPPLTransportAction;
+import org.opensearch.ppl.action.PPLTransportAction;
 import org.opensearch.ppl.action.UnifiedPPLExecuteAction;
 
 import java.util.List;
@@ -21,12 +21,12 @@ import java.util.List;
 /**
  * Example front-end plugin using analytics-engine.
  * {@code EngineContext} and {@code QueryPlanExecutor}
- * are received by {@link TestPPLTransportAction} via Guice injection.
+ * are received by {@link PPLTransportAction} via Guice injection.
  */
 public class TestPPLPlugin extends Plugin implements ActionPlugin, ExtensiblePlugin {
 
     @Override
     public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
-        return List.of(new ActionHandler<>(UnifiedPPLExecuteAction.INSTANCE, TestPPLTransportAction.class));
+        return List.of(new ActionHandler<>(UnifiedPPLExecuteAction.INSTANCE, PPLTransportAction.class));
     }
 }

@@ -19,17 +19,26 @@ import java.util.List;
 /**
  * Transport-layer response carrying column names and result rows
  * from the unified PPL query execution pipeline.
+ *
+ * @opensearch.internal
  */
 public class PPLResponse extends ActionResponse {
 
     private final List<String> columns;
     private final List<Object[]> rows;
 
+    /** Creates a response with the given columns and rows.
+     * @param columns the column names
+     * @param rows the result rows
+     */
     public PPLResponse(List<String> columns, List<Object[]> rows) {
         this.columns = columns;
         this.rows = rows;
     }
 
+    /** Creates a response from a stream.
+     * @param in the stream input
+     */
     public PPLResponse(StreamInput in) throws IOException {
         super(in);
         this.columns = in.readStringList();
@@ -57,10 +66,16 @@ public class PPLResponse extends ActionResponse {
         }
     }
 
+    /** Returns the column names.
+     * @return the column names
+     */
     public List<String> getColumns() {
         return columns;
     }
 
+    /** Returns the result rows.
+     * @return the result rows
+     */
     public List<Object[]> getRows() {
         return rows;
     }

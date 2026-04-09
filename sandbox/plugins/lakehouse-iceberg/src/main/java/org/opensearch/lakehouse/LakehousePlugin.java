@@ -29,11 +29,25 @@ import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.CatalogConfig;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.exec.DataFusionSqlDialect;
+import org.opensearch.lakehouse.action.LakehouseQueryAction;
+import org.opensearch.lakehouse.action.LakehouseQueryTransportAction;
+import org.opensearch.lakehouse.action.LakehousePplRestAction;
+import org.opensearch.lakehouse.action.LakehouseSqlRestAction;
 import org.opensearch.lakehouse.scan.CalciteToIcebergPredicateConverter;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.lakehouse.schema.IcebergCalciteTable;
 import org.opensearch.lakehouse.schema.IcebergSchemaContributor;
+import org.opensearch.action.ActionRequest;
+import org.opensearch.core.action.ActionResponse;
+import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+import org.opensearch.cluster.node.DiscoveryNodes;
+import org.opensearch.common.settings.ClusterSettings;
+import org.opensearch.common.settings.IndexScopedSettings;
+import org.opensearch.common.settings.SettingsFilter;
+import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.Plugin;
+import org.opensearch.rest.RestController;
+import org.opensearch.rest.RestHandler;
 
 import java.io.Closeable;
 import java.security.AccessController;
@@ -41,6 +55,7 @@ import java.security.PrivilegedAction;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Lakehouse plugin that enables reading external Apache Iceberg tables via SQL and PPL.
@@ -54,7 +69,7 @@ import java.util.Map;
  * {@link ExternalTableExecutor} (to build scan plans for those tables). Both interfaces are
  * discovered via ExtensiblePlugin.ExtensionLoader by the analytics-engine.
  */
-public class LakehousePlugin extends Plugin implements SchemaContributor, ExternalTableExecutor, Closeable {
+public class LakehousePlugin extends Plugin implements SchemaContributor, ExternalTableExecutor, ActionPlugin, Closeable {
 
     private static final Logger logger = LogManager.getLogger(LakehousePlugin.class);
 
@@ -224,6 +239,24 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
             }
         }
         return config;
+    }
+
+    @Override
+    public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
+        return List.of(new ActionHandler<>(LakehouseQueryAction.INSTANCE, LakehouseQueryTransportAction.class));
+    }
+
+    @Override
+    public List<RestHandler> getRestHandlers(
+        org.opensearch.common.settings.Settings settings,
+        RestController restController,
+        ClusterSettings clusterSettings,
+        IndexScopedSettings indexScopedSettings,
+        SettingsFilter settingsFilter,
+        IndexNameExpressionResolver indexNameExpressionResolver,
+        Supplier<DiscoveryNodes> nodesInCluster
+    ) {
+        return List.of(new LakehouseSqlRestAction(), new LakehousePplRestAction());
     }
 
     @Override

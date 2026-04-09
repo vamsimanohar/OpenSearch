@@ -19,9 +19,14 @@ import org.opensearch.ppl.planner.rel.OpenSearchBoundaryTableScan;
  *
  * <p>Sort collations are field references and directions — no expression-level
  * capability checks are needed. Sort always absorbs if a boundary exists.
+ *
+ * @opensearch.internal
  */
 public class AbsorbSortRule extends RelOptRule {
 
+    /** Creates a new AbsorbSortRule.
+     * @return a new instance
+     */
     public static AbsorbSortRule create() {
         return new AbsorbSortRule();
     }

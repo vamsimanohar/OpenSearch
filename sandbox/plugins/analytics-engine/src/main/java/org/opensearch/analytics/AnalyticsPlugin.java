@@ -11,7 +11,7 @@ package org.opensearch.analytics;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlOperatorTable;
-import org.apache.calcite.sql.util.SqlOperatorTables;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
@@ -30,8 +30,13 @@ import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
+import org.opensearch.action.ActionRequest;
+import org.opensearch.core.action.ActionResponse;
+import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.ExtensiblePlugin;
 import org.opensearch.plugins.Plugin;
+import org.opensearch.ppl.action.PPLTransportAction;
+import org.opensearch.ppl.action.UnifiedPPLExecuteAction;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.script.ScriptService;
 import org.opensearch.threadpool.ThreadPool;
@@ -51,7 +56,7 @@ import java.util.function.Supplier;
  *
  * @opensearch.internal
  */
-public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
+public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionPlugin {
 
     private static final Logger logger = LogManager.getLogger(AnalyticsPlugin.class);
 
@@ -63,7 +68,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     private final List<AnalyticsSearchBackendPlugin> backEnds = new ArrayList<>();
     private final List<ExternalTableExecutor> externalTableExecutors = new ArrayList<>();
     private final List<SchemaContributor> schemaContributors = new ArrayList<>();
-    private SqlOperatorTable operatorTable;
+    private SqlOperatorTable operatorTable = SqlStdOperatorTable.instance();
 
     @SuppressWarnings("rawtypes")
     @Override
@@ -102,6 +107,11 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     }
 
     @Override
+    public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
+        return List.of(new ActionHandler<>(UnifiedPPLExecuteAction.INSTANCE, PPLTransportAction.class));
+    }
+
+    @Override
     @SuppressWarnings("unchecked")
     public Collection<Module> createGuiceModules() {
         return List.of(b -> {
@@ -112,8 +122,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     }
 
     private SqlOperatorTable aggregateOperatorTables() {
-        // TODO: re-wire once operatorTable() is added back to AnalyticsSearchBackendPlugin
-        return SqlOperatorTables.of();
+        return SqlStdOperatorTable.instance();
     }
 
     /**
@@ -134,9 +143,12 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
                 }
             }
             SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(state, claimedIndices);
+            logger.info("[DefaultEngineContext] Building schema with {} contributors, {} OS tables, {} claimed indices",
+                schemaContributors.size(), schema.getTableNames().size(), claimedIndices.size());
             for (SchemaContributor c : schemaContributors) {
                 c.contributeSchema(schema, state);
             }
+            logger.info("[DefaultEngineContext] Final schema tables: {}", schema.getTableNames());
             return schema;
         }
     }

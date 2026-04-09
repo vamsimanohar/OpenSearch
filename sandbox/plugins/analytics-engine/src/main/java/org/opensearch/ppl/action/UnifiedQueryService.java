@@ -27,7 +27,10 @@ import java.util.List;
  * Core orchestrator that ties together PushDownPlanner
  * and OpenSearchQueryCompiler into a single execution pipeline.
  *
- * <p>Pipeline: PPL text → RelNode → push-down optimization → compile → execute → response.
+ * <p>Pipeline: query text → RelNode → push-down optimization → compile → execute → response.
+ * Supports both PPL and SQL via {@link QueryType}.
+ *
+ * @opensearch.internal
  */
 public class UnifiedQueryService {
 
@@ -36,6 +39,10 @@ public class UnifiedQueryService {
     private final PushDownPlanner pushDownPlanner;
     private final EngineContext engineContext;
 
+    /** Creates a query service with the given planner and engine context.
+     * @param pushDownPlanner the push-down planner
+     * @param engineContext the engine context
+     */
     public UnifiedQueryService(PushDownPlanner pushDownPlanner, EngineContext engineContext) {
         this.pushDownPlanner = pushDownPlanner;
         this.engineContext = engineContext;
@@ -48,17 +55,38 @@ public class UnifiedQueryService {
      * @return a PPLResponse containing column names and result rows
      */
     public PPLResponse execute(String pplText) {
+        return executeInternal(pplText, QueryType.PPL);
+    }
+
+    /**
+     * Executes a SQL query through the full pipeline.
+     *
+     * @param sqlText the SQL query text
+     * @return a PPLResponse containing column names and result rows
+     */
+    public PPLResponse executeSql(String sqlText) {
+        return executeInternal(sqlText, QueryType.SQL);
+    }
+
+    /**
+     * Executes a query through the full pipeline with the specified language.
+     *
+     * @param queryText the query text (PPL or SQL)
+     * @param queryType the query language type
+     * @return a PPLResponse containing column names and result rows
+     */
+    private PPLResponse executeInternal(String queryText, QueryType queryType) {
         SchemaPlus schemaPlus = engineContext.getSchema();
 
         UnifiedQueryContext context = UnifiedQueryContext.builder()
-            .language(QueryType.PPL)
+            .language(queryType)
             .catalog(DEFAULT_CATALOG, schemaPlus)
             .defaultNamespace(DEFAULT_CATALOG)
             .build();
 
         try {
             UnifiedQueryPlanner planner = new UnifiedQueryPlanner(context);
-            RelNode logicalPlan = planner.plan(pplText);
+            RelNode logicalPlan = planner.plan(queryText);
             RelNode mixedPlan = pushDownPlanner.plan(logicalPlan);
 
             PreparedStatement statement = compileAndPrepare(context, mixedPlan);
@@ -87,7 +115,7 @@ public class UnifiedQueryService {
             if (e instanceof RuntimeException) {
                 throw (RuntimeException) e;
             }
-            throw new RuntimeException("Failed to execute PPL query: " + e.getMessage(), e);
+            throw new RuntimeException("Failed to execute " + queryType + " query: " + e.getMessage(), e);
         } finally {
             try {
                 context.close();
@@ -99,6 +127,10 @@ public class UnifiedQueryService {
 
     /**
      * Compiles the mixed plan into a PreparedStatement. Protected for testability.
+     *
+     * @param context the unified query context
+     * @param mixedPlan the plan to compile
+     * @return a compiled PreparedStatement
      */
     protected PreparedStatement compileAndPrepare(UnifiedQueryContext context, RelNode mixedPlan) throws Exception {
         OpenSearchQueryCompiler compiler = new OpenSearchQueryCompiler(context);

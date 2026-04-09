@@ -41,6 +41,8 @@ import java.util.List;
  * (e.g., {@code LogicalFilter → LogicalTableScan}). At execution time,
  * {@code execute()} passes the fragment to the {@link QueryPlanExecutor}, which
  * returns the result rows.
+ *
+ * @opensearch.internal
  */
 public class OpenSearchBoundaryTableScan extends TableScan implements EnumerableRel {
 
@@ -48,6 +50,13 @@ public class OpenSearchBoundaryTableScan extends TableScan implements Enumerable
     @SuppressWarnings("rawtypes")
     private final QueryPlanExecutor planExecutor;
 
+    /** Creates a boundary table scan.
+     * @param cluster         the Calcite cluster
+     * @param traitSet        the trait set for this node
+     * @param table           the table being scanned
+     * @param logicalFragment the absorbed logical subtree
+     * @param planExecutor    the engine executor for bind-time execution
+     */
     @SuppressWarnings("rawtypes")
     public OpenSearchBoundaryTableScan(
         RelOptCluster cluster,
@@ -85,6 +94,10 @@ public class OpenSearchBoundaryTableScan extends TableScan implements Enumerable
     /**
      * Implements the EnumerableRel interface using the stash pattern.
      * Generated Janino code calls {@link #execute()} on the stashed reference.
+     *
+     * @param implementor the Calcite implementor for code generation
+     * @param pref        the preferred physical type representation
+     * @return the implementation result
      */
     @Override
     public Result implement(EnumerableRelImplementor implementor, Prefer pref) {

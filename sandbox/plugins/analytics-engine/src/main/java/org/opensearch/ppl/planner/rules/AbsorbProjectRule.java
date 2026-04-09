@@ -26,11 +26,17 @@ import org.opensearch.ppl.planner.rel.OpenSearchBoundaryTableScan;
  *
  * <p>This is NOT a ConverterRule — it transforms an already-converted boundary node
  * by growing its internal logical fragment.
+ *
+ * @opensearch.internal
  */
 public class AbsorbProjectRule extends RelOptRule {
 
     private final SqlOperatorTable operatorTable;
 
+    /** Creates a new rule for the given operator table.
+     * @param operatorTable the back-end operator table
+     * @return a new instance
+     */
     public static AbsorbProjectRule create(SqlOperatorTable operatorTable) {
         return new AbsorbProjectRule(operatorTable);
     }

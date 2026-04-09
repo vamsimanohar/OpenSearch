@@ -38,13 +38,15 @@ import org.opensearch.ppl.planner.rules.AbsorbSortRule;
  * (e.g., projects containing functions not in the back-end's
  * {@link SqlOperatorTable}) remain above the boundary node and execute
  * in-process via Janino bytecode.
+ *
+ * @opensearch.internal
  */
 public class PushDownPlanner {
 
     private final SqlOperatorTable operatorTable;
     private final QueryPlanExecutor<RelNode, Iterable<Object[]>> planExecutor;
 
-    /**
+    /** Creates a push-down planner.
      * @param operatorTable supported functions from the back-end engines
      * @param planExecutor  engine executor passed to boundary nodes for bind-time execution
      */

@@ -22,6 +22,8 @@ import org.opensearch.ppl.planner.rel.OpenSearchBoundaryTableScan;
  * <p>Converts a {@link LogicalTableScan} into an {@link OpenSearchBoundaryTableScan} with the
  * scan itself as the initial logical fragment. The boundary node carries an {@link QueryPlanExecutor}
  * so it can delegate execution at {@code bind()} time.
+ *
+ * @opensearch.internal
  */
 public class BoundaryTableScanRule extends ConverterRule {
 

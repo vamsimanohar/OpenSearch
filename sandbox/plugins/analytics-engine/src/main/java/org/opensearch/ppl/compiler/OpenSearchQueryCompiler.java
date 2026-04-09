@@ -43,17 +43,25 @@ import java.util.List;
  * This is necessary because the plan from {@code PushDownPlanner} uses a
  * planner that already has nodes registered, and re-registering causes
  * assertions in Calcite's Volcano planner.
+ *
+ * @opensearch.internal
  */
 public class OpenSearchQueryCompiler {
 
     private final UnifiedQueryContext context;
 
+    /** Creates a compiler for the given context.
+     * @param context the unified query context providing Calcite connection and schema
+     */
     public OpenSearchQueryCompiler(UnifiedQueryContext context) {
         this.context = context;
     }
 
     /**
      * Compiles a plan into an executable {@link PreparedStatement}.
+     *
+     * @param plan the Calcite RelNode plan to compile
+     * @return an executable PreparedStatement
      */
     public PreparedStatement compile(RelNode plan) {
         if (plan == null) {

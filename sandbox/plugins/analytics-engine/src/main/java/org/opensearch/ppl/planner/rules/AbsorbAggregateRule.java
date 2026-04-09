@@ -20,11 +20,17 @@ import org.opensearch.ppl.planner.rel.OpenSearchBoundaryTableScan;
  *
  * <p>Checks that all aggregate functions are supported by the back-end's
  * {@link SqlOperatorTable} before absorbing.
+ *
+ * @opensearch.internal
  */
 public class AbsorbAggregateRule extends RelOptRule {
 
     private final SqlOperatorTable operatorTable;
 
+    /** Creates a new rule for the given operator table.
+     * @param operatorTable the back-end operator table
+     * @return a new instance
+     */
     public static AbsorbAggregateRule create(SqlOperatorTable operatorTable) {
         return new AbsorbAggregateRule(operatorTable);
     }

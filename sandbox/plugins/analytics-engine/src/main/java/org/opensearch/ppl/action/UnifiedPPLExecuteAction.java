@@ -12,10 +12,14 @@ import org.opensearch.action.ActionType;
 
 /**
  * Action singleton for unified PPL query execution.
- * Registered as a transport action in TestPPLPlugin.
+ * Registered as a transport action in the analytics engine.
+ *
+ * @opensearch.internal
  */
 public class UnifiedPPLExecuteAction extends ActionType<PPLResponse> {
+    /** The action name. */
     public static final String NAME = "cluster:internal/qe/unified_ppl_execute";
+    /** The singleton instance. */
     public static final UnifiedPPLExecuteAction INSTANCE = new UnifiedPPLExecuteAction();
 
     private UnifiedPPLExecuteAction() {
