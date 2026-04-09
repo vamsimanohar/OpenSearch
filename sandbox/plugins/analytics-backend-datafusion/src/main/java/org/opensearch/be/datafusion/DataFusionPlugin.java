@@ -10,14 +10,19 @@ package org.opensearch.be.datafusion;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
+import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.be.datafusion.jni.NativeBridge;
+import org.opensearch.be.datafusion.jni.StreamHandle;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
@@ -25,6 +30,7 @@ import org.opensearch.env.NodeEnvironment;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.exec.EngineReaderManager;
 import org.opensearch.index.shard.ShardPath;
+import org.apache.arrow.memory.BufferAllocator;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.SearchBackEndPlugin;
 import org.opensearch.repositories.RepositoriesService;
@@ -34,9 +40,13 @@ import org.opensearch.transport.client.Client;
 import org.opensearch.watcher.ResourceWatcherService;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
 /**
@@ -66,12 +76,42 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         Setting.Property.NodeScope
     );
 
-    private volatile DataFusionService dataFusionService;
+    /** Shared across plugin instance and SPI instances (separate classloader instances). */
+    private static volatile DataFusionService sharedDataFusionService;
+    private static final Object INIT_LOCK = new Object();
 
     /**
      * Creates the DataFusion plugin.
      */
     public DataFusionPlugin() {}
+
+    /**
+     * Ensures DataFusionService is initialized. When this plugin is loaded via SPI
+     * (ExtensiblePlugin.loadExtensions), createComponents() is never called, so we
+     * lazy-initialize with sensible defaults on first use.
+     */
+    private DataFusionService ensureDataFusionService() {
+        DataFusionService svc = sharedDataFusionService;
+        if (svc != null) {
+            return svc;
+        }
+        synchronized (INIT_LOCK) {
+            if (sharedDataFusionService == null) {
+                long maxMem = Runtime.getRuntime().maxMemory();
+                long memPool = getConfiguredLong("datafusion_memory_pool_limit_bytes", maxMem / 4);
+                long spillLimit = getConfiguredLong("datafusion_spill_memory_limit_bytes", maxMem / 8);
+                String spillDir = System.getProperty("java.io.tmpdir");
+                sharedDataFusionService = DataFusionService.builder()
+                    .memoryPoolLimit(memPool)
+                    .spillMemoryLimit(spillLimit)
+                    .spillDirectory(spillDir)
+                    .build();
+                sharedDataFusionService.start();
+                logger.info("DataFusion service lazy-initialized (SPI path) — memory pool {}B, spill limit {}B", memPool, spillLimit);
+            }
+            return sharedDataFusionService;
+        }
+    }
 
     @Override
     public Collection<Object> createComponents(
@@ -88,20 +128,62 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
         Settings settings = environment.settings();
-        long memoryPoolLimit = DATAFUSION_MEMORY_POOL_LIMIT.get(settings);
-        long spillMemoryLimit = DATAFUSION_SPILL_MEMORY_LIMIT.get(settings);
-        // TODO : Get the spill directory from configuration
+        // System properties (-D flags) override OpenSearch settings as a convenient config mechanism
+        long memoryPoolLimit = getConfiguredLong("datafusion_memory_pool_limit_bytes",
+            DATAFUSION_MEMORY_POOL_LIMIT.get(settings));
+        long spillMemoryLimit = getConfiguredLong("datafusion_spill_memory_limit_bytes",
+            DATAFUSION_SPILL_MEMORY_LIMIT.get(settings));
         String spillDir = environment.dataFiles()[0].getParent().resolve("tmp").toAbsolutePath().toString();
 
-        dataFusionService = DataFusionService.builder()
-            .memoryPoolLimit(memoryPoolLimit)
-            .spillMemoryLimit(spillMemoryLimit)
-            .spillDirectory(spillDir)
-            .build();
-        dataFusionService.start();
-        logger.debug("DataFusion plugin initialized — memory pool {}B, spill limit {}B", memoryPoolLimit, spillMemoryLimit);
+        synchronized (INIT_LOCK) {
+            if (sharedDataFusionService == null) {
+                sharedDataFusionService = DataFusionService.builder()
+                    .memoryPoolLimit(memoryPoolLimit)
+                    .spillMemoryLimit(spillMemoryLimit)
+                    .spillDirectory(spillDir)
+                    .build();
+                sharedDataFusionService.start();
+                logger.info("DataFusion plugin initialized — memory pool {}B, spill limit {}B", memoryPoolLimit, spillMemoryLimit);
+            } else {
+                logger.info("DataFusion service already initialized (SPI path ran first) — memory pool configured but not applied");
+            }
+        }
 
-        return Collections.singletonList(dataFusionService);
+        return Collections.singletonList(sharedDataFusionService);
+    }
+
+    @Override
+    public List<Setting<?>> getSettings() {
+        return List.of(DATAFUSION_MEMORY_POOL_LIMIT, DATAFUSION_SPILL_MEMORY_LIMIT);
+    }
+
+    /** Read a long from system property or env var, falling back to default. Used by SPI lazy-init path. */
+    @SuppressWarnings("removal")
+    private static long getConfiguredLong(String key, long defaultValue) {
+        try {
+            String val = java.security.AccessController.doPrivileged(
+                (java.security.PrivilegedAction<String>) () -> {
+                    String v = System.getProperty(key);
+                    return v;
+                }
+            );
+            logger.info("getConfiguredLong: key={}, sysprop={}", key, val);
+            if (val == null || val.isEmpty()) {
+                val = java.security.AccessController.doPrivileged(
+                    (java.security.PrivilegedAction<String>) () -> System.getenv(key.toUpperCase(java.util.Locale.ROOT))
+                );
+                logger.info("getConfiguredLong: key={}, envvar={}", key.toUpperCase(java.util.Locale.ROOT), val);
+            }
+            if (val != null && !val.isEmpty()) {
+                long parsed = Long.parseLong(val);
+                logger.info("Config {} = {} (from system property/env)", key, parsed);
+                return parsed;
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to read config {}: {}", key, e.getMessage(), e);
+        }
+        logger.info("getConfiguredLong: key={} falling back to default={}", key, defaultValue);
+        return defaultValue;
     }
 
     @Override
@@ -111,14 +193,14 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
     @Override
     public EngineReaderManager<DatafusionReader> createReaderManager(DataFormat format, ShardPath shardPath) throws IOException {
-        return new DatafusionReaderManager(format, shardPath, dataFusionService);
+        return new DatafusionReaderManager(format, shardPath, sharedDataFusionService);
     }
 
     /**
      * Data formats this plugin can handle. Used by CompositeEngine to route queries.
      */
     public List<DataFormat> getSupportedFormats() {
-        return null; // TODO : List.of("parquet");
+        return List.of(); // TODO : List.of("parquet");
     }
 
     @Override
@@ -136,16 +218,117 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         if (dfReader == null) {
             throw new IllegalStateException("No DatafusionReader available in the acquired reader");
         }
-        DatafusionContext context = new DatafusionContext(ctx.getTask(), dfReader, dataFusionService.getNativeRuntime());
-        DatafusionSearchExecEngine engine = new DatafusionSearchExecEngine(context, dataFusionService::newChildAllocator);
+        DatafusionContext context = new DatafusionContext(ctx.getTask(), dfReader, sharedDataFusionService.getNativeRuntime());
+        DatafusionSearchExecEngine engine = new DatafusionSearchExecEngine(context, sharedDataFusionService::newChildAllocator);
         engine.prepare(ctx);
         return engine;
     }
 
     @Override
+    public Iterable<Object[]> executeRemoteQuery(ExternalScanContext scanContext) {
+        DataFusionService dfService = ensureDataFusionService();
+
+        Map<String, String> config = scanContext.getStorageConfig();
+        String s3Region = config.getOrDefault("s3Region", "us-east-1");
+        String s3Bucket = config.get("s3Bucket");
+        String s3AccessKeyId = config.get("s3AccessKeyId");
+        String s3SecretAccessKey = config.get("s3SecretAccessKey");
+        String s3SessionToken = config.get("s3SessionToken");
+        String s3Endpoint = config.get("s3Endpoint");
+
+        String[] filePaths = scanContext.getDataFilePaths().toArray(new String[0]);
+        String tableName = scanContext.getTableName();
+        byte[] substraitPlan = scanContext.getSubstraitPlan();
+
+        // Short-circuit: if no data files match the scan predicates, return empty result
+        // rather than calling native code which panics on empty file lists.
+        if (filePaths.length == 0) {
+            logger.info("[DataFusionPlugin] No data files for table [{}] — returning empty result", tableName);
+            return List.of();
+        }
+
+        logger.debug("[DataFusionPlugin] executeRemoteQuery: table={}, files={}, substraitPlan={} bytes",
+            tableName, filePaths.length, substraitPlan != null ? substraitPlan.length : 0);
+        logger.debug("[DataFusionPlugin] S3 config: region={}, bucket={}, credentials={}, sessionToken={}, endpoint={}",
+            s3Region, s3Bucket,
+            s3AccessKeyId != null ? "present" : "absent",
+            s3SessionToken != null ? "present" : "absent",
+            s3Endpoint != null ? s3Endpoint : "default");
+        if (logger.isDebugEnabled() && filePaths.length > 0) {
+            logger.debug("[DataFusionPlugin] First file path: {}", filePaths[0]);
+            if (filePaths.length > 1) {
+                logger.debug("[DataFusionPlugin] Last file path: {}", filePaths[filePaths.length - 1]);
+            }
+        }
+
+        // Call DataFusion via JNI — returns a stream pointer.
+        // Pass the global runtime pointer so the Iceberg executor shares the
+        // memory pool and disk manager (enabling spill-to-disk for large aggregations).
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        long runtimePtr = runtimeHandle.get();
+        CompletableFuture<Long> future = new CompletableFuture<>();
+        NativeBridge.executeIcebergQueryAsync(
+            s3Region, s3Bucket,
+            s3AccessKeyId, s3SecretAccessKey, s3SessionToken, s3Endpoint,
+            filePaths, tableName, substraitPlan,
+            runtimePtr,
+            new ActionListener<>() {
+                @Override
+                public void onResponse(Long streamPtr) { future.complete(streamPtr); }
+                @Override
+                public void onFailure(Exception e) { future.completeExceptionally(e); }
+            }
+        );
+
+        logger.debug("[DataFusionPlugin] Waiting for JNI async result...");
+        long streamPtr;
+        try {
+            streamPtr = future.join();
+            logger.debug("[DataFusionPlugin] JNI returned stream pointer: {}", streamPtr);
+        } catch (Exception e) {
+            logger.error("[DataFusionPlugin] JNI execution failed: {}", e.getMessage(), e);
+            throw new RuntimeException("Iceberg query execution failed via DataFusion", e);
+        }
+
+        // Stream Arrow batches and convert to Object[] rows
+        StreamHandle streamHandle = new StreamHandle(streamPtr, runtimeHandle);
+        BufferAllocator allocator = dfService.newChildAllocator();
+        DatafusionResultStream resultStream = new DatafusionResultStream(streamHandle, allocator);
+
+        List<Object[]> rows = new ArrayList<>();
+        int batchCount = 0;
+        try {
+            Iterator<EngineResultBatch> batchIterator = resultStream.iterator();
+            while (batchIterator.hasNext()) {
+                EngineResultBatch batch = batchIterator.next();
+                batchCount++;
+                List<String> fieldNames = batch.getFieldNames();
+                logger.debug("[DataFusionPlugin] Arrow batch #{}: {} rows, {} columns ({})",
+                    batchCount, batch.getRowCount(), fieldNames.size(), fieldNames);
+                for (int row = 0; row < batch.getRowCount(); row++) {
+                    Object[] rowValues = new Object[fieldNames.size()];
+                    for (int col = 0; col < fieldNames.size(); col++) {
+                        Object val = batch.getFieldValue(fieldNames.get(col), row);
+                        // Convert Arrow types to standard Java types for JSON serialization
+                        if (val instanceof org.apache.arrow.vector.util.Text) {
+                            val = val.toString();
+                        }
+                        rowValues[col] = val;
+                    }
+                    rows.add(rowValues);
+                }
+            }
+        } finally {
+            resultStream.close();
+        }
+        logger.info("[DataFusionPlugin] Iceberg query returned {} rows in {} batches via native execution", rows.size(), batchCount);
+        return rows;
+    }
+
+    @Override
     public void close() throws IOException {
-        if (dataFusionService != null) {
-            dataFusionService.close();
+        if (sharedDataFusionService != null) {
+            sharedDataFusionService.close();
         }
     }
 }

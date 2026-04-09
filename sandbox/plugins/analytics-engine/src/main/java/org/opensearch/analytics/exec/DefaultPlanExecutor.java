@@ -10,6 +10,7 @@ package org.opensearch.analytics.exec;
 
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.TableScan;
+import org.apache.calcite.schema.Table;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.search.SearchShardTask;
@@ -17,8 +18,11 @@ import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
+import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.inject.Inject;
 import org.opensearch.index.IndexService;
 import org.opensearch.index.engine.DataFormatAwareEngine;
 import org.opensearch.index.shard.IndexShard;
@@ -41,8 +45,9 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
 
     private static final Logger logger = LogManager.getLogger(DefaultPlanExecutor.class);
     private final Map<String, AnalyticsSearchBackendPlugin> backEnds;
-    private final IndicesService indicesService;
+    private volatile IndicesService indicesService;
     private final ClusterService clusterService;
+    private final ExternalTableExecutor externalTableExecutor;
 
     /**
      * Constructs a DefaultPlanExecutor.
@@ -50,18 +55,62 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
      * @param providers list of search execution engine providers
      * @param indicesService service for accessing index shards
      * @param clusterService service for accessing cluster state
+     * @param externalTableExecutor executor for external (non-OpenSearch) tables, may be null
      */
-    public DefaultPlanExecutor(List<AnalyticsSearchBackendPlugin> providers, IndicesService indicesService, ClusterService clusterService) {
+    public DefaultPlanExecutor(
+        List<AnalyticsSearchBackendPlugin> providers,
+        IndicesService indicesService,
+        ClusterService clusterService,
+        ExternalTableExecutor externalTableExecutor
+    ) {
         this.backEnds = new LinkedHashMap<>();
         for (AnalyticsSearchBackendPlugin provider : providers) {
             this.backEnds.put(provider.name(), provider);
         }
         this.indicesService = indicesService;
         this.clusterService = clusterService;
+        this.externalTableExecutor = externalTableExecutor;
+    }
+
+    /**
+     * Guice member injection — IndicesService is not available during createComponents(),
+     * so it's injected after the Guice injector is built.
+     *
+     * @param indicesService the indices service to inject
+     */
+    @Inject
+    public void setIndicesService(IndicesService indicesService) {
+        this.indicesService = indicesService;
     }
 
     @Override
     public Iterable<Object[]> execute(RelNode logicalFragment, Object context) {
+        // Route external (non-OpenSearch) tables through the native backend
+        logger.debug("[DefaultPlanExecutor] Executing plan:\n{}", logicalFragment.explain());
+        ExternalTable externalTable = extractExternalTable(logicalFragment);
+        if (externalTable != null) {
+            logger.debug("[DefaultPlanExecutor] Detected external table: type={}", externalTable.getClass().getSimpleName());
+            if (externalTableExecutor == null) {
+                throw new IllegalStateException("Query references an external table but no ExternalTableExecutor is registered");
+            }
+
+            ExternalScanContext scanContext = externalTableExecutor.prepareScan(logicalFragment, externalTable);
+            if (scanContext == null) {
+                throw new IllegalStateException("ExternalTableExecutor.prepareScan() returned null for " + externalTable);
+            }
+            logger.debug("[DefaultPlanExecutor] ScanContext: table={}, files={}, substraitBytes={}, storageConfigKeys={}",
+                scanContext.getTableName(),
+                scanContext.getDataFilePaths() != null ? scanContext.getDataFilePaths().size() : 0,
+                scanContext.getSubstraitPlan() != null ? scanContext.getSubstraitPlan().length : 0,
+                scanContext.getStorageConfig() != null ? scanContext.getStorageConfig().keySet() : "null");
+            AnalyticsSearchBackendPlugin provider = selectBackEnd();
+            if (provider == null) {
+                throw new IllegalStateException("No analytics backend registered for remote query execution");
+            }
+            logger.info("[DefaultPlanExecutor] Routing external table to native backend [{}]", provider.name());
+            return provider.executeRemoteQuery(scanContext);
+        }
+
         String tableName = extractTableName(logicalFragment);
         AnalyticsSearchBackendPlugin provider = selectBackEnd();
         if (provider == null) {
@@ -111,6 +160,27 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
             if (name != null) return name;
         }
         throw new IllegalArgumentException("No TableScan found in plan fragment");
+    }
+
+    /**
+     * Walks the RelNode tree to find a TableScan whose underlying Calcite table
+     * implements {@link ExternalTable}. Returns the first match, or {@code null}
+     * if every table in the plan is a regular OpenSearch index table.
+     */
+    static ExternalTable extractExternalTable(RelNode node) {
+        if (node instanceof TableScan) {
+            Table table = node.getTable().unwrap(Table.class);
+            if (table instanceof ExternalTable) {
+                return (ExternalTable) table;
+            }
+        }
+        for (RelNode input : node.getInputs()) {
+            ExternalTable found = extractExternalTable(input);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
     }
 
     private IndexShard resolveShard(String indexName) {

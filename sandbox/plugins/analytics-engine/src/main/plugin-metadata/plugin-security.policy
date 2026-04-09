@@ -1,0 +1,26 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+grant {
+  // Analytics-engine jars (e.g. jackson-databind) end up on the call stack when
+  // lakehouse-iceberg makes AWS API calls (via classloader delegation). The security
+  // manager checks ALL frames above doPrivileged, so analytics-engine's ProtectionDomain
+  // needs these permissions too.
+  permission java.net.SocketPermission "*", "connect,resolve";
+  permission java.lang.RuntimePermission "accessDeclaredMembers";
+  permission java.lang.RuntimePermission "getClassLoader";
+  permission java.lang.reflect.ReflectPermission "suppressAccessChecks";
+
+  // DefaultCredentialsProvider reads ~/.aws/credentials and ~/.aws/config.
+  // jackson-databind (loaded from analytics-engine) is on the call stack when
+  // Iceberg's GlueCatalog uses Jackson for JSON processing during AWS API calls.
+  permission java.io.FilePermission "${user.home}/.aws/-", "read";
+  permission java.io.FilePermission "${user.home}", "read";
+  permission java.util.PropertyPermission "user.home", "read";
+  permission java.util.PropertyPermission "aws.*", "read";
+};

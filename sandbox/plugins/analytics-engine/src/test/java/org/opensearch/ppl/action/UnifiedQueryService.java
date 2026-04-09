@@ -9,10 +9,13 @@
 package org.opensearch.ppl.action;
 
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.schema.SchemaPlus;
 import org.opensearch.analytics.EngineContext;
 import org.opensearch.ppl.compiler.OpenSearchQueryCompiler;
 import org.opensearch.ppl.planner.PushDownPlanner;
+import org.opensearch.ppl.planner.rel.OpenSearchBoundaryTableScan;
 import org.opensearch.sql.api.UnifiedQueryContext;
 import org.opensearch.sql.api.UnifiedQueryPlanner;
 import org.opensearch.sql.executor.QueryType;
@@ -61,6 +64,12 @@ public class UnifiedQueryService {
             RelNode logicalPlan = planner.plan(pplText);
             RelNode mixedPlan = pushDownPlanner.plan(logicalPlan);
 
+            // When the entire plan is absorbed into a boundary scan, execute directly
+            // to avoid Avatica cursor format issues (Object[] vs scalar for single-column results).
+            if (mixedPlan instanceof OpenSearchBoundaryTableScan) {
+                return executeDirectly((OpenSearchBoundaryTableScan) mixedPlan);
+            }
+
             PreparedStatement statement = compileAndPrepare(context, mixedPlan);
             try (statement) {
                 ResultSet rs = statement.executeQuery();
@@ -95,6 +104,23 @@ public class UnifiedQueryService {
                 // best-effort cleanup
             }
         }
+    }
+
+    /**
+     * Executes a fully-absorbed boundary scan directly, bypassing Avatica.
+     */
+    private PPLResponse executeDirectly(OpenSearchBoundaryTableScan boundary) {
+        RelDataType rowType = boundary.getLogicalFragment().getRowType();
+        List<String> columns = new ArrayList<>();
+        for (RelDataTypeField field : rowType.getFieldList()) {
+            columns.add(field.getName());
+        }
+
+        List<Object[]> rows = new ArrayList<>();
+        for (Object[] row : boundary.execute()) {
+            rows.add(row);
+        }
+        return new PPLResponse(columns, rows);
     }
 
     /**

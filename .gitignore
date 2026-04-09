@@ -71,3 +71,16 @@ testfixtures_shared/
 doc-tools/missing-doclet/bin/
 **/Cargo.lock
 /sandbox/plugins/analytics-backend-datafusion/target/
+
+# Lakehouse design docs (local only)
+docs/iceberg-*
+docs/lakehouse-*
+docs/sandbox-*
+docs/superpowers/
+docs/create_iceberg_*
+test/iceberg/
+
+# Local test, perf, and data-generation scripts
+sandbox/test-*.sh
+sandbox/perf-*.sh
+**/src/dataGen/

@@ -20,6 +20,8 @@ dependencies {
   compileOnly project(':sandbox:plugins:analytics-engine')
   // TODO: Consume Calcite dependency from Analytics Framework instead of declaring it separately.
   compileOnly 'org.apache.calcite.avatica:avatica-core:1.27.0'
+  // Calcite bytecode references @Immutable from immutables — resolve at compile time
+  compileOnly 'org.immutables:value-annotations:2.8.8'
 
   testImplementation project(':test:framework')
   testImplementation "org.mockito:mockito-core:${versions.mockito}"

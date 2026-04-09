@@ -22,6 +22,7 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.index.Index;
+import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.dsl.converter.SearchSourceConverter;
 import org.opensearch.dsl.executor.DslQueryPlanExecutor;
 import org.opensearch.dsl.executor.QueryPlans;
@@ -72,6 +73,9 @@ public class TransportDslExecuteAction extends HandledTransportAction<SearchRequ
         this.planExecutor = new DslQueryPlanExecutor(executor);
         this.clusterService = clusterService;
         this.indexNameExpressionResolver = indexNameExpressionResolver;
+
+        // Share engine components with the SQL REST handler (not Guice-managed)
+        SqlQueryAction.setEngineComponents(engineContext, executor);
     }
 
     @Override
@@ -100,12 +104,24 @@ public class TransportDslExecuteAction extends HandledTransportAction<SearchRequ
      * Throws if the resolution yields zero or more than one concrete index.
      */
     private String resolveToSingleIndex(SearchRequest request) {
-        Index[] concreteIndices = indexNameExpressionResolver.concreteIndices(clusterService.state(), request);
-        if (concreteIndices.length != 1) {
-            throw new IllegalArgumentException(
-                "DSL execution currently supports exactly one concrete index, but resolved to " + concreteIndices.length + " indices"
-            );
+        try {
+            Index[] concreteIndices = indexNameExpressionResolver.concreteIndices(clusterService.state(), request);
+            if (concreteIndices.length != 1) {
+                throw new IllegalArgumentException(
+                    "DSL execution currently supports exactly one concrete index, but resolved to " + concreteIndices.length + " indices"
+                );
+            }
+            return concreteIndices[0].getName();
+        } catch (IndexNotFoundException e) {
+            // Index may be an external table (e.g. Iceberg) not known to OpenSearch.
+            // Fall back to the first requested index name — the Calcite schema
+            // will resolve it if a SchemaContributor registered the table.
+            String[] indices = request.indices();
+            if (indices != null && indices.length == 1) {
+                logger.debug("Index [{}] not found as OpenSearch index, trying as external table", indices[0]);
+                return indices[0];
+            }
+            throw e;
         }
-        return concreteIndices[0].getName();
     }
 }

@@ -141,7 +141,7 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
         when(indicesService.indexService(index)).thenReturn(indexService);
 
         MockBackendPlugin backendPlugin = new MockBackendPlugin(format);
-        DefaultPlanExecutor executor = new DefaultPlanExecutor(List.of(backendPlugin), indicesService, clusterService);
+        DefaultPlanExecutor executor = new DefaultPlanExecutor(List.of(backendPlugin), indicesService, clusterService, null);
 
         RelOptTable table = mockTable("my_index");
         TableScan scan = new StubTableScan(cluster, cluster.traitSet(), table);

@@ -51,6 +51,9 @@ dependencies {
   testRuntimeOnly "org.codehaus.janino:janino:3.1.12"
   testRuntimeOnly "org.codehaus.janino:commons-compiler:3.1.12"
 
+  // commons-text is an optional transitive of calcite-core; SqlFunctions uses LevenshteinDistance
+  runtimeOnly "org.apache.commons:commons-text:1.11.0"
+
   // SQL Unified Query API for PPL parsing
   testImplementation("org.opensearch.query:unified-query-api:${sqlUnifiedQueryVersion}") {
     exclude group: 'org.opensearch'
