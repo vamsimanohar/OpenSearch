@@ -125,11 +125,22 @@ public class IcebergCatalogConnector {
         }
     }
 
-    private void setCredentialsOnThread(CatalogConfig config) {
+    /**
+     * Sets per-catalog AWS credentials on the calling thread's ThreadLocal.
+     * Must be paired with {@link #clearCredentialsOnThread()}.
+     *
+     * @param config the catalog configuration containing credential details
+     */
+    public void setCredentialsOnThread(CatalogConfig config) {
         AwsCredentials creds = getFreshCredentials(config);
         if (creds != null && creds.isComplete()) {
             LakehouseCredentialsProvider.set(creds);
         }
+    }
+
+    /** Clears AWS credentials from the calling thread's ThreadLocal. */
+    public void clearCredentialsOnThread() {
+        LakehouseCredentialsProvider.clear();
     }
 
     private AwsCredentials getFreshCredentials(CatalogConfig config) {

@@ -15,6 +15,7 @@ import org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
+import org.opensearch.analytics.exec.ExternalTableExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.analytics.schema.SchemaContributor;
@@ -60,6 +61,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     public AnalyticsPlugin() {}
 
     private final List<AnalyticsSearchBackendPlugin> backEnds = new ArrayList<>();
+    private final List<ExternalTableExecutor> externalTableExecutors = new ArrayList<>();
     private final List<SchemaContributor> schemaContributors = new ArrayList<>();
     private SqlOperatorTable operatorTable;
 
@@ -67,7 +69,14 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
     @Override
     public void loadExtensions(ExtensionLoader loader) {
         backEnds.addAll(loader.loadExtensions(AnalyticsSearchBackendPlugin.class));
+        externalTableExecutors.addAll(loader.loadExtensions(ExternalTableExecutor.class));
         schemaContributors.addAll(loader.loadExtensions(SchemaContributor.class));
+        logger.info(
+            "[AnalyticsPlugin] loadExtensions: backends={}, externalExecutors={}, schemaContributors={}",
+            backEnds.size(),
+            externalTableExecutors.size(),
+            schemaContributors.size()
+        );
         operatorTable = aggregateOperatorTables();
     }
 
@@ -85,8 +94,9 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin {
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
+        ExternalTableExecutor externalExecutor = externalTableExecutors.isEmpty() ? null : externalTableExecutors.get(0);
         return List.of(
-            new DefaultPlanExecutor(backEnds, null/* TODO: pass indices service */, clusterService),
+            new DefaultPlanExecutor(backEnds, null/* TODO: pass indices service */, clusterService, externalExecutor),
             new DefaultEngineContext(clusterService, operatorTable, schemaContributors)
         );
     }
