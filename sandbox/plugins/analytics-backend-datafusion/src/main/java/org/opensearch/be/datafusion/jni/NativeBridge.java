@@ -8,6 +8,8 @@
 
 package org.opensearch.be.datafusion.jni;
 
+import org.opensearch.nativebridge.spi.PlatformHelper;
+
 /**
  * Core JNI bridge to native DataFusion library.
  * All native method declarations are centralized here.
@@ -24,12 +26,8 @@ public final class NativeBridge {
 
     private static synchronized void loadNativeLibrary() {
         if (loaded) return;
-        try {
-            System.loadLibrary("opensearch_datafusion_jni");
-            loaded = true;
-        } catch (UnsatisfiedLinkError e) {
-            throw new ExceptionInInitializerError("Failed to load native library opensearch_datafusion_jni: " + e.getMessage());
-        }
+        PlatformHelper.loadNativeLibrary("opensearch_datafusion_jni", NativeBridge.class);
+        loaded = true;
     }
 
     // ---- Tokio runtime management ----
@@ -94,6 +92,38 @@ public final class NativeBridge {
         long readerPtr,
         String tableName,
         byte[] substraitPlan,
+        long runtimePtr,
+        org.opensearch.core.action.ActionListener<Long> listener
+    );
+
+    // ---- Iceberg / S3 query execution ----
+
+    /**
+     * Executes a SQL query against S3-backed Parquet files via DataFusion.
+     * Used for Iceberg external table queries where files are on S3, not local disk.
+     *
+     * @param s3Region         AWS region
+     * @param s3Bucket         S3 bucket name
+     * @param s3AccessKeyId    AWS access key ID, or null for default credentials
+     * @param s3SecretAccessKey AWS secret access key, or null for default credentials
+     * @param s3SessionToken   AWS session token, or null
+     * @param s3Endpoint       S3 endpoint override, or null
+     * @param filePaths        array of S3 Parquet file paths to scan
+     * @param tableName        table name for DataFusion table registration
+     * @param sqlQuery         SQL query string for DataFusion to execute
+     * @param runtimePtr       native DataFusion runtime pointer
+     * @param listener         callback receiving the stream pointer (Long) or error
+     */
+    public static native void executeIcebergQueryAsync(
+        String s3Region,
+        String s3Bucket,
+        String s3AccessKeyId,
+        String s3SecretAccessKey,
+        String s3SessionToken,
+        String s3Endpoint,
+        String[] filePaths,
+        String tableName,
+        String sqlQuery,
         long runtimePtr,
         org.opensearch.core.action.ActionListener<Long> listener
     );

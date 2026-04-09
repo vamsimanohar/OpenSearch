@@ -6,6 +6,13 @@
  * compatible open source license.
  */
 
+repositories {
+    maven {
+        name = 'OpenSearch Snapshots'
+        url = 'https://ci.opensearch.org/ci/dbc/snapshots/maven/'
+    }
+}
+
 opensearchplugin {
     name = 'lakehouse-iceberg'
     description = 'Read external Apache Iceberg tables via PPL and SQL'
@@ -32,6 +39,7 @@ dependencies {
     runtimeOnly "org.apache.hadoop:hadoop-client-runtime:3.4.2"
 
     // Iceberg transitive dependencies (OpenSearch plugin system strips transitives)
+    runtimeOnly "org.apache.avro:avro:1.12.0"
     runtimeOnly "org.apache.iceberg:iceberg-common:1.7.1"
     runtimeOnly "io.airlift:aircompressor:0.27"
     runtimeOnly "com.github.ben-manes.caffeine:caffeine:2.9.3"
@@ -81,9 +89,17 @@ jacocoTestCoverageVerification {
     violationRules {
         rule {
             element = 'CLASS'
-            // IcebergCatalogConnector needs live AWS credentials to test
+            // Classes needing live infrastructure or full plugin Guice context
             excludes = [
-                'org.opensearch.lakehouse.catalog.IcebergCatalogConnector'
+                'org.opensearch.lakehouse.catalog.IcebergCatalogConnector',
+                // Anonymous inner classes in REST handlers and LakehouseState — only testable via integration tests
+                'org.opensearch.lakehouse.action.LakehouseSqlRestAction.*',
+                'org.opensearch.lakehouse.action.LakehousePplRestAction*',
+                'org.opensearch.lakehouse.LakehouseState.*',
+                // LakehousePlugin.prepareScan requires live Iceberg catalog and connector
+                'org.opensearch.lakehouse.LakehousePlugin',
+                // LakehouseQueryTransportAction requires Guice-injected EngineContext
+                'org.opensearch.lakehouse.action.LakehouseQueryTransportAction'
             ]
             limit {
                 counter = 'LINE'
@@ -95,14 +111,42 @@ jacocoTestCoverageVerification {
 check.dependsOn jacocoTestCoverageVerification
 
 configurations.all {
+    // okhttp-aws-signer is a transitive dep of unified-query-common, only on JitPack
+    exclude group: 'com.github.babbel', module: 'okhttp-aws-signer'
+    // jetbrains:annotations conflicts with awssdk:annotations (same artifact name → codebase clash in test security manager)
+    exclude group: 'org.jetbrains', module: 'annotations'
+
     resolutionStrategy {
+        // Align transitive versions with OpenSearch's managed versions
         force "com.google.guava:guava:33.4.0-jre"
         force "com.google.guava:failureaccess:1.0.2"
+        force "com.google.errorprone:error_prone_annotations:2.36.0"
+        force "org.checkerframework:checker-qual:3.43.0"
         force "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
         force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
         force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+        force "com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:${versions.jackson}"
+        force "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${versions.jackson}"
         force "org.slf4j:slf4j-api:${versions.slf4j}"
+        force "org.locationtech.jts:jts-core:${versions.jts}"
+        force "commons-codec:commons-codec:${versions.commonscodec}"
+        force "joda-time:joda-time:2.12.7"
+        force "org.yaml:snakeyaml:2.4"
+        force "org.codehaus.janino:janino:3.1.12"
+        force "org.codehaus.janino:commons-compiler:3.1.12"
+        force "commons-io:commons-io:${versions.commonsio}"
+        force "org.apache.commons:commons-lang3:3.18.0"
+        force "org.apache.commons:commons-text:1.11.0"
         force "commons-logging:commons-logging:1.3.5"
-        force "commons-codec:commons-codec:1.15"
+        force "net.minidev:json-smart:2.5.2"
+        force "org.apache.httpcomponents.client5:httpclient5:5.6"
+        force "org.apache.httpcomponents.core5:httpcore5:5.4"
+        force "com.squareup.okhttp3:okhttp:4.12.0"
+        force "org.jetbrains.kotlin:kotlin-stdlib:1.8.21"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.21"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.21"
+        force "org.jetbrains.kotlin:kotlin-stdlib-common:1.9.10"
+        force "org.apache.httpcomponents:httpclient:4.5.14"
+        force "org.apache.httpcomponents:httpcore:4.4.16"
     }
 }

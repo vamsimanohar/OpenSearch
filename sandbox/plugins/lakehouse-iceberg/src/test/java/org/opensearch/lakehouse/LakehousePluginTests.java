@@ -72,10 +72,10 @@ public class LakehousePluginTests extends OpenSearchTestCase {
         }
     }
 
-    public void testPrepareScanThrowsUnsupported() throws IOException {
+    public void testPrepareScanRejectsNonIcebergTable() throws IOException {
         try (LakehousePlugin plugin = new LakehousePlugin()) {
             ExternalTable table = mock(ExternalTable.class);
-            expectThrows(UnsupportedOperationException.class, () -> plugin.prepareScan(null, table));
+            expectThrows(IllegalArgumentException.class, () -> plugin.prepareScan(null, table));
         }
     }
 
@@ -111,8 +111,8 @@ public class LakehousePluginTests extends OpenSearchTestCase {
         }
     }
 
-    public void testGetCatalogConnector() {
-        assertNotNull(LakehousePlugin.getCatalogConnector());
+    public void testGetCatalogConnectorViaState() {
+        assertNotNull(LakehouseState.instance().catalogConnector());
     }
 
     public void testSupportsNullFormat() throws IOException {
