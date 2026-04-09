@@ -32,6 +32,7 @@ dependencies {
     runtimeOnly "org.apache.hadoop:hadoop-client-runtime:3.4.2"
 
     // Iceberg transitive dependencies (OpenSearch plugin system strips transitives)
+    runtimeOnly "org.apache.avro:avro:1.12.0"
     runtimeOnly "org.apache.iceberg:iceberg-common:1.7.1"
     runtimeOnly "io.airlift:aircompressor:0.27"
     runtimeOnly "com.github.ben-manes.caffeine:caffeine:2.9.3"
