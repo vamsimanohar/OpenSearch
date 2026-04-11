@@ -58,6 +58,20 @@ public class DataFusionService extends AbstractLifecycleComponent {
         return new Builder();
     }
 
+    /**
+     * Override stop() to gracefully handle being called when already closed.
+     * This happens in the test framework when multiple nodes share the same static
+     * DataFusionService instance — the first node's close() transitions to CLOSED,
+     * then other nodes' teardown calls stop() on the same instance.
+     */
+    @Override
+    public void stop() {
+        if (lifecycle.closed()) {
+            return;
+        }
+        super.stop();
+    }
+
     @Override
     protected void doStart() {
         logger.debug("Starting DataFusion service");

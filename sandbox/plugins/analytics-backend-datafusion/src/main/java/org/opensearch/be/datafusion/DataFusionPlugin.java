@@ -227,7 +227,8 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         DataFusionService dfService = ensureDataFusionService();
 
         Map<String, String> config = scanContext.getStorageConfig();
-        String s3Region = config.getOrDefault("s3Region", "us-east-1");
+        boolean localMode = "true".equals(config.get("localMode"));
+        String s3Region = localMode ? "" : config.getOrDefault("s3Region", "us-east-1");
         String s3Bucket = config.get("s3Bucket");
         String s3AccessKeyId = config.get("s3AccessKeyId");
         String s3SecretAccessKey = config.get("s3SecretAccessKey");
