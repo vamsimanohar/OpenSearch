@@ -272,6 +272,30 @@ public final class NativeBridge {
         }
     }
 
+    // ---- Iceberg / S3 query execution (stub — FFM export not yet wired) ----
+
+    /**
+     * Executes a SQL query against S3-backed Parquet files via DataFusion.
+     * TODO: Wire FFM export once df_execute_iceberg_query is exposed in the native lib.
+     */
+    public static void executeIcebergQueryAsync(
+        String s3Region,
+        String s3Bucket,
+        String s3AccessKeyId,
+        String s3SecretAccessKey,
+        String s3SessionToken,
+        String s3Endpoint,
+        String[] filePaths,
+        long[] fileSizes,
+        String tableName,
+        String sqlQuery,
+        long runtimePtr,
+        ActionListener<Long> listener
+    ) {
+        listener.onFailure(new UnsupportedOperationException(
+            "executeIcebergQueryAsync not yet wired via FFM — native export df_execute_iceberg_query pending"));
+    }
+
     public static void cacheManagerAddFiles(long runtimePtr, String[] filePaths) {}
 
     public static void cacheManagerRemoveFiles(long runtimePtr, String[] filePaths) {}
