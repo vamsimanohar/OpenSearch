@@ -10,6 +10,7 @@ package org.opensearch.analytics.exec;
 
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.TableScan;
+import org.apache.calcite.schema.Table;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.search.SearchShardTask;
@@ -17,6 +18,7 @@ import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
+import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.index.IndexService;
@@ -34,15 +36,16 @@ import java.util.Set;
 /**
  * {@link QueryPlanExecutor} default implementation.
  * <p>
- * Acquires a composite reader, selects a {@link AnalyticsSearchBackendPlugin}, and
- * delegates query execution to it.
+ * Routes queries to either the native backend (for external tables like Iceberg)
+ * or the local shard-based backend (for OpenSearch indices).
  */
 public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<Object[]>> {
 
     private static final Logger logger = LogManager.getLogger(DefaultPlanExecutor.class);
     private final Map<String, AnalyticsSearchBackendPlugin> backEnds;
-    private final IndicesService indicesService;
+    private volatile IndicesService indicesService;
     private final ClusterService clusterService;
+    private final ExternalTableExecutor externalTableExecutor;
 
     /**
      * Constructs a DefaultPlanExecutor.
@@ -50,14 +53,21 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
      * @param providers list of search execution engine providers
      * @param indicesService service for accessing index shards
      * @param clusterService service for accessing cluster state
+     * @param externalTableExecutor executor for external (non-OpenSearch) tables, may be null
      */
-    public DefaultPlanExecutor(List<AnalyticsSearchBackendPlugin> providers, IndicesService indicesService, ClusterService clusterService) {
+    public DefaultPlanExecutor(
+        List<AnalyticsSearchBackendPlugin> providers,
+        IndicesService indicesService,
+        ClusterService clusterService,
+        ExternalTableExecutor externalTableExecutor
+    ) {
         this.backEnds = new LinkedHashMap<>();
         for (AnalyticsSearchBackendPlugin provider : providers) {
             this.backEnds.put(provider.name(), provider);
         }
         this.indicesService = indicesService;
         this.clusterService = clusterService;
+        this.externalTableExecutor = externalTableExecutor;
     }
 
     @Override
@@ -65,6 +75,32 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
         // TODO: replace this direct execution path with PlannerImpl → QueryDAG → Scheduler.
         // PlannerImpl.createPlan() returns a QueryDAG; the Scheduler traverses it bottom-up,
         // dispatches FragmentExecutionRequests to data nodes, and streams results back.
+
+        // Route external (non-OpenSearch) tables through the native backend
+        ExternalTable externalTable = extractExternalTable(logicalFragment);
+        if (externalTable != null) {
+            logger.debug("[DefaultPlanExecutor] Detected external table: type={}", externalTable.getClass().getSimpleName());
+            if (externalTableExecutor == null) {
+                throw new IllegalStateException("Query references an external table but no ExternalTableExecutor is registered");
+            }
+
+            ExternalScanContext scanContext = externalTableExecutor.prepareScan(logicalFragment, externalTable);
+            if (scanContext == null) {
+                throw new IllegalStateException("ExternalTableExecutor.prepareScan() returned null");
+            }
+            logger.info(
+                "[DefaultPlanExecutor] Routing external table [{}] to native backend, {} files",
+                scanContext.getTableName(),
+                scanContext.getDataFilePaths() != null ? scanContext.getDataFilePaths().size() : 0
+            );
+
+            AnalyticsSearchBackendPlugin provider = selectBackEnd();
+            if (provider == null) {
+                throw new IllegalStateException("No analytics backend registered for remote query execution");
+            }
+            return provider.executeRemoteQuery(scanContext);
+        }
+
         String tableName = extractTableName(logicalFragment);
         AnalyticsSearchBackendPlugin backendPlugin = selectBackEnd();
         if (backendPlugin == null) {
@@ -105,6 +141,27 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
             throw new RuntimeException("Execution failed for [" + backendPlugin.name() + "]", e);
         }
         return rows;
+    }
+
+    /**
+     * Walks the RelNode tree to find a TableScan whose underlying Calcite table
+     * implements {@link ExternalTable}. Returns the first match, or null if every
+     * table in the plan is a regular OpenSearch index table.
+     */
+    static ExternalTable extractExternalTable(RelNode node) {
+        if (node instanceof TableScan) {
+            Table table = node.getTable().unwrap(Table.class);
+            if (table instanceof ExternalTable) {
+                return (ExternalTable) table;
+            }
+        }
+        for (RelNode input : node.getInputs()) {
+            ExternalTable found = extractExternalTable(input);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
     }
 
     static String extractTableName(RelNode node) {

@@ -34,6 +34,7 @@ public class IcebergCalciteTable extends AbstractTable implements ExternalTable 
     private final CatalogConfig config;
     private final IcebergCatalogConnector catalogConnector;
 
+    private volatile Table loadedTable;
     private volatile Schema icebergSchema;
     private volatile long snapshotId = -1L;
 
@@ -76,6 +77,7 @@ public class IcebergCalciteTable extends AbstractTable implements ExternalTable 
                 return;
             }
             Table table = catalogConnector.loadTable(config);
+            this.loadedTable = table;
             this.icebergSchema = table.schema();
             Snapshot current = table.currentSnapshot();
             this.snapshotId = current != null ? current.snapshotId() : -1L;
@@ -100,5 +102,16 @@ public class IcebergCalciteTable extends AbstractTable implements ExternalTable 
     /** Returns the catalog configuration for this table. */
     public CatalogConfig catalogConfig() {
         return config;
+    }
+
+    /**
+     * Returns the loaded Iceberg table. The table is loaded lazily on first access
+     * (triggered by Calcite resolving the table during query planning).
+     *
+     * @throws IllegalStateException if the table has not been loaded yet
+     */
+    public Table icebergTable() {
+        ensureLoaded();
+        return loadedTable;
     }
 }
