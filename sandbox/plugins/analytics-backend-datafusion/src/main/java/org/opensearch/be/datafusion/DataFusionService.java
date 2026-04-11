@@ -66,7 +66,7 @@ public class DataFusionService extends AbstractLifecycleComponent {
 
         long ptr = NativeBridge.createGlobalRuntime(memoryPoolLimit, 0L, spillDirectory, spillMemoryLimit);
         this.runtimeHandle = new NativeRuntimeHandle(ptr);
-        this.rootAllocator = new RootAllocator(memoryPoolLimit);
+        this.rootAllocator = new RootAllocator(memoryPoolLimit <= 0 ? Long.MAX_VALUE : Math.abs(memoryPoolLimit));
         logger.debug("DataFusion service started — memory pool {}B, spill limit {}B", memoryPoolLimit, spillMemoryLimit);
     }
 
@@ -162,8 +162,8 @@ public class DataFusionService extends AbstractLifecycleComponent {
      * Builder for {@link DataFusionService}.
      */
     public static class Builder {
-        private long memoryPoolLimit = Runtime.getRuntime().maxMemory() / 4;
-        private long spillMemoryLimit = Runtime.getRuntime().maxMemory() / 8;
+        private long memoryPoolLimit = 32L * 1024 * 1024 * 1024; // 32GB GreedyMemoryPool
+        private long spillMemoryLimit = 100L * 1024 * 1024 * 1024; // 100GB — disk space, not memory
         private String spillDirectory = System.getProperty("java.io.tmpdir");
         private int cpuThreads = Runtime.getRuntime().availableProcessors();
 

@@ -12,6 +12,7 @@
 //! `extern "C"` functions for JDK FFM.
 
 pub mod api;
+pub mod cross_rt_object_store;
 pub mod cross_rt_stream;
 pub mod executor;
 pub mod ffm;
