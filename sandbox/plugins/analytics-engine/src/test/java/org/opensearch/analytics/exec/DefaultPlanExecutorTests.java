@@ -219,6 +219,7 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
         ExternalScanContext scanContext = new ExternalScanContext(
             "my_table",
             List.of("s3://bucket/data/file1.parquet"),
+            new long[] { 1024L },
             "SELECT * FROM \"my_table\"",
             Map.of("s3Region", "us-west-2")
         );

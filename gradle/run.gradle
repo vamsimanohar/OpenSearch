@@ -94,7 +94,7 @@ testClusters {
           def nativeProject = project(':sandbox:libs:dataformat-native')
           def buildType = System.getProperty('build.type', 'release')
           def osName = System.getProperty('os.name').toLowerCase()
-          def libPrefix = osName.contains('mac') ? 'lib' : 'lib'
+          def libPrefix = 'lib'
           def libExt = osName.contains('mac') ? '.dylib' : '.so'
           def nativeLib = nativeProject.file("rust/target/${buildType}/${libPrefix}opensearch_native${libExt}")
           systemProperty 'native.lib.path', nativeLib.absolutePath
