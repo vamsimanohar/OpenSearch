@@ -20,6 +20,7 @@ import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.lakehouse.LakehouseState;
 import org.opensearch.tasks.Task;
+import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 import java.security.AccessController;
@@ -74,7 +75,7 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
      */
     @Inject
     public WorkerQueryTransportAction(TransportService transportService, ActionFilters actionFilters, ClusterService clusterService) {
-        super(WorkerQueryAction.NAME, transportService, actionFilters, WorkerQueryRequest::new);
+        super(WorkerQueryAction.NAME, transportService, actionFilters, WorkerQueryRequest::new, ThreadPool.Names.GENERIC);
         LakehouseState.instance().initDistributedExecutor(transportService, clusterService);
     }
 
