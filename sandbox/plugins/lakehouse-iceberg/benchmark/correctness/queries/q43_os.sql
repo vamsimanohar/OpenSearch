@@ -1,0 +1,1 @@
+SELECT FLOOR(eventtime TO MINUTE) AS M, COUNT(*) AS PageViews FROM hits WHERE counterid = 62 AND eventdate >= DATE '2013-07-15' AND eventdate <= DATE '2013-07-16' AND isrefresh = 0 AND dontcounthits = 0 GROUP BY FLOOR(eventtime TO MINUTE) ORDER BY M LIMIT 10;

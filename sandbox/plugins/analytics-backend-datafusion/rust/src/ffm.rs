@@ -135,6 +135,108 @@ pub unsafe extern "C" fn df_stream_close(stream_ptr: i64) {
 
 #[ffm_safe]
 #[no_mangle]
+pub unsafe extern "C" fn df_execute_iceberg_query(
+    s3_region_ptr: *const u8,
+    s3_region_len: i64,
+    s3_bucket_ptr: *const u8,
+    s3_bucket_len: i64,
+    s3_access_key_ptr: *const u8,
+    s3_access_key_len: i64,
+    s3_secret_key_ptr: *const u8,
+    s3_secret_key_len: i64,
+    s3_session_token_ptr: *const u8,
+    s3_session_token_len: i64,
+    s3_endpoint_ptr: *const u8,
+    s3_endpoint_len: i64,
+    file_paths_ptr: *const *const u8,
+    file_paths_lens: *const i64,
+    file_sizes_ptr: *const i64,
+    files_count: i64,
+    table_name_ptr: *const u8,
+    table_name_len: i64,
+    sql_query_ptr: *const u8,
+    sql_query_len: i64,
+    runtime_ptr: i64,
+) -> i64 {
+    let mgr = get_rt_manager()?;
+
+    let s3_region = str_from_raw(s3_region_ptr, s3_region_len)
+        .map_err(|e| format!("df_execute_iceberg_query: s3_region: {}", e))?;
+
+    // Optional strings: treat null or zero-length as None
+    let s3_bucket = if s3_bucket_ptr.is_null() || s3_bucket_len <= 0 {
+        None
+    } else {
+        Some(str_from_raw(s3_bucket_ptr, s3_bucket_len)
+            .map_err(|e| format!("df_execute_iceberg_query: s3_bucket: {}", e))?)
+    };
+    let s3_access_key = if s3_access_key_ptr.is_null() || s3_access_key_len <= 0 {
+        None
+    } else {
+        Some(str_from_raw(s3_access_key_ptr, s3_access_key_len)
+            .map_err(|e| format!("df_execute_iceberg_query: s3_access_key: {}", e))?)
+    };
+    let s3_secret_key = if s3_secret_key_ptr.is_null() || s3_secret_key_len <= 0 {
+        None
+    } else {
+        Some(str_from_raw(s3_secret_key_ptr, s3_secret_key_len)
+            .map_err(|e| format!("df_execute_iceberg_query: s3_secret_key: {}", e))?)
+    };
+    let s3_session_token = if s3_session_token_ptr.is_null() || s3_session_token_len <= 0 {
+        None
+    } else {
+        Some(str_from_raw(s3_session_token_ptr, s3_session_token_len)
+            .map_err(|e| format!("df_execute_iceberg_query: s3_session_token: {}", e))?)
+    };
+    let s3_endpoint = if s3_endpoint_ptr.is_null() || s3_endpoint_len <= 0 {
+        None
+    } else {
+        Some(str_from_raw(s3_endpoint_ptr, s3_endpoint_len)
+            .map_err(|e| format!("df_execute_iceberg_query: s3_endpoint: {}", e))?)
+    };
+
+    let table_name = str_from_raw(table_name_ptr, table_name_len)
+        .map_err(|e| format!("df_execute_iceberg_query: table_name: {}", e))?;
+    let sql_query = str_from_raw(sql_query_ptr, sql_query_len)
+        .map_err(|e| format!("df_execute_iceberg_query: sql_query: {}", e))?;
+
+    // Parse file paths and sizes from parallel arrays
+    let count = files_count as usize;
+    let mut file_paths = Vec::with_capacity(count);
+    for i in 0..count {
+        let ptr = *file_paths_ptr.add(i);
+        let len = *file_paths_lens.add(i);
+        file_paths.push(
+            str_from_raw(ptr, len)
+                .map_err(|e| format!("df_execute_iceberg_query: file_path[{}]: {}", i, e))?
+                .to_string(),
+        );
+    }
+    let file_sizes: Vec<i64> = slice::from_raw_parts(file_sizes_ptr, count).to_vec();
+
+    let runtime = &*(runtime_ptr as *const api::DataFusionRuntime);
+
+    mgr.io_runtime
+        .block_on(api::execute_iceberg_query(
+            s3_region,
+            s3_bucket,
+            s3_access_key,
+            s3_secret_key,
+            s3_session_token,
+            s3_endpoint,
+            file_paths,
+            file_sizes,
+            table_name,
+            sql_query,
+            runtime,
+            mgr.cpu_executor(),
+            mgr.io_runtime.handle().clone(),
+        ))
+        .map_err(|e| e.to_string())
+}
+
+#[ffm_safe]
+#[no_mangle]
 pub unsafe extern "C" fn df_sql_to_substrait(
     shard_view_ptr: i64,
     table_name_ptr: *const u8,
