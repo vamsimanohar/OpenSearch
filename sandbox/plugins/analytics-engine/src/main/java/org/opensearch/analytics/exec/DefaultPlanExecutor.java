@@ -84,6 +84,16 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
             if (scanContext == null) {
                 throw new IllegalStateException("ExternalTableExecutor.prepareScan() returned null");
             }
+
+            // Distributed execution: results already merged by the external table plugin
+            if (scanContext.getPreComputedResults() != null) {
+                logger.info(
+                    "[DefaultPlanExecutor] Using pre-computed distributed results for [{}]",
+                    scanContext.getTableName()
+                );
+                return scanContext.getPreComputedResults();
+            }
+
             logger.info(
                 "[DefaultPlanExecutor] Routing external table [{}] to native backend, {} files",
                 scanContext.getTableName(),

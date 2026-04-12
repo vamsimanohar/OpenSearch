@@ -25,6 +25,7 @@ import org.opensearch.analytics.schema.SchemaContributor;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Setting;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.CatalogConfig;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
@@ -33,6 +34,10 @@ import org.opensearch.lakehouse.action.LakehouseQueryAction;
 import org.opensearch.lakehouse.action.LakehouseQueryTransportAction;
 import org.opensearch.lakehouse.action.LakehousePplRestAction;
 import org.opensearch.lakehouse.action.LakehouseSqlRestAction;
+import org.opensearch.lakehouse.distributed.DistributedScanExecutor;
+import org.opensearch.lakehouse.distributed.NodeDiscovery;
+import org.opensearch.lakehouse.distributed.WorkerQueryAction;
+import org.opensearch.lakehouse.distributed.WorkerQueryTransportAction;
 import org.opensearch.lakehouse.scan.CalciteToIcebergPredicateConverter;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.lakehouse.schema.IcebergCalciteTable;
@@ -79,6 +84,13 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
 
     /** Creates a new LakehousePlugin instance. */
     public LakehousePlugin() {}
+
+    @Override
+    public Settings additionalSettings() {
+        return Settings.builder()
+            .put("node.attr." + NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true")
+            .build();
+    }
 
     @Override
     public List<Setting<?>> getSettings() {
@@ -178,6 +190,25 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
             })
             .toList();
 
+        // 5. Try distributed execution if multiple worker nodes are available
+        DistributedScanExecutor distExecutor = LakehouseState.instance().distributedScanExecutor();
+        if (distExecutor != null) {
+            try {
+                Iterable<Object[]> distributedResult = distExecutor.execute(
+                    logicalPlan, sqlQuery, filePaths, fileSizes, storageConfig, tableName
+                );
+                if (distributedResult != null) {
+                    logger.info("[LakehousePlugin] Using distributed execution across multiple workers");
+                    ExternalScanContext ctx = new ExternalScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig);
+                    ctx.setPreComputedResults(distributedResult);
+                    return ctx;
+                }
+            } catch (Exception e) {
+                logger.error("[LakehousePlugin] Distributed execution failed, query will not be retried", e);
+                throw new RuntimeException("Distributed query execution failed", e);
+            }
+        }
+
         return new ExternalScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig);
     }
 
@@ -258,7 +289,10 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
 
     @Override
     public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
-        return List.of(new ActionHandler<>(LakehouseQueryAction.INSTANCE, LakehouseQueryTransportAction.class));
+        return List.of(
+            new ActionHandler<>(LakehouseQueryAction.INSTANCE, LakehouseQueryTransportAction.class),
+            new ActionHandler<>(WorkerQueryAction.INSTANCE, WorkerQueryTransportAction.class)
+        );
     }
 
     @Override

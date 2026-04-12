@@ -10,10 +10,13 @@ package org.opensearch.lakehouse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
+import org.opensearch.lakehouse.distributed.DistributedScanExecutor;
 import org.opensearch.lakehouse.scan.IcebergScanPlanner;
+import org.opensearch.transport.TransportService;
 
 import java.security.AccessControlContext;
 import java.security.AccessController;
@@ -41,6 +44,7 @@ public final class LakehouseState {
     private final IcebergCatalogConnector catalogConnector;
     private final ExecutorService scanExecutor;
     private final IcebergScanPlanner scanPlanner;
+    private volatile DistributedScanExecutor distributedScanExecutor;
 
     @SuppressWarnings("removal")
     private LakehouseState() {
@@ -62,6 +66,26 @@ public final class LakehouseState {
     /** Returns the shared scan planner. */
     public IcebergScanPlanner scanPlanner() {
         return scanPlanner;
+    }
+
+    /**
+     * Initializes the distributed scan executor with transport and cluster services.
+     * Called from {@link LakehousePlugin#createComponents} when services become available.
+     *
+     * @param transportService the transport service for remote communication
+     * @param clusterService   the cluster service for node discovery
+     */
+    public void initDistributedExecutor(TransportService transportService, ClusterService clusterService) {
+        this.distributedScanExecutor = new DistributedScanExecutor(transportService, clusterService);
+        logger.info("[LakehouseState] Distributed scan executor initialized");
+    }
+
+    /**
+     * Returns the distributed scan executor, or null if not yet initialized.
+     * Will be null until {@link #initDistributedExecutor} is called.
+     */
+    public DistributedScanExecutor distributedScanExecutor() {
+        return distributedScanExecutor;
     }
 
     /**

@@ -17,6 +17,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
 import org.opensearch.analytics.exec.ExternalTableExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
+import org.opensearch.analytics.exec.RemoteQueryBackendHolder;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.analytics.schema.SchemaContributor;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
@@ -100,6 +101,9 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
         ExternalTableExecutor externalExecutor = externalTableExecutors.isEmpty() ? null : externalTableExecutors.get(0);
+        if (!backEnds.isEmpty()) {
+            RemoteQueryBackendHolder.setProvider(backEnds.get(0));
+        }
         return List.of(
             new DefaultPlanExecutor(backEnds, null/* TODO: pass indices service */, clusterService, externalExecutor),
             new DefaultEngineContext(clusterService, operatorTable, schemaContributors)
@@ -118,6 +122,11 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             b.bind(new TypeLiteral<QueryPlanExecutor<RelNode, Iterable<Object[]>>>() {
             }).to(DefaultPlanExecutor.class);
             b.bind(EngineContext.class).to(DefaultEngineContext.class);
+            // Note: AnalyticsSearchBackendPlugin is NOT Guice-bound here because
+            // the concrete type (DataFusionPlugin) implements DataFormat with methods
+            // referencing sandbox server classes. Guice introspects those methods during
+            // binding, causing ClassNotFoundException. Instead, the backend is registered
+            // via RemoteQueryBackendHolder in createComponents().
         });
     }
 

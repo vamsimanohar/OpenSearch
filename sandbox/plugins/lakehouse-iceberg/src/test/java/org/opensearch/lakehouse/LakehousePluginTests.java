@@ -123,6 +123,22 @@ public class LakehousePluginTests extends OpenSearchTestCase {
         }
     }
 
+    public void testGetActionsIncludesWorkerQueryAction() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            var actions = plugin.getActions();
+            assertEquals(2, actions.size());
+            assertEquals("cluster:internal/lakehouse/query", actions.get(0).getAction().name());
+            assertEquals("cluster:internal/lakehouse/worker/query", actions.get(1).getAction().name());
+        }
+    }
+
+    public void testAdditionalSettingsRegistersNodeAttribute() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            Settings settings = plugin.additionalSettings();
+            assertEquals("true", settings.get("node.attr.lakehouse.worker"));
+        }
+    }
+
     private static ClusterState clusterState(Map<String, IndexMetadata> indices) {
         Metadata.Builder metadataBuilder = Metadata.builder();
         for (Map.Entry<String, IndexMetadata> entry : indices.entrySet()) {

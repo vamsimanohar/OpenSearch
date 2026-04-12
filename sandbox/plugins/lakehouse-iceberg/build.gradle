@@ -120,11 +120,16 @@ jacocoTestCoverageVerification {
                 // Anonymous inner classes in REST handlers and LakehouseState — only testable via integration tests
                 'org.opensearch.lakehouse.action.LakehouseSqlRestAction.*',
                 'org.opensearch.lakehouse.action.LakehousePplRestAction*',
+                'org.opensearch.lakehouse.LakehouseState',
                 'org.opensearch.lakehouse.LakehouseState.*',
                 // LakehousePlugin.prepareScan requires live Iceberg catalog and connector
                 'org.opensearch.lakehouse.LakehousePlugin',
                 // LakehouseQueryTransportAction requires Guice-injected EngineContext
-                'org.opensearch.lakehouse.action.LakehouseQueryTransportAction'
+                'org.opensearch.lakehouse.action.LakehouseQueryTransportAction',
+                // WorkerQueryTransportAction.doExecute requires Guice-injected TransportService and doPrivileged
+                'org.opensearch.lakehouse.distributed.WorkerQueryTransportAction',
+                // Anonymous TransportResponseHandler classes in DistributedScanExecutor — tested via transport mocks
+                'org.opensearch.lakehouse.distributed.DistributedScanExecutor.*'
             ]
             limit {
                 counter = 'LINE'

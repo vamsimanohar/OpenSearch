@@ -21,6 +21,7 @@ public class ExternalScanContext {
     private final long[] fileSizes;
     private final String sqlQuery;
     private final Map<String, String> storageConfig;
+    private Iterable<Object[]> preComputedResults;
 
     /**
      * Creates a new scan context.
@@ -66,5 +67,21 @@ public class ExternalScanContext {
      */
     public Map<String, String> getStorageConfig() {
         return storageConfig;
+    }
+
+    /**
+     * Returns pre-computed results from distributed execution, or null.
+     * When non-null, the execution backend should be skipped — results are already merged.
+     */
+    public Iterable<Object[]> getPreComputedResults() {
+        return preComputedResults;
+    }
+
+    /**
+     * Sets pre-computed results from distributed execution.
+     * Used when a distributed scan executor has already merged results from multiple workers.
+     */
+    public void setPreComputedResults(Iterable<Object[]> results) {
+        this.preComputedResults = results;
     }
 }
