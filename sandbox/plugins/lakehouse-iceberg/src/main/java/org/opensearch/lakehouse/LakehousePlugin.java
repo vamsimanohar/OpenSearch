@@ -166,7 +166,19 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
         // Extract file sizes from Iceberg manifest (avoids S3 HEAD calls in Rust)
         long[] fileSizes = scanPlan.getFiles().stream().mapToLong(IcebergScanPlan.FileInfo::getFileSizeInBytes).toArray();
 
-        return new ExternalScanContext(tableName, scanPlan.getDataFilePaths(), fileSizes, sqlQuery, storageConfig);
+        // Normalize file paths: Iceberg Hadoop catalog uses "file:" prefix, DataFusion expects "file://"
+        List<String> filePaths = scanPlan.getDataFilePaths().stream()
+            .map(p -> {
+                if (p.startsWith("file:/") && !p.startsWith("file://")) {
+                    return "file://" + p.substring("file:".length());
+                } else if (p.startsWith("/")) {
+                    return "file://" + p;
+                }
+                return p;
+            })
+            .toList();
+
+        return new ExternalScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig);
     }
 
     private Expression extractIcebergFilter(RelNode node) {
@@ -226,8 +238,8 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
                 int slashIdx = withoutScheme.indexOf('/');
                 if (slashIdx > 0) config.put("s3Bucket", withoutScheme.substring(0, slashIdx));
             }
-            if (firstPath.startsWith("file://")) {
-                config.put("s3Endpoint", "file://");
+            if (firstPath.startsWith("file:") || firstPath.startsWith("/")) {
+                config.put("localMode", "true");
             }
         }
         // Pass per-catalog AWS credentials to DataFusion's Rust S3 client
