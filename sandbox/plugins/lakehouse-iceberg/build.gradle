@@ -6,6 +6,8 @@
  * compatible open source license.
  */
 
+apply plugin: 'opensearch.internal-cluster-test'
+
 repositories {
     maven {
         name = 'OpenSearch Snapshots'
@@ -95,6 +97,16 @@ dependencies {
     runtimeOnly "software.amazon.awssdk:http-auth:${versions.aws}"
     runtimeOnly "software.amazon.awssdk:http-auth-aws:${versions.aws}"
     runtimeOnly "software.amazon.awssdk:crt-core:${versions.aws}"
+
+    // Integration test dependencies
+    internalClusterTestImplementation project(':server')
+    internalClusterTestImplementation project(':test:framework')
+    internalClusterTestImplementation project(':sandbox:plugins:analytics-engine')
+    internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-datafusion')
+    internalClusterTestImplementation project(':sandbox:libs:dataformat-native')
+    internalClusterTestImplementation project(':sandbox:plugins:dsl-query-executor')
+    internalClusterTestImplementation project(':sandbox:libs:analytics-framework')
+    internalClusterTestImplementation project(':plugins:arrow-flight-rpc')
 }
 
 // JaCoCo coverage enforcement — fail build if line coverage drops below threshold
@@ -122,6 +134,33 @@ jacocoTestCoverageVerification {
     }
 }
 check.dependsOn jacocoTestCoverageVerification
+
+// DataFusion and dataformat-native target JVM 25. Override JVM version attribute
+// so Gradle resolves them correctly (we run on JVM 25 at test time).
+['internalClusterTestCompileClasspath', 'internalClusterTestRuntimeClasspath'].each { configName ->
+    configurations.named(configName).configure {
+        attributes {
+            attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, Integer.valueOf(25))
+        }
+    }
+}
+
+// Arrow/Flight requires these JVM flags for integration tests
+internalClusterTest {
+    jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
+    jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED'
+    jvmArgs '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED'
+    jvmArgs '-Darrow.memory.debug.allocator=false'
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    systemProperty 'io.netty.allocator.numDirectArenas', '1'
+    systemProperty 'io.netty.noUnsafe', 'false'
+    systemProperty 'io.netty.tryUnsafe', 'true'
+    systemProperty 'io.netty.tryReflectionSetAccessible', 'true'
+    jvmArgs += ["--add-opens", "java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"]
+    // Native library path for DataFusion
+    def nativeLib = project(':sandbox:libs:dataformat-native').ext.nativeLibPath
+    systemProperty 'native.lib.path', nativeLib.absolutePath
+}
 
 // --- Benchmark tools source set (not part of the plugin bundle) ---
 sourceSets {
@@ -202,5 +241,12 @@ configurations.all {
         force "org.jetbrains.kotlin:kotlin-stdlib-common:1.9.10"
         force "org.apache.httpcomponents:httpclient:4.5.14"
         force "org.apache.httpcomponents:httpcore:4.4.16"
+        force "com.github.luben:zstd-jni:1.5.6-6"
+        force "org.xerial.snappy:snappy-java:1.1.10.7"
+        force "org.apache.arrow:arrow-memory-core:18.3.0"
+        force "org.apache.arrow:arrow-memory-unsafe:18.3.0"
+        force "org.apache.arrow:arrow-vector:18.3.0"
+        force "org.apache.arrow:arrow-format:18.3.0"
+        force "org.apache.arrow:arrow-c-data:18.3.0"
     }
 }

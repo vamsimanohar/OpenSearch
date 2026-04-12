@@ -36,6 +36,8 @@ once_cell = { workspace = true }
 log = { workspace = true }
 num_cpus = { workspace = true }
 mimalloc = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
 native-bridge-common = { workspace = true }
 
 [dev-dependencies]

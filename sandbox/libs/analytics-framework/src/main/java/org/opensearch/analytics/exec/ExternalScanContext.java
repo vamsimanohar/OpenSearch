@@ -18,6 +18,7 @@ import java.util.Map;
 public class ExternalScanContext {
     private final String tableName;
     private final List<String> dataFilePaths;
+    private final long[] fileSizes;
     private final String sqlQuery;
     private final Map<String, String> storageConfig;
 
@@ -26,12 +27,14 @@ public class ExternalScanContext {
      *
      * @param tableName      table name matching the query plan
      * @param dataFilePaths  pruned data file paths to scan
+     * @param fileSizes      file sizes in bytes, parallel to dataFilePaths
      * @param sqlQuery       SQL query string for the target execution engine
      * @param storageConfig  storage configuration (S3 region, bucket, credentials)
      */
-    public ExternalScanContext(String tableName, List<String> dataFilePaths, String sqlQuery, Map<String, String> storageConfig) {
+    public ExternalScanContext(String tableName, List<String> dataFilePaths, long[] fileSizes, String sqlQuery, Map<String, String> storageConfig) {
         this.tableName = tableName;
         this.dataFilePaths = dataFilePaths;
+        this.fileSizes = fileSizes;
         this.sqlQuery = sqlQuery;
         this.storageConfig = storageConfig;
     }
@@ -44,6 +47,11 @@ public class ExternalScanContext {
     /** Pruned list of data file paths (e.g., s3://bucket/data/file.parquet). */
     public List<String> getDataFilePaths() {
         return dataFilePaths;
+    }
+
+    /** File sizes in bytes, parallel to dataFilePaths. */
+    public long[] getFileSizes() {
+        return fileSizes;
     }
 
     /** SQL query string for the target execution engine. */

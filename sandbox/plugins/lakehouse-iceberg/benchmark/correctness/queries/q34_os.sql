@@ -1,0 +1,1 @@
+SELECT url, COUNT(*) AS c FROM hits GROUP BY url ORDER BY c DESC LIMIT 10;

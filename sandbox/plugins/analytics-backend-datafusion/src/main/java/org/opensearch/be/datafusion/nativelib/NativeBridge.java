@@ -50,6 +50,7 @@ public final class NativeBridge {
     private static final MethodHandle STREAM_GET_SCHEMA;
     private static final MethodHandle STREAM_NEXT;
     private static final MethodHandle STREAM_CLOSE;
+    private static final MethodHandle EXECUTE_ICEBERG_QUERY;
     private static final MethodHandle SQL_TO_SUBSTRAIT;
 
     static {
@@ -120,6 +121,28 @@ public final class NativeBridge {
         );
 
         STREAM_CLOSE = linker.downcallHandle(lib.find("df_stream_close").orElseThrow(), FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG));
+
+        // i64 df_execute_iceberg_query(s3_region, s3_region_len, s3_bucket, s3_bucket_len,
+        //   s3_access_key, s3_access_key_len, s3_secret_key, s3_secret_key_len,
+        //   s3_session_token, s3_session_token_len, s3_endpoint, s3_endpoint_len,
+        //   file_paths_ptr, file_paths_lens, file_sizes, files_count,
+        //   table_name, table_name_len, sql_query, sql_query_len, runtime_ptr) -> i64
+        EXECUTE_ICEBERG_QUERY = linker.downcallHandle(
+            lib.find("df_execute_iceberg_query").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_region
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_bucket
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_access_key
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_secret_key
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_session_token
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_endpoint
+                ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,  // files
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // table_name
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // sql_query
+                ValueLayout.JAVA_LONG                          // runtime_ptr
+            )
+        );
 
         // i64 df_sql_to_substrait(shard_ptr, table_ptr, table_len, sql_ptr, sql_len, runtime_ptr, out_ptr, out_cap, out_len)
         SQL_TO_SUBSTRAIT = linker.downcallHandle(
@@ -272,11 +295,12 @@ public final class NativeBridge {
         }
     }
 
-    // ---- Iceberg / S3 query execution (stub — FFM export not yet wired) ----
+    // ---- Iceberg / S3 query execution ----
 
     /**
-     * Executes a SQL query against S3-backed Parquet files via DataFusion.
-     * TODO: Wire FFM export once df_execute_iceberg_query is exposed in the native lib.
+     * Executes a SQL query against S3-backed (or local file://) Parquet files via DataFusion.
+     * Marshals all arguments to native memory and calls {@code df_execute_iceberg_query}.
+     * Returns a stream pointer via the listener on success.
      */
     public static void executeIcebergQueryAsync(
         String s3Region,
@@ -292,8 +316,44 @@ public final class NativeBridge {
         long runtimePtr,
         ActionListener<Long> listener
     ) {
-        listener.onFailure(new UnsupportedOperationException(
-            "executeIcebergQueryAsync not yet wired via FFM — native export df_execute_iceberg_query pending"));
+        try {
+            NativeHandle.validatePointer(runtimePtr, "runtime");
+        } catch (Exception e) {
+            listener.onFailure(e);
+            return;
+        }
+        try (var call = new NativeCall()) {
+            var region = call.str(s3Region != null ? s3Region : "");
+            var bucket = call.str(s3Bucket != null ? s3Bucket : "");
+            var accessKey = call.str(s3AccessKeyId != null ? s3AccessKeyId : "");
+            var secretKey = call.str(s3SecretAccessKey != null ? s3SecretAccessKey : "");
+            var sessionToken = call.str(s3SessionToken != null ? s3SessionToken : "");
+            var endpoint = call.str(s3Endpoint != null ? s3Endpoint : "");
+            var paths = call.strArray(filePaths);
+            var sizes = call.buf(fileSizes.length * Long.BYTES);
+            for (int i = 0; i < fileSizes.length; i++) {
+                sizes.setAtIndex(ValueLayout.JAVA_LONG, i, fileSizes[i]);
+            }
+            var table = call.str(tableName);
+            var sql = call.str(sqlQuery);
+
+            long result = call.invoke(
+                EXECUTE_ICEBERG_QUERY,
+                region.segment(), region.len(),
+                bucket.segment(), bucket.len(),
+                accessKey.segment(), accessKey.len(),
+                secretKey.segment(), secretKey.len(),
+                sessionToken.segment(), sessionToken.len(),
+                endpoint.segment(), endpoint.len(),
+                paths.ptrs(), paths.lens(), sizes, paths.count(),
+                table.segment(), table.len(),
+                sql.segment(), sql.len(),
+                runtimePtr
+            );
+            listener.onResponse(result);
+        } catch (Throwable t) {
+            listener.onFailure(t instanceof Exception ? (Exception) t : new RuntimeException(t));
+        }
     }
 
     public static void cacheManagerAddFiles(long runtimePtr, String[] filePaths) {}

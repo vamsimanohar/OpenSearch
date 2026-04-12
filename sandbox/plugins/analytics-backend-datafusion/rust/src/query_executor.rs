@@ -70,7 +70,7 @@ pub async fn execute_query(
     // Build a fresh session state per query. TODO : Tune this during planning per query
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = false;
-    config.options_mut().execution.target_partitions = 4;
+    config.options_mut().execution.target_partitions = num_cpus::get();
     config.options_mut().execution.batch_size = 8192;
 
     let state = SessionStateBuilder::new()
@@ -126,10 +126,14 @@ pub async fn execute_query(
     // Wrap in CrossRtStream — CPU work runs on DedicatedExecutor
     let cross_rt_stream =
         CrossRtStream::new_with_df_error_stream(df_stream, cpu_executor);
-    let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-        cross_rt_stream.schema(),
-        cross_rt_stream,
-    );
+    let wrapped = crate::api::MemoryTrackingStream {
+        inner: datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+            cross_rt_stream.schema(),
+            cross_rt_stream,
+        ),
+        memory_pool: runtime.runtime_env.memory_pool.clone(),
+        peak_memory: std::sync::atomic::AtomicUsize::new(runtime.runtime_env.memory_pool.reserved()),
+    };
 
     Ok(Box::into_raw(Box::new(wrapped)) as i64)
 }
