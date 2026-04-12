@@ -63,7 +63,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
     private static final Logger logger = LogManager.getLogger(DataFusionPlugin.class);
 
-    private static final long DEFAULT_MEMORY_POOL_LIMIT = 32L * 1024 * 1024 * 1024; // 32GB default
+    private static final long DEFAULT_MEMORY_POOL_LIMIT = 0L; // 0 = unlimited (GreedyMemoryPool(MAX))
 
     /** Memory pool limit for the DataFusion runtime (Rust heap, not JVM heap). */
     public static final Setting<Long> DATAFUSION_MEMORY_POOL_LIMIT = Setting.longSetting(
@@ -74,13 +74,13 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
     );
 
     /**
-     * Memory pool type: "greedy" (default) or "fair_spill".
-     * Greedy = first-come-first-served, fast single-query perf.
-     * FairSpill = fair sharing across operators, slower but safer for concurrent queries.
+     * Memory pool type: "fair_spill" (default) or "greedy".
+     * FairSpill = fair sharing across operators, spills to disk when exceeded. Best for production.
+     * Greedy = first-come-first-served, slightly faster for single isolated queries.
      */
     public static final Setting<String> DATAFUSION_MEMORY_POOL_TYPE = Setting.simpleString(
         "datafusion.memory_pool_type",
-        "greedy",
+        "fair_spill",
         Setting.Property.NodeScope
     );
 
@@ -117,7 +117,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
             if (sharedDataFusionService == null) {
                 long memPool = getConfiguredLong("datafusion_memory_pool_limit_bytes", DEFAULT_MEMORY_POOL_LIMIT);
                 long spillLimit = getConfiguredLong("datafusion_spill_memory_limit_bytes", DEFAULT_SPILL_LIMIT);
-                String poolType = System.getProperty("datafusion_memory_pool_type", "greedy");
+                String poolType = System.getProperty("datafusion_memory_pool_type", "fair_spill");
                 long effectiveLimit = "fair_spill".equals(poolType) && memPool > 0 ? -memPool : memPool;
                 String spillDir = System.getProperty("java.io.tmpdir");
                 sharedDataFusionService = DataFusionService.builder()
