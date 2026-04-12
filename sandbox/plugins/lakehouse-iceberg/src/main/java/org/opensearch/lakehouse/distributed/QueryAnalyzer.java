@@ -8,11 +8,15 @@
 
 package org.opensearch.lakehouse.distributed;
 
+import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.Sort;
+import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.sql.SqlKind;
+
+import java.util.List;
 
 /**
  * Inspects a Calcite {@link RelNode} tree to determine the appropriate {@link MergeStrategy}
@@ -41,28 +45,39 @@ public final class QueryAnalyzer {
      * @return the merge strategy to use for distributed execution
      */
     public static MergeStrategy analyze(RelNode relNode) {
+        return analyzeDetailed(relNode).strategy;
+    }
+
+    /**
+     * Analyzes the RelNode tree and returns a detailed result including merge strategy,
+     * aggregate function kinds (for GLOBAL_MERGE), and sort/limit info (for TOPK_MERGE).
+     *
+     * @param relNode the root of the Calcite logical plan
+     * @return the detailed analysis result
+     */
+    public static AnalysisResult analyzeDetailed(RelNode relNode) {
         AggregateInfo aggInfo = findAggregate(relNode);
         SortInfo sortInfo = findSort(relNode);
 
         if (aggInfo != null) {
-            // Has GROUP BY → SINGLE_NODE (can't trivially merge grouped aggregates)
             if (!aggInfo.aggregate.getGroupSet().isEmpty()) {
-                return MergeStrategy.SINGLE_NODE;
+                return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
-            // Has DISTINCT or AVG → SINGLE_NODE
             if (hasDistinctOrAvg(aggInfo.aggregate)) {
-                return MergeStrategy.SINGLE_NODE;
+                return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
-            // Global aggregation with only SUM/COUNT/MIN/MAX → GLOBAL_MERGE
-            return MergeStrategy.GLOBAL_MERGE;
+            SqlKind[] aggKinds = extractAggKinds(aggInfo.aggregate);
+            return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0);
         }
 
         if (sortInfo != null && sortInfo.sort.fetch != null) {
-            // ORDER BY with LIMIT → TOPK_MERGE
-            return MergeStrategy.TOPK_MERGE;
+            int[] sortColumns = extractSortColumns(sortInfo.sort);
+            boolean[] sortAsc = extractSortDirections(sortInfo.sort);
+            int limit = extractLimit(sortInfo.sort);
+            return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit);
         }
 
-        return MergeStrategy.CONCAT;
+        return new AnalysisResult(MergeStrategy.CONCAT);
     }
 
     /**
@@ -125,6 +140,53 @@ public final class QueryAnalyzer {
     }
 
     /**
+     * Extracts aggregate function kinds from the Aggregate node.
+     */
+    static SqlKind[] extractAggKinds(Aggregate aggregate) {
+        List<AggregateCall> calls = aggregate.getAggCallList();
+        SqlKind[] kinds = new SqlKind[calls.size()];
+        for (int i = 0; i < calls.size(); i++) {
+            kinds[i] = calls.get(i).getAggregation().getKind();
+        }
+        return kinds;
+    }
+
+    /**
+     * Extracts sort column indices from the Sort node's collation.
+     */
+    static int[] extractSortColumns(Sort sort) {
+        List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
+        int[] cols = new int[collations.size()];
+        for (int i = 0; i < collations.size(); i++) {
+            cols[i] = collations.get(i).getFieldIndex();
+        }
+        return cols;
+    }
+
+    /**
+     * Extracts sort directions (true=ascending) from the Sort node's collation.
+     */
+    static boolean[] extractSortDirections(Sort sort) {
+        List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
+        boolean[] asc = new boolean[collations.size()];
+        for (int i = 0; i < collations.size(); i++) {
+            asc[i] = collations.get(i).getDirection() == RelFieldCollation.Direction.ASCENDING;
+        }
+        return asc;
+    }
+
+    /**
+     * Extracts the LIMIT value from the Sort node's fetch expression.
+     * Returns 0 if fetch is null or not a literal.
+     */
+    static int extractLimit(Sort sort) {
+        if (sort.fetch instanceof RexLiteral) {
+            return ((RexLiteral) sort.fetch).getValueAs(Integer.class);
+        }
+        return 0;
+    }
+
+    /**
      * Holds a reference to a discovered Aggregate node.
      */
     static final class AggregateInfo {
@@ -143,6 +205,29 @@ public final class QueryAnalyzer {
 
         SortInfo(Sort sort) {
             this.sort = sort;
+        }
+    }
+
+    /**
+     * Result of plan analysis containing the merge strategy and associated metadata.
+     */
+    static final class AnalysisResult {
+        final MergeStrategy strategy;
+        final SqlKind[] aggKinds;
+        final int[] sortColumns;
+        final boolean[] sortAsc;
+        final int limit;
+
+        AnalysisResult(MergeStrategy strategy) {
+            this(strategy, null, null, null, 0);
+        }
+
+        AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit) {
+            this.strategy = strategy;
+            this.aggKinds = aggKinds;
+            this.sortColumns = sortColumns;
+            this.sortAsc = sortAsc;
+            this.limit = limit;
         }
     }
 }

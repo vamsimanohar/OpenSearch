@@ -8,6 +8,8 @@
 
 package org.opensearch.lakehouse.distributed;
 
+import org.apache.calcite.sql.SqlKind;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -48,6 +50,28 @@ public final class ResultMerger {
         boolean[] sortAsc,
         int limit
     ) {
+        return merge(responses, strategy, sortColumns, sortAsc, limit, null);
+    }
+
+    /**
+     * Merges multiple worker responses with aggregate function metadata.
+     *
+     * @param responses    the worker responses to merge
+     * @param strategy     the merge strategy
+     * @param sortColumns  column indices to sort by (for TOPK_MERGE), may be null
+     * @param sortAsc      ascending flag for each sort column (for TOPK_MERGE), may be null
+     * @param limit        row limit (for TOPK_MERGE), ignored for other strategies
+     * @param aggKinds     aggregate function kinds per column (for GLOBAL_MERGE), may be null
+     * @return the merged response
+     */
+    public static WorkerQueryResponse merge(
+        List<WorkerQueryResponse> responses,
+        MergeStrategy strategy,
+        int[] sortColumns,
+        boolean[] sortAsc,
+        int limit,
+        SqlKind[] aggKinds
+    ) {
         List<WorkerQueryResponse> nonEmpty = filterNonEmpty(responses);
         if (nonEmpty.isEmpty()) {
             return emptyResponse(responses);
@@ -55,7 +79,7 @@ public final class ResultMerger {
 
         return switch (strategy) {
             case CONCAT -> mergeConcat(nonEmpty);
-            case GLOBAL_MERGE -> mergeGlobal(nonEmpty);
+            case GLOBAL_MERGE -> mergeGlobal(nonEmpty, aggKinds);
             case TOPK_MERGE -> mergeTopK(nonEmpty, sortColumns, sortAsc, limit);
             case SINGLE_NODE -> nonEmpty.get(0);
         };
@@ -91,14 +115,13 @@ public final class ResultMerger {
     /**
      * Re-aggregates single-row global results. Assumes each worker returns exactly one row.
      * <p>
-     * For numeric columns: sums all values (works for COUNT and SUM).
-     * For MIN/MAX: the coordinator should use the appropriate column type,
-     * but since we don't know the aggregate function from the response alone,
-     * we sum by default. The caller must handle MIN/MAX disambiguation if needed.
-     * <p>
-     * For Phase 1, this handles COUNT(*) and SUM correctly by summing partial results.
+     * Uses aggregate function kinds to determine merge operation per column:
+     * SUM/COUNT → sum, MIN → min, MAX → max. Falls back to sum if aggKinds is null.
+     *
+     * @param responses the worker responses (one row each)
+     * @param aggKinds  aggregate function kinds per column, may be null (defaults to SUM)
      */
-    static WorkerQueryResponse mergeGlobal(List<WorkerQueryResponse> responses) {
+    static WorkerQueryResponse mergeGlobal(List<WorkerQueryResponse> responses, SqlKind[] aggKinds) {
         WorkerQueryResponse first = responses.get(0);
         List<String> columnNames = first.getColumnNames();
         List<String> columnTypes = first.getColumnTypes();
@@ -106,7 +129,14 @@ public final class ResultMerger {
 
         Object[][] merged = new Object[numCols][1];
         for (int col = 0; col < numCols; col++) {
-            merged[col][0] = sumColumn(responses, col);
+            SqlKind kind = (aggKinds != null && col < aggKinds.length) ? aggKinds[col] : SqlKind.SUM;
+            if (kind == SqlKind.MIN) {
+                merged[col][0] = minColumn(responses, col);
+            } else if (kind == SqlKind.MAX) {
+                merged[col][0] = maxColumn(responses, col);
+            } else {
+                merged[col][0] = sumColumn(responses, col);
+            }
         }
 
         return new WorkerQueryResponse(columnNames, columnTypes, 1, merged);
@@ -144,7 +174,7 @@ public final class ResultMerger {
                     sum += ((Number) r.getColumnData()[colIdx][0]).intValue();
                 }
             }
-            return (int) sum;
+            return sum;
         } else if (sample instanceof Double) {
             double sum = 0.0;
             for (WorkerQueryResponse r : responses) {
@@ -164,6 +194,42 @@ public final class ResultMerger {
         }
         // Non-numeric — return first non-null (for MIN/MAX of strings, etc.)
         return sample;
+    }
+
+    /**
+     * Finds the minimum value of a column across all worker responses (row 0 from each).
+     * Supports Comparable types (Long, Integer, Double, String, etc.).
+     */
+    @SuppressWarnings("unchecked")
+    static Object minColumn(List<WorkerQueryResponse> responses, int colIdx) {
+        Comparable<Object> min = null;
+        for (WorkerQueryResponse r : responses) {
+            if (r.getRowCount() > 0 && r.getColumnData()[colIdx][0] != null) {
+                Comparable<Object> val = (Comparable<Object>) r.getColumnData()[colIdx][0];
+                if (min == null || val.compareTo((Object) min) < 0) {
+                    min = val;
+                }
+            }
+        }
+        return min;
+    }
+
+    /**
+     * Finds the maximum value of a column across all worker responses (row 0 from each).
+     * Supports Comparable types (Long, Integer, Double, String, etc.).
+     */
+    @SuppressWarnings("unchecked")
+    static Object maxColumn(List<WorkerQueryResponse> responses, int colIdx) {
+        Comparable<Object> max = null;
+        for (WorkerQueryResponse r : responses) {
+            if (r.getRowCount() > 0 && r.getColumnData()[colIdx][0] != null) {
+                Comparable<Object> val = (Comparable<Object>) r.getColumnData()[colIdx][0];
+                if (max == null || val.compareTo((Object) max) > 0) {
+                    max = val;
+                }
+            }
+        }
+        return max;
     }
 
     /**

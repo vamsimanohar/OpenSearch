@@ -31,20 +31,20 @@ public class ExternalScanContextDistributedTests extends OpenSearchTestCase {
         assertNull(ctx.getPreComputedResults());
     }
 
-    public void testSetAndGetPreComputedResults() {
+    public void testConstructorWithPreComputedResults() {
+        List<Object[]> results = Arrays.asList(
+            new Object[]{1, "alice"},
+            new Object[]{2, "bob"}
+        );
+
         ExternalScanContext ctx = new ExternalScanContext(
             "test_table",
             List.of("s3://bucket/file.parquet"),
             new long[]{1024L},
             "SELECT * FROM test_table",
-            Map.of()
+            Map.of(),
+            results
         );
-
-        List<Object[]> results = Arrays.asList(
-            new Object[]{1, "alice"},
-            new Object[]{2, "bob"}
-        );
-        ctx.setPreComputedResults(results);
 
         assertNotNull(ctx.getPreComputedResults());
         int count = 0;
@@ -54,19 +54,15 @@ public class ExternalScanContextDistributedTests extends OpenSearchTestCase {
         assertEquals(2, count);
     }
 
-    public void testPreComputedResultsCanBeCleared() {
+    public void testConstructorWithNullPreComputedResults() {
         ExternalScanContext ctx = new ExternalScanContext(
             "test_table",
             List.of(),
             new long[0],
             "SELECT 1",
-            Map.of()
+            Map.of(),
+            null
         );
-
-        ctx.setPreComputedResults(Arrays.<Object[]>asList(new Object[]{"x"}));
-        assertNotNull(ctx.getPreComputedResults());
-
-        ctx.setPreComputedResults(null);
         assertNull(ctx.getPreComputedResults());
     }
 
@@ -76,15 +72,15 @@ public class ExternalScanContextDistributedTests extends OpenSearchTestCase {
             List.of("file1.parquet", "file2.parquet"),
             new long[]{100L, 200L},
             "SELECT COUNT(*) FROM my_table",
-            Map.of("s3Region", "us-east-1")
+            Map.of("s3Region", "us-east-1"),
+            Arrays.<Object[]>asList(new Object[]{42L})
         );
-
-        ctx.setPreComputedResults(Arrays.<Object[]>asList(new Object[]{42L}));
 
         assertEquals("my_table", ctx.getTableName());
         assertEquals(2, ctx.getDataFilePaths().size());
         assertEquals(100L, ctx.getFileSizes()[0]);
         assertEquals("SELECT COUNT(*) FROM my_table", ctx.getSqlQuery());
         assertEquals("us-east-1", ctx.getStorageConfig().get("s3Region"));
+        assertNotNull(ctx.getPreComputedResults());
     }
 }

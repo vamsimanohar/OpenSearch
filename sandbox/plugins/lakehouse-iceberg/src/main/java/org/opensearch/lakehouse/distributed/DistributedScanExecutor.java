@@ -106,8 +106,8 @@ public class DistributedScanExecutor {
             return null;
         }
 
-        MergeStrategy strategy = QueryAnalyzer.analyze(relNode);
-        if (strategy == MergeStrategy.SINGLE_NODE) {
+        QueryAnalyzer.AnalysisResult analysis = QueryAnalyzer.analyzeDetailed(relNode);
+        if (analysis.strategy == MergeStrategy.SINGLE_NODE) {
             logger.debug("[DistributedScan] Query requires SINGLE_NODE execution, falling back");
             return null;
         }
@@ -115,7 +115,7 @@ public class DistributedScanExecutor {
         logger.info(
             "[DistributedScan] Distributing query across {} workers, strategy={}, files={}",
             workers.size(),
-            strategy,
+            analysis.strategy,
             filePaths.size()
         );
 
@@ -125,9 +125,10 @@ public class DistributedScanExecutor {
         // Dispatch requests and collect responses
         List<WorkerQueryResponse> responses = dispatchAndCollect(workers, assignments, sqlQuery, storageConfig, tableName);
 
-        // Merge results
-        // For TOPK_MERGE we would need sort columns from the RelNode — Phase 1 uses defaults
-        WorkerQueryResponse merged = ResultMerger.merge(responses, strategy, null, null, 0);
+        // Merge results using analysis metadata (agg kinds for GLOBAL_MERGE, sort/limit for TOPK_MERGE)
+        WorkerQueryResponse merged = ResultMerger.merge(
+            responses, analysis.strategy, analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
+        );
 
         // Convert to row-oriented
         return ResultSerializer.toRows(merged);
@@ -158,6 +159,8 @@ public class DistributedScanExecutor {
             assignmentCount
         );
 
+        String localNodeId = clusterService.state().nodes().getLocalNodeId();
+
         for (int i = 0; i < assignmentCount; i++) {
             FilePartitioner.FileAssignment assignment = assignments.get(i);
             DiscoveryNode targetNode = workers.get(i % workers.size());
@@ -178,7 +181,6 @@ public class DistributedScanExecutor {
                 tableName
             );
 
-            String localNodeId = clusterService.state().nodes().getLocalNodeId();
             if (targetNode.getId().equals(localNodeId)) {
                 dispatchLocal(request, groupListener);
             } else {
@@ -189,6 +191,13 @@ public class DistributedScanExecutor {
         try {
             Collection<WorkerQueryResponse> collected = future.get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             return new ArrayList<>(collected);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Distributed query execution interrupted", e);
+        } catch (java.util.concurrent.TimeoutException e) {
+            throw new RuntimeException(
+                "Distributed query execution timed out after " + DEFAULT_TIMEOUT_SECONDS + " seconds", e
+            );
         } catch (Exception e) {
             throw new RuntimeException("Distributed query execution failed", e);
         }

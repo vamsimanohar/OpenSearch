@@ -20,8 +20,10 @@ import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rel.type.RelDataTypeSystem;
+import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlAggFunction;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.BasicSqlType;
 import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
@@ -29,6 +31,7 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.opensearch.test.OpenSearchTestCase;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 import static org.mockito.Mockito.mock;
@@ -154,6 +157,93 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.GLOBAL_MERGE, QueryAnalyzer.analyze(agg));
     }
 
+    // --- analyzeDetailed tests ---
+
+    public void testAnalyzeDetailedGlobalMergeIncludesAggKinds() {
+        AggregateCall minCall = makeAggCall(SqlStdOperatorTable.MIN, false);
+        AggregateCall maxCall = makeAggCall(SqlStdOperatorTable.MAX, false);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(minCall, maxCall));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.GLOBAL_MERGE, result.strategy);
+        assertNotNull(result.aggKinds);
+        assertEquals(2, result.aggKinds.length);
+        assertEquals(SqlKind.MIN, result.aggKinds[0]);
+        assertEquals(SqlKind.MAX, result.aggKinds[1]);
+    }
+
+    public void testAnalyzeDetailedTopKMergeIncludesSortAndLimit() {
+        Sort sort = makeSort(true, true);
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(sort);
+
+        assertEquals(MergeStrategy.TOPK_MERGE, result.strategy);
+        assertNotNull(result.sortColumns);
+        assertEquals(1, result.sortColumns.length);
+        assertEquals(0, result.sortColumns[0]);
+        assertNotNull(result.sortAsc);
+        assertTrue(result.sortAsc[0]);
+    }
+
+    public void testAnalyzeDetailedConcatHasNoMetadata() {
+        RelNode scan = mockSimpleNode();
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(scan);
+
+        assertEquals(MergeStrategy.CONCAT, result.strategy);
+        assertNull(result.aggKinds);
+        assertNull(result.sortColumns);
+    }
+
+    public void testAnalyzeDetailedSingleNodeHasNoMetadata() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.SINGLE_NODE, result.strategy);
+        assertNull(result.aggKinds);
+    }
+
+    public void testExtractAggKinds() {
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
+        AggregateCall minCall = makeAggCall(SqlStdOperatorTable.MIN, false);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, sumCall, minCall));
+
+        SqlKind[] kinds = QueryAnalyzer.extractAggKinds(agg);
+
+        assertEquals(3, kinds.length);
+        assertEquals(SqlKind.COUNT, kinds[0]);
+        assertEquals(SqlKind.SUM, kinds[1]);
+        assertEquals(SqlKind.MIN, kinds[2]);
+    }
+
+    public void testExtractSortColumns() {
+        Sort sort = makeSort(true, true);
+        int[] cols = QueryAnalyzer.extractSortColumns(sort);
+        assertEquals(1, cols.length);
+        assertEquals(0, cols[0]);
+    }
+
+    public void testExtractSortDirections() {
+        Sort sort = makeSort(true, true);
+        boolean[] dirs = QueryAnalyzer.extractSortDirections(sort);
+        assertEquals(1, dirs.length);
+        assertTrue(dirs[0]);
+    }
+
+    public void testExtractLimitFromRexLiteral() {
+        Sort sort = makeSortWithLimit(10);
+        assertEquals(10, QueryAnalyzer.extractLimit(sort));
+    }
+
+    public void testExtractLimitFromNonLiteralReturnsZero() {
+        Sort sort = makeSort(true, true);
+        // makeSort uses mock(RexNode.class) which is not RexLiteral
+        assertEquals(0, QueryAnalyzer.extractLimit(sort));
+    }
+
     // --- Helper methods ---
 
     private Aggregate mockAggregate(ImmutableBitSet groupSet, List<AggregateCall> aggCalls) {
@@ -218,5 +308,23 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         RelNode node = mock(RelNode.class);
         when(node.getInputs()).thenReturn(List.of(input));
         return node;
+    }
+
+    private Sort makeSortWithLimit(int limitValue) {
+        RelFieldCollation fieldCollation = new RelFieldCollation(0, RelFieldCollation.Direction.ASCENDING);
+        RelCollation collation = RelCollations.of(fieldCollation);
+
+        RelDataTypeFactory typeFactory = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
+        org.apache.calcite.rex.RexBuilder rexBuilder = new org.apache.calcite.rex.RexBuilder(typeFactory);
+        RexLiteral fetchLiteral = rexBuilder.makeExactLiteral(BigDecimal.valueOf(limitValue),
+            typeFactory.createSqlType(SqlTypeName.INTEGER));
+
+        RelOptCluster cluster = mock(RelOptCluster.class);
+        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
+        RelNode input = mockSimpleNode();
+        RelDataType rowType = mock(RelDataType.class);
+        when(input.getRowType()).thenReturn(rowType);
+
+        return new StubSort(cluster, traitSet, input, collation, fetchLiteral);
     }
 }

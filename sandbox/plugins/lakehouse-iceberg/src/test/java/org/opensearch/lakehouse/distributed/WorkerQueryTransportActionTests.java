@@ -155,7 +155,8 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
 
         Object[] sanitized = WorkerQueryTransportAction.sanitizeRow(row);
 
-        assertSame(row, sanitized); // in-place mutation
+        assertNotSame(row, sanitized); // defensive copy, not in-place
+        assertSame(dt, row[1]); // original not mutated
         assertEquals(1, sanitized[0]);
         assertEquals("2013-07-15T10:30", sanitized[1]);
         assertEquals("text", sanitized[2]);
@@ -165,21 +166,23 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         LocalDate date = LocalDate.of(2013, 7, 15);
         Object[] row = new Object[]{date};
 
-        WorkerQueryTransportAction.sanitizeRow(row);
+        Object[] sanitized = WorkerQueryTransportAction.sanitizeRow(row);
 
-        assertEquals("2013-07-15", row[0]);
+        assertSame(date, row[0]); // original not mutated
+        assertEquals("2013-07-15", sanitized[0]);
     }
 
     public void testSanitizeRowPreservesNullsAndPrimitives() {
         Object[] row = new Object[]{null, 42L, "hello", 3.14, true};
 
-        WorkerQueryTransportAction.sanitizeRow(row);
+        Object[] sanitized = WorkerQueryTransportAction.sanitizeRow(row);
 
-        assertNull(row[0]);
-        assertEquals(42L, row[1]);
-        assertEquals("hello", row[2]);
-        assertEquals(3.14, row[3]);
-        assertEquals(true, row[4]);
+        assertNotSame(row, sanitized);
+        assertNull(sanitized[0]);
+        assertEquals(42L, sanitized[1]);
+        assertEquals("hello", sanitized[2]);
+        assertEquals(3.14, sanitized[3]);
+        assertEquals(true, sanitized[4]);
     }
 
     public void testBuildResponseSanitizesTimestamps() {

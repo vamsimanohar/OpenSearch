@@ -62,6 +62,8 @@ public class NodeDiscovery {
             }
             return Collections.emptyList();
         }
+        // Shuffle to avoid always assigning the largest files to the same node
+        Collections.shuffle(eligible);
         return Collections.unmodifiableList(eligible);
     }
 }

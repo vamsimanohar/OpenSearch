@@ -198,9 +198,7 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
                 );
                 if (distributedResult != null) {
                     logger.info("[LakehousePlugin] Using distributed execution across multiple workers");
-                    ExternalScanContext ctx = new ExternalScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig);
-                    ctx.setPreComputedResults(distributedResult);
-                    return ctx;
+                    return new ExternalScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig, distributedResult);
                 }
             } catch (Exception e) {
                 logger.error("[LakehousePlugin] Distributed execution failed, query will not be retried", e);

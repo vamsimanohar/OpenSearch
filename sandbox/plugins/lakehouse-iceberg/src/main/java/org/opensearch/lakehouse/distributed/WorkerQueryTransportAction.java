@@ -322,15 +322,17 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
     /**
      * Converts non-serializable types to types supported by StreamOutput.writeGenericValue().
      * LocalDateTime and LocalDate from DataFusion are converted to their ISO-8601 string form.
+     * Returns a defensive copy to avoid corrupting upstream iterator state.
      */
     static Object[] sanitizeRow(Object[] row) {
-        for (int i = 0; i < row.length; i++) {
-            if (row[i] instanceof LocalDateTime) {
-                row[i] = row[i].toString();
-            } else if (row[i] instanceof LocalDate) {
-                row[i] = row[i].toString();
+        Object[] copy = row.clone();
+        for (int i = 0; i < copy.length; i++) {
+            if (copy[i] instanceof LocalDateTime) {
+                copy[i] = copy[i].toString();
+            } else if (copy[i] instanceof LocalDate) {
+                copy[i] = copy[i].toString();
             }
         }
-        return row;
+        return copy;
     }
 }

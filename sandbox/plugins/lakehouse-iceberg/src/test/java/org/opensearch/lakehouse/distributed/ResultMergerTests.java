@@ -8,6 +8,7 @@
 
 package org.opensearch.lakehouse.distributed;
 
+import org.apache.calcite.sql.SqlKind;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.ArrayList;
@@ -74,7 +75,8 @@ public class ResultMergerTests extends OpenSearchTestCase {
         WorkerQueryResponse merged = ResultMerger.merge(List.of(r1, r2), MergeStrategy.GLOBAL_MERGE, null, null, 0);
 
         assertEquals(1, merged.getRowCount());
-        assertEquals(30, merged.getColumnData()[0][0]);
+        // Integer sums are promoted to Long to avoid overflow truncation
+        assertEquals(30L, merged.getColumnData()[0][0]);
     }
 
     public void testGlobalMergeSumDoubles() {
@@ -147,6 +149,145 @@ public class ResultMergerTests extends OpenSearchTestCase {
 
         assertEquals(1, merged.getRowCount());
         assertEquals("hello", merged.getColumnData()[0][0]);
+    }
+
+    // --- GLOBAL_MERGE with aggKinds (MIN/MAX) tests ---
+
+    public void testGlobalMergeMinColumn() {
+        // MIN(eventDate) across 3 workers
+        WorkerQueryResponse r1 = makeResponse(List.of("min_date"), List.of("String"), new Object[][]{{"2013-07-05"}}, 1);
+        WorkerQueryResponse r2 = makeResponse(List.of("min_date"), List.of("String"), new Object[][]{{"2013-07-01"}}, 1);
+        WorkerQueryResponse r3 = makeResponse(List.of("min_date"), List.of("String"), new Object[][]{{"2013-07-10"}}, 1);
+
+        SqlKind[] aggKinds = new SqlKind[]{SqlKind.MIN};
+        WorkerQueryResponse merged = ResultMerger.merge(
+            List.of(r1, r2, r3), MergeStrategy.GLOBAL_MERGE, null, null, 0, aggKinds
+        );
+
+        assertEquals(1, merged.getRowCount());
+        assertEquals("2013-07-01", merged.getColumnData()[0][0]);
+    }
+
+    public void testGlobalMergeMaxColumn() {
+        // MAX(eventDate) across 3 workers
+        WorkerQueryResponse r1 = makeResponse(List.of("max_date"), List.of("String"), new Object[][]{{"2013-07-20"}}, 1);
+        WorkerQueryResponse r2 = makeResponse(List.of("max_date"), List.of("String"), new Object[][]{{"2013-07-30"}}, 1);
+        WorkerQueryResponse r3 = makeResponse(List.of("max_date"), List.of("String"), new Object[][]{{"2013-07-15"}}, 1);
+
+        SqlKind[] aggKinds = new SqlKind[]{SqlKind.MAX};
+        WorkerQueryResponse merged = ResultMerger.merge(
+            List.of(r1, r2, r3), MergeStrategy.GLOBAL_MERGE, null, null, 0, aggKinds
+        );
+
+        assertEquals(1, merged.getRowCount());
+        assertEquals("2013-07-30", merged.getColumnData()[0][0]);
+    }
+
+    public void testGlobalMergeMinMaxMixed() {
+        // Q7: SELECT MIN(eventdate), MAX(eventdate)
+        WorkerQueryResponse r1 = makeResponse(
+            List.of("min_date", "max_date"), List.of("String", "String"),
+            new Object[][]{{"2013-07-05"}, {"2013-07-20"}}, 1
+        );
+        WorkerQueryResponse r2 = makeResponse(
+            List.of("min_date", "max_date"), List.of("String", "String"),
+            new Object[][]{{"2013-07-01"}, {"2013-07-30"}}, 1
+        );
+
+        SqlKind[] aggKinds = new SqlKind[]{SqlKind.MIN, SqlKind.MAX};
+        WorkerQueryResponse merged = ResultMerger.merge(
+            List.of(r1, r2), MergeStrategy.GLOBAL_MERGE, null, null, 0, aggKinds
+        );
+
+        assertEquals(1, merged.getRowCount());
+        assertEquals("2013-07-01", merged.getColumnData()[0][0]);
+        assertEquals("2013-07-30", merged.getColumnData()[1][0]);
+    }
+
+    public void testGlobalMergeMinNumeric() {
+        WorkerQueryResponse r1 = makeResponse(List.of("val"), List.of("Long"), new Object[][]{{100L}}, 1);
+        WorkerQueryResponse r2 = makeResponse(List.of("val"), List.of("Long"), new Object[][]{{50L}}, 1);
+
+        SqlKind[] aggKinds = new SqlKind[]{SqlKind.MIN};
+        WorkerQueryResponse merged = ResultMerger.merge(
+            List.of(r1, r2), MergeStrategy.GLOBAL_MERGE, null, null, 0, aggKinds
+        );
+
+        assertEquals(50L, merged.getColumnData()[0][0]);
+    }
+
+    public void testGlobalMergeMaxNumeric() {
+        WorkerQueryResponse r1 = makeResponse(List.of("val"), List.of("Double"), new Object[][]{{1.5}}, 1);
+        WorkerQueryResponse r2 = makeResponse(List.of("val"), List.of("Double"), new Object[][]{{3.5}}, 1);
+
+        SqlKind[] aggKinds = new SqlKind[]{SqlKind.MAX};
+        WorkerQueryResponse merged = ResultMerger.merge(
+            List.of(r1, r2), MergeStrategy.GLOBAL_MERGE, null, null, 0, aggKinds
+        );
+
+        assertEquals(3.5, merged.getColumnData()[0][0]);
+    }
+
+    public void testGlobalMergeMinWithNulls() {
+        WorkerQueryResponse r1 = makeResponse(List.of("val"), List.of("Long"), new Object[][]{{null}}, 1);
+        WorkerQueryResponse r2 = makeResponse(List.of("val"), List.of("Long"), new Object[][]{{50L}}, 1);
+
+        SqlKind[] aggKinds = new SqlKind[]{SqlKind.MIN};
+        WorkerQueryResponse merged = ResultMerger.merge(
+            List.of(r1, r2), MergeStrategy.GLOBAL_MERGE, null, null, 0, aggKinds
+        );
+
+        assertEquals(50L, merged.getColumnData()[0][0]);
+    }
+
+    public void testGlobalMergeMinAllNullsReturnsNull() {
+        WorkerQueryResponse r1 = makeResponse(List.of("val"), List.of("Long"), new Object[][]{{null}}, 1);
+        WorkerQueryResponse r2 = makeResponse(List.of("val"), List.of("Long"), new Object[][]{{null}}, 1);
+
+        SqlKind[] aggKinds = new SqlKind[]{SqlKind.MIN};
+        WorkerQueryResponse merged = ResultMerger.merge(
+            List.of(r1, r2), MergeStrategy.GLOBAL_MERGE, null, null, 0, aggKinds
+        );
+
+        assertNull(merged.getColumnData()[0][0]);
+    }
+
+    public void testGlobalMergeCountSumMinMaxMixed() {
+        // SELECT COUNT(*), SUM(amount), MIN(date), MAX(date) — real-world pattern
+        WorkerQueryResponse r1 = makeResponse(
+            List.of("cnt", "total", "min_d", "max_d"),
+            List.of("Long", "Double", "String", "String"),
+            new Object[][]{{100L}, {1000.0}, {"2013-07-05"}, {"2013-07-20"}}, 1
+        );
+        WorkerQueryResponse r2 = makeResponse(
+            List.of("cnt", "total", "min_d", "max_d"),
+            List.of("Long", "Double", "String", "String"),
+            new Object[][]{{200L}, {2000.0}, {"2013-07-01"}, {"2013-07-30"}}, 1
+        );
+
+        SqlKind[] aggKinds = new SqlKind[]{SqlKind.COUNT, SqlKind.SUM, SqlKind.MIN, SqlKind.MAX};
+        WorkerQueryResponse merged = ResultMerger.merge(
+            List.of(r1, r2), MergeStrategy.GLOBAL_MERGE, null, null, 0, aggKinds
+        );
+
+        assertEquals(1, merged.getRowCount());
+        assertEquals(300L, merged.getColumnData()[0][0]);
+        assertEquals(3000.0, (double) merged.getColumnData()[1][0], 0.001);
+        assertEquals("2013-07-01", merged.getColumnData()[2][0]);
+        assertEquals("2013-07-30", merged.getColumnData()[3][0]);
+    }
+
+    public void testMinColumnDirectly() {
+        WorkerQueryResponse r1 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{30}}, 1);
+        WorkerQueryResponse r2 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{10}}, 1);
+        WorkerQueryResponse r3 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{20}}, 1);
+        assertEquals(10, ResultMerger.minColumn(List.of(r1, r2, r3), 0));
+    }
+
+    public void testMaxColumnDirectly() {
+        WorkerQueryResponse r1 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{30}}, 1);
+        WorkerQueryResponse r2 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{10}}, 1);
+        assertEquals(30, ResultMerger.maxColumn(List.of(r1, r2), 0));
     }
 
     // --- TOPK_MERGE tests ---
