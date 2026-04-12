@@ -15,10 +15,14 @@ import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.analytics.exec.RemoteQueryBackendHolder;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.lakehouse.LakehouseState;
+import org.opensearch.lakehouse.catalog.AwsCredentials;
+import org.opensearch.lakehouse.catalog.CatalogConfig;
+import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
@@ -28,7 +32,9 @@ import java.security.PrivilegedAction;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Transport action that executes a distributed query fragment on a worker node.
@@ -47,6 +53,8 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
     private static final Logger logger = LogManager.getLogger(WorkerQueryTransportAction.class);
 
     private static volatile AnalyticsSearchBackendPlugin backendProvider;
+
+    private final ClusterService clusterService;
 
     /**
      * Sets the backend provider used to execute queries on worker nodes.
@@ -76,6 +84,7 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
     @Inject
     public WorkerQueryTransportAction(TransportService transportService, ActionFilters actionFilters, ClusterService clusterService) {
         super(WorkerQueryAction.NAME, transportService, actionFilters, WorkerQueryRequest::new, ThreadPool.Names.GENERIC);
+        this.clusterService = clusterService;
         LakehouseState.instance().initDistributedExecutor(transportService, clusterService);
     }
 
@@ -85,12 +94,17 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
         try {
             AnalyticsSearchBackendPlugin provider = resolveBackend();
 
+            // Resolve credentials locally on this worker (via IMDS/STS) instead of
+            // receiving them from the coordinator. Each worker has the same instance
+            // profile, so no secrets need to travel over the wire.
+            Map<String, String> storageConfig = resolveLocalCredentials(request.getStorageConfig());
+
             ExternalScanContext scanContext = new ExternalScanContext(
                 request.getTableName(),
                 request.getFilePaths(),
                 request.getFileSizes(),
                 request.getSqlQuery(),
-                request.getStorageConfig()
+                storageConfig
             );
 
             logger.info(
@@ -113,6 +127,137 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
             logger.error("[WorkerQuery] Execution failed", e);
             listener.onFailure(e);
         }
+    }
+
+    /**
+     * Resolves AWS credentials locally on this worker node using the index settings
+     * from cluster state. The coordinator passes only the index name (no secrets);
+     * each worker independently calls IMDS/STS/DefaultCredentialsProvider.
+     *
+     * @param original the storageConfig from the coordinator (contains region, bucket, indexName)
+     * @return a new map with credentials added
+     */
+    @SuppressWarnings("removal")
+    Map<String, String> resolveLocalCredentials(Map<String, String> original) {
+        Map<String, String> config = new HashMap<>(original);
+        String indexName = config.remove("indexName");
+        if (indexName == null || "true".equals(config.get("localMode"))) {
+            return config;
+        }
+
+        // For "default" auth, Rust's object_store uses IMDS directly on each worker.
+        // No Java credential resolution needed — no secrets on the wire at all.
+        String authType = config.getOrDefault("authType", "default");
+        if ("default".equals(authType)) {
+            logger.debug("[WorkerQuery] auth_type=default for index [{}], Rust will use IMDS directly", indexName);
+            return config;
+        }
+
+        // For "role" and "keys" auth, resolve credentials locally from cluster state.
+        try {
+            IndexMetadata indexMetadata = clusterService.state().metadata().index(indexName);
+            if (indexMetadata == null) {
+                logger.warn("[WorkerQuery] Index [{}] not found in cluster state, skipping credential resolution", indexName);
+                return config;
+            }
+            CatalogConfig catalogConfig = CatalogConfig.fromIndexSettings(indexMetadata);
+            IcebergCatalogConnector connector = LakehouseState.instance().catalogConnector();
+            AwsCredentials creds = AccessController.doPrivileged(
+                (PrivilegedAction<AwsCredentials>) () -> connector.getCredentials(catalogConfig)
+            );
+            if (creds != null && creds.isComplete()) {
+                config.put("s3AccessKeyId", creds.getAccessKeyId());
+                config.put("s3SecretAccessKey", creds.getSecretAccessKey());
+                if (creds.getSessionToken() != null) {
+                    config.put("s3SessionToken", creds.getSessionToken());
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("[WorkerQuery] Local credential resolution failed for index [{}]: {}", indexName, e.getMessage());
+        }
+        return config;
+    }
+
+    /**
+     * Executes a worker query locally without going through transport serialization.
+     * Called by {@link DistributedScanExecutor} for the local node to avoid
+     * unnecessary serialization/deserialization overhead.
+     *
+     * @param request        the worker query request
+     * @param clusterService the cluster service for credential resolution
+     * @return the worker query response
+     */
+    @SuppressWarnings("removal")
+    static WorkerQueryResponse executeLocally(WorkerQueryRequest request, ClusterService clusterService) {
+        AnalyticsSearchBackendPlugin provider = resolveBackend();
+
+        Map<String, String> storageConfig = resolveLocalCredentialsStatic(request.getStorageConfig(), clusterService);
+
+        ExternalScanContext scanContext = new ExternalScanContext(
+            request.getTableName(),
+            request.getFilePaths(),
+            request.getFileSizes(),
+            request.getSqlQuery(),
+            storageConfig
+        );
+
+        logger.info(
+            "[WorkerQuery] Executing locally (no transport): table={}, files={}, sql={}",
+            request.getTableName(),
+            request.getFilePaths().size(),
+            request.getSqlQuery()
+        );
+
+        long t0 = System.currentTimeMillis();
+        Iterable<Object[]> rows = AccessController.doPrivileged(
+            (PrivilegedAction<Iterable<Object[]>>) () -> provider.executeRemoteQuery(scanContext)
+        );
+        long t1 = System.currentTimeMillis();
+
+        WorkerQueryResponse response = buildResponse(rows);
+        logger.info("[PERF] Local worker query: {}ms ({} rows)", t1 - t0, response.getRowCount());
+        return response;
+    }
+
+    /**
+     * Static version of resolveLocalCredentials for use without an instance.
+     */
+    @SuppressWarnings("removal")
+    private static Map<String, String> resolveLocalCredentialsStatic(Map<String, String> original, ClusterService clusterService) {
+        Map<String, String> config = new HashMap<>(original);
+        String indexName = config.remove("indexName");
+        if (indexName == null || "true".equals(config.get("localMode"))) {
+            return config;
+        }
+
+        String authType = config.getOrDefault("authType", "default");
+        if ("default".equals(authType)) {
+            logger.debug("[WorkerQuery] auth_type=default for index [{}], Rust will use IMDS directly", indexName);
+            return config;
+        }
+
+        try {
+            IndexMetadata indexMetadata = clusterService.state().metadata().index(indexName);
+            if (indexMetadata == null) {
+                logger.warn("[WorkerQuery] Index [{}] not found in cluster state, skipping credential resolution", indexName);
+                return config;
+            }
+            CatalogConfig catalogConfig = CatalogConfig.fromIndexSettings(indexMetadata);
+            IcebergCatalogConnector connector = LakehouseState.instance().catalogConnector();
+            AwsCredentials creds = AccessController.doPrivileged(
+                (PrivilegedAction<AwsCredentials>) () -> connector.getCredentials(catalogConfig)
+            );
+            if (creds != null && creds.isComplete()) {
+                config.put("s3AccessKeyId", creds.getAccessKeyId());
+                config.put("s3SecretAccessKey", creds.getSecretAccessKey());
+                if (creds.getSessionToken() != null) {
+                    config.put("s3SessionToken", creds.getSessionToken());
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("[WorkerQuery] Local credential resolution failed for index [{}]: {}", indexName, e.getMessage());
+        }
+        return config;
     }
 
     /**

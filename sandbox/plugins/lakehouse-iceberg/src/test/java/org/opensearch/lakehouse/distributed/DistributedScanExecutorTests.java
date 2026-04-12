@@ -179,25 +179,36 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
     }
 
     @SuppressWarnings("unchecked")
-    public void testDispatchLocalCallsTransportService() {
+    public void testDispatchLocalUsesThreadPoolNotTransport() {
         DiscoveryNode localNode = newNode("local", Map.of());
         ClusterService clusterService = mockClusterService(List.of(localNode), "local");
         TransportService transportService = mock(TransportService.class);
 
+        // Mock the thread pool chain: transportService → threadPool → executor
+        org.opensearch.threadpool.ThreadPool threadPool = mock(org.opensearch.threadpool.ThreadPool.class);
+        java.util.concurrent.ExecutorService executorService = mock(java.util.concurrent.ExecutorService.class);
+        when(transportService.getThreadPool()).thenReturn(threadPool);
+        when(threadPool.executor(org.opensearch.threadpool.ThreadPool.Names.GENERIC)).thenReturn(executorService);
+
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService);
 
-        WorkerQueryRequest request = new WorkerQueryRequest("SELECT 1", List.of("f1"), new long[]{100}, Map.of(), "t");
+        WorkerQueryRequest request = new WorkerQueryRequest(
+            "SELECT 1", List.of("f1"), new long[]{100}, Map.of("localMode", "true"), "t"
+        );
 
         @SuppressWarnings("unchecked")
         ActionListener<WorkerQueryResponse> listener = mock(ActionListener.class);
 
         executor.dispatchLocal(request, listener);
 
-        // Verify sendRequest was called with local node
-        org.mockito.Mockito.verify(transportService).sendRequest(
-            org.mockito.Mockito.eq(localNode),
-            org.mockito.Mockito.eq(WorkerQueryAction.NAME),
-            org.mockito.Mockito.eq(request),
+        // Verify thread pool was used (NOT transport sendRequest)
+        org.mockito.Mockito.verify(threadPool).executor(org.opensearch.threadpool.ThreadPool.Names.GENERIC);
+        org.mockito.Mockito.verify(executorService).execute(any(Runnable.class));
+        // Verify sendRequest was NOT called (local dispatch bypasses transport)
+        org.mockito.Mockito.verify(transportService, org.mockito.Mockito.never()).sendRequest(
+            any(DiscoveryNode.class),
+            any(String.class),
+            any(org.opensearch.transport.TransportRequest.class),
             any(org.opensearch.transport.TransportResponseHandler.class)
         );
     }

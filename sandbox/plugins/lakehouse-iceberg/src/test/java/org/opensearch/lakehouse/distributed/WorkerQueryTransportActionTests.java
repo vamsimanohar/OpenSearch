@@ -8,18 +8,26 @@
 
 package org.opensearch.lakehouse.distributed;
 
+import org.opensearch.action.support.ActionFilters;
 import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.tasks.TaskManager;
 import org.opensearch.test.OpenSearchTestCase;
+import org.opensearch.transport.TransportService;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
@@ -185,5 +193,167 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         assertEquals(1, response.getRowCount());
         assertEquals("2013-07-15T10:30", response.getColumnData()[1][0]);
         assertEquals("String", response.getColumnTypes().get(1));
+    }
+
+    // ---- resolveLocalCredentials tests ----
+
+    private WorkerQueryTransportAction createActionWithMocks(ClusterService clusterService) {
+        TransportService transportService = mock(TransportService.class);
+        when(transportService.getTaskManager()).thenReturn(mock(TaskManager.class));
+        ActionFilters actionFilters = new ActionFilters(Set.of());
+        return new WorkerQueryTransportAction(transportService, actionFilters, clusterService);
+    }
+
+    public void testResolveLocalCredentialsDefaultAuthSkipsCredentialResolution() {
+        ClusterService clusterService = mock(ClusterService.class);
+        WorkerQueryTransportAction action = createActionWithMocks(clusterService);
+
+        Map<String, String> config = new HashMap<>();
+        config.put("indexName", "test_index");
+        config.put("authType", "default");
+        config.put("s3Region", "us-west-2");
+        config.put("s3Bucket", "test-bucket");
+
+        Map<String, String> result = action.resolveLocalCredentials(config);
+
+        // default auth should NOT resolve credentials — Rust handles IMDS directly
+        assertNull(result.get("s3AccessKeyId"));
+        assertNull(result.get("s3SecretAccessKey"));
+        assertNull(result.get("s3SessionToken"));
+        // Other config preserved
+        assertEquals("us-west-2", result.get("s3Region"));
+        assertEquals("test-bucket", result.get("s3Bucket"));
+        assertEquals("default", result.get("authType"));
+        // indexName consumed (removed from config)
+        assertNull(result.get("indexName"));
+        // ClusterService should NOT be accessed for default auth
+        verifyNoInteractions(clusterService);
+    }
+
+    public void testResolveLocalCredentialsNoIndexNameReturnsEarly() {
+        ClusterService clusterService = mock(ClusterService.class);
+        WorkerQueryTransportAction action = createActionWithMocks(clusterService);
+
+        Map<String, String> config = new HashMap<>();
+        config.put("s3Region", "us-west-2");
+
+        Map<String, String> result = action.resolveLocalCredentials(config);
+
+        assertEquals("us-west-2", result.get("s3Region"));
+        assertNull(result.get("s3AccessKeyId"));
+        verifyNoInteractions(clusterService);
+    }
+
+    public void testResolveLocalCredentialsLocalModeReturnsEarly() {
+        ClusterService clusterService = mock(ClusterService.class);
+        WorkerQueryTransportAction action = createActionWithMocks(clusterService);
+
+        Map<String, String> config = new HashMap<>();
+        config.put("indexName", "test_index");
+        config.put("localMode", "true");
+
+        Map<String, String> result = action.resolveLocalCredentials(config);
+
+        assertEquals("true", result.get("localMode"));
+        assertNull(result.get("s3AccessKeyId"));
+        verifyNoInteractions(clusterService);
+    }
+
+    public void testResolveLocalCredentialsMissingAuthTypeDefaultsToDefault() {
+        ClusterService clusterService = mock(ClusterService.class);
+        WorkerQueryTransportAction action = createActionWithMocks(clusterService);
+
+        // No authType key → defaults to "default"
+        Map<String, String> config = new HashMap<>();
+        config.put("indexName", "test_index");
+        config.put("s3Region", "us-west-2");
+
+        Map<String, String> result = action.resolveLocalCredentials(config);
+
+        // Should take the default auth path (no credentials)
+        assertNull(result.get("s3AccessKeyId"));
+        verifyNoInteractions(clusterService);
+    }
+
+    // ---- executeLocally tests ----
+
+    public void testExecuteLocallyReturnsResponse() {
+        // Set up a mock backend that returns two rows
+        AnalyticsSearchBackendPlugin mockProvider = mock(AnalyticsSearchBackendPlugin.class);
+        when(mockProvider.executeRemoteQuery(any(ExternalScanContext.class)))
+            .thenReturn(List.of(
+                new Object[]{1, "hello"},
+                new Object[]{2, "world"}
+            ));
+        WorkerQueryTransportAction.setBackendProvider(mockProvider);
+
+        ClusterService clusterService = mock(ClusterService.class);
+        Map<String, String> storageConfig = new HashMap<>();
+        storageConfig.put("localMode", "true");
+
+        WorkerQueryRequest request = new WorkerQueryRequest(
+            "SELECT * FROM t",
+            List.of("/tmp/file1.parquet"),
+            new long[]{1024L},
+            storageConfig,
+            "test_table"
+        );
+
+        WorkerQueryResponse response = WorkerQueryTransportAction.executeLocally(request, clusterService);
+
+        assertEquals(2, response.getRowCount());
+        assertEquals(2, response.getColumnNames().size());
+        assertEquals(1, response.getColumnData()[0][0]);
+        assertEquals("hello", response.getColumnData()[1][0]);
+        assertEquals(2, response.getColumnData()[0][1]);
+        assertEquals("world", response.getColumnData()[1][1]);
+
+        verify(mockProvider).executeRemoteQuery(any(ExternalScanContext.class));
+    }
+
+    public void testExecuteLocallyWithNoBackendThrows() {
+        // No backend set — should throw
+        ClusterService clusterService = mock(ClusterService.class);
+        Map<String, String> storageConfig = new HashMap<>();
+        storageConfig.put("localMode", "true");
+
+        WorkerQueryRequest request = new WorkerQueryRequest(
+            "SELECT * FROM t",
+            List.of("/tmp/file1.parquet"),
+            new long[]{1024L},
+            storageConfig,
+            "test_table"
+        );
+
+        expectThrows(IllegalStateException.class, () ->
+            WorkerQueryTransportAction.executeLocally(request, clusterService)
+        );
+    }
+
+    public void testExecuteLocallyWithDefaultAuthSkipsCredentials() {
+        AnalyticsSearchBackendPlugin mockProvider = mock(AnalyticsSearchBackendPlugin.class);
+        when(mockProvider.executeRemoteQuery(any(ExternalScanContext.class)))
+            .thenReturn(List.<Object[]>of(new Object[]{42}));
+        WorkerQueryTransportAction.setBackendProvider(mockProvider);
+
+        ClusterService clusterService = mock(ClusterService.class);
+        Map<String, String> storageConfig = new HashMap<>();
+        storageConfig.put("indexName", "test_index");
+        storageConfig.put("authType", "default");
+        storageConfig.put("s3Region", "us-west-2");
+
+        WorkerQueryRequest request = new WorkerQueryRequest(
+            "SELECT COUNT(*) FROM t",
+            List.of("s3://bucket/file.parquet"),
+            new long[]{2048L},
+            storageConfig,
+            "test_table"
+        );
+
+        WorkerQueryResponse response = WorkerQueryTransportAction.executeLocally(request, clusterService);
+
+        assertEquals(1, response.getRowCount());
+        // ClusterService not accessed for default auth
+        verifyNoInteractions(clusterService);
     }
 }

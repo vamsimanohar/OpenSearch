@@ -21,6 +21,7 @@ import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.ppl.action.UnifiedQueryService;
 import org.opensearch.ppl.planner.PushDownPlanner;
 import org.opensearch.tasks.Task;
+import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 /**
@@ -51,7 +52,7 @@ public class LakehouseQueryTransportAction extends HandledTransportAction<Lakeho
         EngineContext engineContext,
         QueryPlanExecutor<RelNode, Iterable<Object[]>> executor
     ) {
-        super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new);
+        super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new, ThreadPool.Names.GENERIC);
         PushDownPlanner pushDownPlanner = new PushDownPlanner(engineContext.operatorTable(), executor);
         this.queryService = new UnifiedQueryService(pushDownPlanner, engineContext);
     }

@@ -26,7 +26,6 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
-import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.CatalogConfig;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.exec.DataFusionSqlDialect;
@@ -273,16 +272,12 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
                 config.put("localMode", "true");
             }
         }
-        // Pass per-catalog AWS credentials to DataFusion's Rust S3 client
+        // Pass index name and auth type so workers know how to handle credentials.
+        // For "default" auth: no credentials shipped — Rust uses IMDS directly.
+        // For "role"/"keys" auth: workers resolve credentials locally from cluster state.
         if (catalogConfig != null) {
-            AwsCredentials creds = connector.getCredentials(catalogConfig);
-            if (creds != null && creds.isComplete()) {
-                config.put("s3AccessKeyId", creds.getAccessKeyId());
-                config.put("s3SecretAccessKey", creds.getSecretAccessKey());
-                if (creds.getSessionToken() != null) {
-                    config.put("s3SessionToken", creds.getSessionToken());
-                }
-            }
+            config.put("indexName", catalogConfig.indexName());
+            config.put("authType", catalogConfig.authType());
         }
         return config;
     }

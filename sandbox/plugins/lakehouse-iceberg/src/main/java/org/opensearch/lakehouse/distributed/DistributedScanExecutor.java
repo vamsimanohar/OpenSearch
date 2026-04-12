@@ -228,36 +228,18 @@ public class DistributedScanExecutor {
     }
 
     /**
-     * Dispatches a request to the local node by executing the transport action directly.
-     * Uses the client to execute the action locally without going through network transport.
+     * Dispatches a request to the local node by executing the worker query directly
+     * on a GENERIC thread pool thread, bypassing transport serialization entirely.
      */
     void dispatchLocal(WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
-        logger.debug("[DistributedScan] Executing locally: {} files", request.getFilePaths().size());
-        transportService.sendRequest(
-            clusterService.state().nodes().getLocalNode(),
-            WorkerQueryAction.NAME,
-            request,
-            new TransportResponseHandler<WorkerQueryResponse>() {
-                @Override
-                public WorkerQueryResponse read(org.opensearch.core.common.io.stream.StreamInput in) throws java.io.IOException {
-                    return new WorkerQueryResponse(in);
-                }
-
-                @Override
-                public void handleResponse(WorkerQueryResponse response) {
-                    listener.onResponse(response);
-                }
-
-                @Override
-                public void handleException(org.opensearch.transport.TransportException exp) {
-                    listener.onFailure(exp);
-                }
-
-                @Override
-                public String executor() {
-                    return org.opensearch.threadpool.ThreadPool.Names.SAME;
-                }
+        logger.debug("[DistributedScan] Executing locally (direct, no transport): {} files", request.getFilePaths().size());
+        transportService.getThreadPool().executor(org.opensearch.threadpool.ThreadPool.Names.GENERIC).execute(() -> {
+            try {
+                WorkerQueryResponse response = WorkerQueryTransportAction.executeLocally(request, clusterService);
+                listener.onResponse(response);
+            } catch (Exception e) {
+                listener.onFailure(e);
             }
-        );
+        });
     }
 }
