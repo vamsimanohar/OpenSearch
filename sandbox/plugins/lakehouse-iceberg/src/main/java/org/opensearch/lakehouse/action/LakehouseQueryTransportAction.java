@@ -14,8 +14,10 @@ import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.analytics.EngineContext;
 import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
+import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.lakehouse.distributed.DistributedScanExecutor;
 import org.opensearch.lakehouse.exec.LakehouseQueryExecutor;
 import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.tasks.Task;
@@ -39,10 +41,12 @@ public class LakehouseQueryTransportAction extends HandledTransportAction<Lakeho
         TransportService transportService,
         ActionFilters actionFilters,
         EngineContext engineContext,
+        ClusterService clusterService,
         DataWarehouseQueryEngine queryEngine
     ) {
         super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new, ThreadPool.Names.GENERIC);
-        this.queryExecutor = new LakehouseQueryExecutor(engineContext, queryEngine);
+        DistributedScanExecutor scanExecutor = new DistributedScanExecutor(transportService, clusterService, queryEngine);
+        this.queryExecutor = new LakehouseQueryExecutor(engineContext, scanExecutor);
     }
 
     @Override

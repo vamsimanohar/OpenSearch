@@ -16,7 +16,6 @@ import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
-import org.opensearch.lakehouse.LakehouseState;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
@@ -41,17 +40,6 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
     private final ClusterService clusterService;
     private final DataWarehouseQueryEngine queryEngine;
 
-    /**
-     * Creates the transport action via Guice injection.
-     * Initializes the distributed scan executor on {@link LakehouseState}
-     * since this is the earliest point where TransportService and ClusterService
-     * are available via Guice.
-     *
-     * @param transportService the transport service
-     * @param actionFilters    the action filters
-     * @param clusterService   the cluster service
-     * @param queryEngine     the external query backend for executing queries
-     */
     @Inject
     public WorkerQueryTransportAction(
         TransportService transportService,
@@ -62,7 +50,6 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
         super(WorkerQueryAction.NAME, transportService, actionFilters, WorkerQueryRequest::new, ThreadPool.Names.GENERIC);
         this.clusterService = clusterService;
         this.queryEngine = queryEngine;
-        LakehouseState.instance().initDistributedExecutor(transportService, clusterService, queryEngine);
     }
 
     @Override
