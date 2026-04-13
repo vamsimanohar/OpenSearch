@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Unified scan executor that handles both single-node and distributed query execution.
@@ -185,10 +186,28 @@ public class DistributedScanExecutor {
         String tableName
     ) {
         int assignmentCount = assignments.size();
+        long dispatchStartTime = System.currentTimeMillis();
         CompletableFuture<Collection<WorkerQueryResponse>> future = new CompletableFuture<>();
+        AtomicInteger completedCount = new AtomicInteger(0);
 
         GroupedActionListener<WorkerQueryResponse> groupListener = new GroupedActionListener<>(
-            ActionListener.wrap(future::complete, future::completeExceptionally),
+            ActionListener.wrap(responses -> {
+                logger.info(
+                    "[ScanExecutor] All {} workers responded in {}ms",
+                    assignmentCount,
+                    System.currentTimeMillis() - dispatchStartTime
+                );
+                future.complete(responses);
+            }, ex -> {
+                logger.error(
+                    "[ScanExecutor] Dispatch failed after {}/{} workers responded in {}ms",
+                    completedCount.get(),
+                    assignmentCount,
+                    System.currentTimeMillis() - dispatchStartTime,
+                    ex
+                );
+                future.completeExceptionally(ex);
+            }),
             assignmentCount
         );
 
@@ -200,6 +219,7 @@ public class DistributedScanExecutor {
 
             if (assignment.getFilePaths().isEmpty()) {
                 logger.warn("[ScanExecutor] Worker {} has no files assigned (more workers than files)", i);
+                completedCount.incrementAndGet();
                 groupListener.onResponse(
                     new WorkerQueryResponse(List.of(), List.of(), 0, new Object[0][])
                 );
@@ -214,10 +234,44 @@ public class DistributedScanExecutor {
                 tableName
             );
 
-            if (targetNode.getId().equals(localNodeId)) {
-                dispatchLocal(request, groupListener);
+            boolean isLocal = targetNode.getId().equals(localNodeId);
+            int workerIdx = i;
+            ActionListener<WorkerQueryResponse> trackingListener = ActionListener.wrap(
+                response -> {
+                    int done = completedCount.incrementAndGet();
+                    logger.info(
+                        "[ScanExecutor] Worker {} ({}{}) responded: {} rows, {}ms elapsed ({}/{})",
+                        workerIdx,
+                        targetNode.getId(),
+                        isLocal ? "/local" : "",
+                        response.getRowCount(),
+                        System.currentTimeMillis() - dispatchStartTime,
+                        done,
+                        assignmentCount
+                    );
+                    groupListener.onResponse(response);
+                },
+                ex -> {
+                    int done = completedCount.incrementAndGet();
+                    logger.error(
+                        "[ScanExecutor] Worker {} ({}{}) FAILED after {}ms ({}/{}): {}",
+                        workerIdx,
+                        targetNode.getId(),
+                        isLocal ? "/local" : "",
+                        System.currentTimeMillis() - dispatchStartTime,
+                        done,
+                        assignmentCount,
+                        ex.getMessage(),
+                        ex
+                    );
+                    groupListener.onFailure(ex);
+                }
+            );
+
+            if (isLocal) {
+                dispatchLocal(request, trackingListener);
             } else {
-                dispatchRemote(targetNode, request, groupListener);
+                dispatchRemote(targetNode, request, trackingListener);
             }
         }
 
@@ -229,7 +283,8 @@ public class DistributedScanExecutor {
             throw new RuntimeException("Distributed query execution interrupted", e);
         } catch (java.util.concurrent.TimeoutException e) {
             throw new RuntimeException(
-                "Distributed query execution timed out after " + DEFAULT_TIMEOUT_SECONDS + " seconds", e
+                "Distributed query execution timed out after " + DEFAULT_TIMEOUT_SECONDS
+                    + " seconds. Workers responded: " + completedCount.get() + "/" + assignmentCount, e
             );
         } catch (Exception e) {
             throw new RuntimeException("Distributed query execution failed", e);
