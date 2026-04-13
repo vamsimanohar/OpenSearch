@@ -83,9 +83,9 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.TOPK_MERGE, QueryAnalyzer.analyze(sort));
     }
 
-    public void testSortWithoutLimitReturnsConcat() {
+    public void testSortWithoutLimitReturnsSingleNode() {
         Sort sort = makeSort(true, false);
-        assertEquals(MergeStrategy.CONCAT, QueryAnalyzer.analyze(sort));
+        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(sort));
     }
 
     public void testSimpleScanReturnsConcat() {

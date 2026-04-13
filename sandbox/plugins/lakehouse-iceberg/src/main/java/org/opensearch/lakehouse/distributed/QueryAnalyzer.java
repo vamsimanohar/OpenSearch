@@ -73,11 +73,15 @@ public final class QueryAnalyzer {
             return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0);
         }
 
-        if (classifier.sort != null && classifier.sort.fetch != null) {
-            int[] sortColumns = extractSortColumns(classifier.sort);
-            boolean[] sortAsc = extractSortDirections(classifier.sort);
-            int limit = extractLimit(classifier.sort);
-            return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit);
+        if (classifier.sort != null) {
+            if (classifier.sort.fetch != null) {
+                int[] sortColumns = extractSortColumns(classifier.sort);
+                boolean[] sortAsc = extractSortDirections(classifier.sort);
+                int limit = extractLimit(classifier.sort);
+                return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit);
+            }
+            // ORDER BY without LIMIT cannot be distributed via CONCAT (results would be unsorted)
+            return new AnalysisResult(MergeStrategy.SINGLE_NODE);
         }
 
         return new AnalysisResult(MergeStrategy.CONCAT);
