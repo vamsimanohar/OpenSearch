@@ -7,7 +7,6 @@
  */
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Dummy change to test deploy script Rust rebuild.
 // Single cdylib for JDK FFM (Foreign Function & Memory API).
 //
 // Unlike the JNI approach (RegisterNatives, classloader workarounds), FFM calls
