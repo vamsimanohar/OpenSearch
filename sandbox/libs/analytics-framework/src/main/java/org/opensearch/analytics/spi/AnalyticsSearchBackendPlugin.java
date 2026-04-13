@@ -8,13 +8,14 @@
 
 package org.opensearch.analytics.spi;
 
+import org.opensearch.analytics.exec.ExternalQueryBackend;
 import org.opensearch.analytics.exec.ExternalScanContext;
 
 /**
  * SPI extension point for back-end query engines for query planning and execution capabilities
  * as needed by the {@link org.opensearch.analytics.exec.QueryPlanExecutor}
  */
-public interface AnalyticsSearchBackendPlugin extends SearchExecEngineProvider {
+public interface AnalyticsSearchBackendPlugin extends SearchExecEngineProvider, ExternalQueryBackend {
 
     /**
      * Executes a query against remote data files using the native engine.

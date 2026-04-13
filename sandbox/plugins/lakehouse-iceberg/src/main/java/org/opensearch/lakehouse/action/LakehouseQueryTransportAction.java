@@ -8,53 +8,41 @@
 
 package org.opensearch.lakehouse.action;
 
-import org.apache.calcite.rel.RelNode;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.analytics.EngineContext;
-import org.opensearch.analytics.exec.QueryPlanExecutor;
+import org.opensearch.analytics.exec.ExternalQueryBackend;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.lakehouse.exec.LakehouseQueryExecutor;
 import org.opensearch.ppl.action.PPLResponse;
-import org.opensearch.ppl.action.UnifiedQueryService;
-import org.opensearch.ppl.planner.PushDownPlanner;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 /**
  * Transport action for lakehouse SQL and PPL query execution.
- * Receives {@link EngineContext} and {@link QueryPlanExecutor} via Guice injection
- * from the analytics-engine plugin.
+ * Uses {@link LakehouseQueryExecutor} directly, bypassing the analytics-engine
+ * PushDownPlanner/DefaultPlanExecutor pipeline.
  *
  * @opensearch.internal
  */
 public class LakehouseQueryTransportAction extends HandledTransportAction<LakehouseQueryRequest, PPLResponse> {
 
     private static final Logger logger = LogManager.getLogger(LakehouseQueryTransportAction.class);
+    private final LakehouseQueryExecutor queryExecutor;
 
-    private final UnifiedQueryService queryService;
-
-    /**
-     * Creates the transport action via Guice injection.
-     *
-     * @param transportService the transport service
-     * @param actionFilters the action filters
-     * @param engineContext the engine context from analytics-engine
-     * @param executor the query plan executor from analytics-engine
-     */
     @Inject
     public LakehouseQueryTransportAction(
         TransportService transportService,
         ActionFilters actionFilters,
         EngineContext engineContext,
-        QueryPlanExecutor<RelNode, Iterable<Object[]>> executor
+        ExternalQueryBackend queryBackend
     ) {
         super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new, ThreadPool.Names.GENERIC);
-        PushDownPlanner pushDownPlanner = new PushDownPlanner(engineContext.operatorTable(), executor);
-        this.queryService = new UnifiedQueryService(pushDownPlanner, engineContext);
+        this.queryExecutor = new LakehouseQueryExecutor(engineContext, queryBackend);
     }
 
     @Override
@@ -63,10 +51,10 @@ public class LakehouseQueryTransportAction extends HandledTransportAction<Lakeho
             PPLResponse response;
             if (request.isSql()) {
                 logger.info("[Lakehouse] Executing SQL: {}", request.getQueryText());
-                response = queryService.executeSql(request.getQueryText());
+                response = queryExecutor.executeSql(request.getQueryText());
             } else {
                 logger.info("[Lakehouse] Executing PPL: {}", request.getQueryText());
-                response = queryService.execute(request.getQueryText());
+                response = queryExecutor.executePpl(request.getQueryText());
             }
             listener.onResponse(response);
         } catch (Exception e) {

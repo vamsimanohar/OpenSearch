@@ -43,6 +43,14 @@ dependencies {
     compileOnly project(':sandbox:plugins:analytics-engine')
     compileOnly project(':sandbox:libs:analytics-framework')
 
+    // SQL Unified Query API (compile-only, provided at runtime via analytics-engine)
+    compileOnly("org.opensearch.query:unified-query-api:3.6.0.0-SNAPSHOT") {
+        exclude group: 'org.opensearch'
+    }
+    compileOnly("org.opensearch.query:unified-query-core:3.6.0.0-SNAPSHOT") {
+        exclude group: 'org.opensearch'
+    }
+
     // Iceberg SDK
     implementation "org.apache.iceberg:iceberg-api:1.7.1"
     implementation "org.apache.iceberg:iceberg-core:1.7.1"
@@ -122,8 +130,10 @@ jacocoTestCoverageVerification {
                 'org.opensearch.lakehouse.action.LakehousePplRestAction*',
                 'org.opensearch.lakehouse.LakehouseState',
                 'org.opensearch.lakehouse.LakehouseState.*',
-                // LakehousePlugin.prepareScan requires live Iceberg catalog and connector
+                // LakehousePlugin is a thin wiring class — tested via integration tests
                 'org.opensearch.lakehouse.LakehousePlugin',
+                // LakehouseQueryExecutor requires live Iceberg catalog and EngineContext
+                'org.opensearch.lakehouse.exec.LakehouseQueryExecutor',
                 // LakehouseQueryTransportAction requires Guice-injected EngineContext
                 'org.opensearch.lakehouse.action.LakehouseQueryTransportAction',
                 // WorkerQueryTransportAction.doExecute requires Guice-injected TransportService and doPrivileged

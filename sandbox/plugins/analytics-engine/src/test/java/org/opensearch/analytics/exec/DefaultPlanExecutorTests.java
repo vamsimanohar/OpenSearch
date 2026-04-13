@@ -25,7 +25,6 @@ import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
-import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
@@ -143,7 +142,7 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
         when(indicesService.indexService(index)).thenReturn(indexService);
 
         MockBackendPlugin backendPlugin = new MockBackendPlugin(format);
-        DefaultPlanExecutor executor = new DefaultPlanExecutor(List.of(backendPlugin), indicesService, clusterService, null);
+        DefaultPlanExecutor executor = new DefaultPlanExecutor(List.of(backendPlugin), indicesService, clusterService);
 
         RelOptTable table = mockTable("my_index");
         TableScan scan = new StubTableScan(cluster, cluster.traitSet(), table);
@@ -154,108 +153,6 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
 
         assertEquals(3, rows.size());
     }
-
-    /**
-     * extractExternalTable returns null for a regular TableScan (not ExternalTable).
-     */
-    public void testExtractExternalTableReturnsNullForRegularTable() {
-        RelOptTable table = mockTable("my_index");
-        TableScan scan = new StubTableScan(cluster, cluster.traitSet(), table);
-        assertNull(DefaultPlanExecutor.extractExternalTable(scan));
-    }
-
-    /**
-     * extractExternalTable returns the ExternalTable when the Calcite table implements it.
-     */
-    public void testExtractExternalTableFindsExternalTable() {
-        MockExternalCalciteTable extTable = mock(MockExternalCalciteTable.class);
-        when(extTable.format()).thenReturn("iceberg");
-        when(extTable.qualifiedName()).thenReturn("db.my_table");
-
-        RelOptTable relTable = mock(RelOptTable.class);
-        when(relTable.getQualifiedName()).thenReturn(List.of("my_table"));
-        when(relTable.getRowType()).thenReturn(buildRowType(1));
-        when(relTable.unwrap(org.apache.calcite.schema.Table.class)).thenReturn(extTable);
-
-        TableScan scan = new StubTableScan(cluster, cluster.traitSet(), relTable);
-        ExternalTable found = DefaultPlanExecutor.extractExternalTable(scan);
-        assertNotNull(found);
-        assertEquals("iceberg", found.format());
-    }
-
-    /**
-     * execute() throws when external table detected but no ExternalTableExecutor registered.
-     */
-    public void testExecuteThrowsForExternalTableWithNoExecutor() {
-        MockExternalCalciteTable extTable = mock(MockExternalCalciteTable.class);
-        when(extTable.format()).thenReturn("iceberg");
-
-        RelOptTable relTable = mock(RelOptTable.class);
-        when(relTable.getQualifiedName()).thenReturn(List.of("my_table"));
-        when(relTable.getRowType()).thenReturn(buildRowType(1));
-        when(relTable.unwrap(org.apache.calcite.schema.Table.class)).thenReturn(extTable);
-
-        TableScan scan = new StubTableScan(cluster, cluster.traitSet(), relTable);
-        DefaultPlanExecutor executor = new DefaultPlanExecutor(List.of(), null, null, null);
-
-        IllegalStateException ex = expectThrows(IllegalStateException.class, () -> executor.execute(scan, null));
-        assertTrue(ex.getMessage().contains("no ExternalTableExecutor"));
-    }
-
-    /**
-     * execute() routes external table to ExternalTableExecutor and backend.
-     */
-    public void testExecuteRoutesExternalTableToBackend() {
-        MockExternalCalciteTable extTable = mock(MockExternalCalciteTable.class);
-        when(extTable.format()).thenReturn("iceberg");
-
-        RelOptTable relTable = mock(RelOptTable.class);
-        when(relTable.getQualifiedName()).thenReturn(List.of("my_table"));
-        when(relTable.getRowType()).thenReturn(buildRowType(1));
-        when(relTable.unwrap(org.apache.calcite.schema.Table.class)).thenReturn(extTable);
-
-        TableScan scan = new StubTableScan(cluster, cluster.traitSet(), relTable);
-
-        ExternalScanContext scanContext = new ExternalScanContext(
-            "my_table",
-            List.of("s3://bucket/data/file1.parquet"),
-            new long[] { 1024L },
-            "SELECT * FROM \"my_table\"",
-            Map.of("s3Region", "us-west-2")
-        );
-
-        ExternalTableExecutor tableExecutor = mock(ExternalTableExecutor.class);
-        when(tableExecutor.supports(extTable)).thenReturn(true);
-        when(tableExecutor.prepareScan(scan, extTable)).thenReturn(scanContext);
-
-        List<Object[]> remoteResult = List.of(new Object[] { "row1" }, new Object[] { "row2" });
-        AnalyticsSearchBackendPlugin backendWithRemote = new AnalyticsSearchBackendPlugin() {
-            @Override
-            public String name() {
-                return "mock-remote";
-            }
-
-            @Override
-            public SearchExecEngine<ExecutionContext, EngineResultStream> createSearchExecEngine(ExecutionContext ctx) {
-                throw new UnsupportedOperationException("Should not be called for remote queries");
-            }
-
-            @Override
-            public Iterable<Object[]> executeRemoteQuery(ExternalScanContext ctx) {
-                return remoteResult;
-            }
-        };
-
-        DefaultPlanExecutor executor = new DefaultPlanExecutor(List.of(backendWithRemote), null, null, tableExecutor);
-
-        Iterable<Object[]> results = executor.execute(scan, null);
-        List<Object[]> rows = new ArrayList<>();
-        results.forEach(rows::add);
-        assertEquals(2, rows.size());
-    }
-
-    /** Interface that is both a Calcite Table and an ExternalTable, for mocking. */
-    interface MockExternalCalciteTable extends org.apache.calcite.schema.Table, ExternalTable {}
 
     private RelOptTable mockTable(String... qualifiedName) {
         RelOptTable table = mock(RelOptTable.class);

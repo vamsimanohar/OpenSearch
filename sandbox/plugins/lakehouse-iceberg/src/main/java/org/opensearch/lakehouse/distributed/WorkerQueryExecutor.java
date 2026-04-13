@@ -11,8 +11,7 @@ package org.opensearch.lakehouse.distributed;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.exec.ExternalScanContext;
-import org.opensearch.analytics.exec.RemoteQueryBackendHolder;
-import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.exec.ExternalQueryBackend;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.lakehouse.LakehouseState;
@@ -48,22 +47,7 @@ public final class WorkerQueryExecutor {
 
     private static final Logger logger = LogManager.getLogger(WorkerQueryExecutor.class);
 
-    private static volatile AnalyticsSearchBackendPlugin backendProvider;
-
     private WorkerQueryExecutor() {}
-
-    /**
-     * Sets the backend provider used to execute queries on worker nodes.
-     * Visible for testing.
-     */
-    public static void setBackendProvider(AnalyticsSearchBackendPlugin provider) {
-        backendProvider = provider;
-    }
-
-    /** Returns the current backend provider, or null if not set. Visible for testing. */
-    static AnalyticsSearchBackendPlugin getBackendProvider() {
-        return backendProvider;
-    }
 
     /**
      * Executes a worker query request and returns the response.
@@ -71,11 +55,14 @@ public final class WorkerQueryExecutor {
      *
      * @param request        the worker query request
      * @param clusterService the cluster service for credential resolution
+     * @param backend        the external query backend for executing queries
      * @return the worker query response
      */
     @SuppressWarnings("removal")
-    public static WorkerQueryResponse execute(WorkerQueryRequest request, ClusterService clusterService) {
-        AnalyticsSearchBackendPlugin provider = resolveBackend();
+    public static WorkerQueryResponse execute(WorkerQueryRequest request, ClusterService clusterService, ExternalQueryBackend backend) {
+        if (backend == null) {
+            throw new IllegalStateException("No analytics backend registered for worker query execution");
+        }
 
         Map<String, String> storageConfig = resolveCredentials(request.getStorageConfig(), clusterService);
 
@@ -96,30 +83,13 @@ public final class WorkerQueryExecutor {
 
         long t0 = System.currentTimeMillis();
         Iterable<Object[]> rows = AccessController.doPrivileged(
-            (PrivilegedAction<Iterable<Object[]>>) () -> provider.executeRemoteQuery(scanContext)
+            (PrivilegedAction<Iterable<Object[]>>) () -> backend.executeRemoteQuery(scanContext)
         );
         long t1 = System.currentTimeMillis();
 
         WorkerQueryResponse response = buildResponse(rows);
         logger.info("[PERF] Worker query: {}ms ({} rows)", t1 - t0, response.getRowCount());
         return response;
-    }
-
-    /**
-     * Resolves the backend provider from static field or RemoteQueryBackendHolder.
-     */
-    static AnalyticsSearchBackendPlugin resolveBackend() {
-        AnalyticsSearchBackendPlugin provider = backendProvider;
-        if (provider == null) {
-            provider = RemoteQueryBackendHolder.getProvider();
-            if (provider != null) {
-                backendProvider = provider;
-            }
-        }
-        if (provider == null) {
-            throw new IllegalStateException("No analytics backend registered for worker query execution");
-        }
-        return provider;
     }
 
     /**

@@ -9,7 +9,7 @@
 package org.opensearch.lakehouse.distributed;
 
 import org.opensearch.analytics.exec.ExternalScanContext;
-import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.exec.ExternalQueryBackend;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -27,28 +27,6 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
-
-    @Override
-    public void setUp() throws Exception {
-        super.setUp();
-        // Reset the static backend provider before each test
-        WorkerQueryExecutor.setBackendProvider(null);
-    }
-
-    @Override
-    public void tearDown() throws Exception {
-        WorkerQueryExecutor.setBackendProvider(null);
-        super.tearDown();
-    }
-
-    public void testSetAndGetBackendProvider() {
-        assertNull(WorkerQueryExecutor.getBackendProvider());
-
-        AnalyticsSearchBackendPlugin mockProvider = mock(AnalyticsSearchBackendPlugin.class);
-        WorkerQueryExecutor.setBackendProvider(mockProvider);
-
-        assertSame(mockProvider, WorkerQueryExecutor.getBackendProvider());
-    }
 
     public void testBuildResponseWithRows() {
         List<Object[]> rows = List.of(
@@ -266,14 +244,9 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
     // ---- execute tests ----
 
     public void testExecuteReturnsResponse() {
-        // Set up a mock backend that returns two rows
-        AnalyticsSearchBackendPlugin mockProvider = mock(AnalyticsSearchBackendPlugin.class);
-        when(mockProvider.executeRemoteQuery(any(ExternalScanContext.class)))
-            .thenReturn(List.of(
-                new Object[]{1, "hello"},
-                new Object[]{2, "world"}
-            ));
-        WorkerQueryExecutor.setBackendProvider(mockProvider);
+        ExternalQueryBackend mockBackend = mock(ExternalQueryBackend.class);
+        when(mockBackend.executeRemoteQuery(any(ExternalScanContext.class)))
+            .thenReturn(List.of(new Object[]{1, "hello"}, new Object[]{2, "world"}));
 
         ClusterService clusterService = mock(ClusterService.class);
         Map<String, String> storageConfig = new HashMap<>();
@@ -287,7 +260,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
             "test_table"
         );
 
-        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService);
+        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, mockBackend);
 
         assertEquals(2, response.getRowCount());
         assertEquals(2, response.getColumnNames().size());
@@ -296,33 +269,28 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         assertEquals(2, response.getColumnData()[0][1]);
         assertEquals("world", response.getColumnData()[1][1]);
 
-        verify(mockProvider).executeRemoteQuery(any(ExternalScanContext.class));
+        verify(mockBackend).executeRemoteQuery(any(ExternalScanContext.class));
     }
 
     public void testExecuteWithNoBackendThrows() {
-        // No backend set — should throw
         ClusterService clusterService = mock(ClusterService.class);
-        Map<String, String> storageConfig = new HashMap<>();
-        storageConfig.put("localMode", "true");
-
         WorkerQueryRequest request = new WorkerQueryRequest(
             "SELECT * FROM t",
             List.of("/tmp/file1.parquet"),
             new long[]{1024L},
-            storageConfig,
+            Map.of("localMode", "true"),
             "test_table"
         );
 
         expectThrows(IllegalStateException.class, () ->
-            WorkerQueryExecutor.execute(request, clusterService)
+            WorkerQueryExecutor.execute(request, clusterService, null)
         );
     }
 
     public void testExecuteWithDefaultAuthSkipsCredentials() {
-        AnalyticsSearchBackendPlugin mockProvider = mock(AnalyticsSearchBackendPlugin.class);
-        when(mockProvider.executeRemoteQuery(any(ExternalScanContext.class)))
+        ExternalQueryBackend mockBackend = mock(ExternalQueryBackend.class);
+        when(mockBackend.executeRemoteQuery(any(ExternalScanContext.class)))
             .thenReturn(List.<Object[]>of(new Object[]{42}));
-        WorkerQueryExecutor.setBackendProvider(mockProvider);
 
         ClusterService clusterService = mock(ClusterService.class);
         Map<String, String> storageConfig = new HashMap<>();
@@ -338,10 +306,9 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
             "test_table"
         );
 
-        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService);
+        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, mockBackend);
 
         assertEquals(1, response.getRowCount());
-        // ClusterService not accessed for default auth
         verifyNoInteractions(clusterService);
     }
 }

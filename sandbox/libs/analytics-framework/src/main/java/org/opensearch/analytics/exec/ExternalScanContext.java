@@ -21,7 +21,6 @@ public class ExternalScanContext {
     private final long[] fileSizes;
     private final String sqlQuery;
     private final Map<String, String> storageConfig;
-    private final Iterable<Object[]> preComputedResults;
 
     /**
      * Creates a new scan context.
@@ -33,33 +32,11 @@ public class ExternalScanContext {
      * @param storageConfig  storage configuration (S3 region, bucket, credentials)
      */
     public ExternalScanContext(String tableName, List<String> dataFilePaths, long[] fileSizes, String sqlQuery, Map<String, String> storageConfig) {
-        this(tableName, dataFilePaths, fileSizes, sqlQuery, storageConfig, null);
-    }
-
-    /**
-     * Creates a scan context with pre-computed results from distributed execution.
-     *
-     * @param tableName           table name matching the query plan
-     * @param dataFilePaths       pruned data file paths to scan
-     * @param fileSizes           file sizes in bytes, parallel to dataFilePaths
-     * @param sqlQuery            SQL query string for the target execution engine
-     * @param storageConfig       storage configuration (S3 region, bucket, credentials)
-     * @param preComputedResults  pre-merged results from distributed execution, or null
-     */
-    public ExternalScanContext(
-        String tableName,
-        List<String> dataFilePaths,
-        long[] fileSizes,
-        String sqlQuery,
-        Map<String, String> storageConfig,
-        Iterable<Object[]> preComputedResults
-    ) {
         this.tableName = tableName;
         this.dataFilePaths = dataFilePaths;
         this.fileSizes = fileSizes;
         this.sqlQuery = sqlQuery;
         this.storageConfig = storageConfig;
-        this.preComputedResults = preComputedResults;
     }
 
     /** Table name as registered in the Calcite schema. */
@@ -90,13 +67,4 @@ public class ExternalScanContext {
     public Map<String, String> getStorageConfig() {
         return storageConfig;
     }
-
-    /**
-     * Returns pre-computed results from distributed execution, or null.
-     * When non-null, the execution backend should be skipped — results are already merged.
-     */
-    public Iterable<Object[]> getPreComputedResults() {
-        return preComputedResults;
-    }
-
 }

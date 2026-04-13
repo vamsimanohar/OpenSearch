@@ -15,9 +15,8 @@ import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
-import org.opensearch.analytics.exec.ExternalTableExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
-import org.opensearch.analytics.exec.RemoteQueryBackendHolder;
+import org.opensearch.analytics.exec.ExternalQueryBackend;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.analytics.schema.SchemaContributor;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
@@ -67,7 +66,6 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     public AnalyticsPlugin() {}
 
     private final List<AnalyticsSearchBackendPlugin> backEnds = new ArrayList<>();
-    private final List<ExternalTableExecutor> externalTableExecutors = new ArrayList<>();
     private final List<SchemaContributor> schemaContributors = new ArrayList<>();
     private SqlOperatorTable operatorTable = SqlStdOperatorTable.instance();
 
@@ -75,12 +73,10 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     @Override
     public void loadExtensions(ExtensionLoader loader) {
         backEnds.addAll(loader.loadExtensions(AnalyticsSearchBackendPlugin.class));
-        externalTableExecutors.addAll(loader.loadExtensions(ExternalTableExecutor.class));
         schemaContributors.addAll(loader.loadExtensions(SchemaContributor.class));
         logger.info(
-            "[AnalyticsPlugin] loadExtensions: backends={}, externalExecutors={}, schemaContributors={}",
+            "[AnalyticsPlugin] loadExtensions: backends={}, schemaContributors={}",
             backEnds.size(),
-            externalTableExecutors.size(),
             schemaContributors.size()
         );
         operatorTable = aggregateOperatorTables();
@@ -100,12 +96,8 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
-        ExternalTableExecutor externalExecutor = externalTableExecutors.isEmpty() ? null : externalTableExecutors.get(0);
-        if (!backEnds.isEmpty()) {
-            RemoteQueryBackendHolder.setProvider(backEnds.get(0));
-        }
         return List.of(
-            new DefaultPlanExecutor(backEnds, null/* TODO: pass indices service */, clusterService, externalExecutor),
+            new DefaultPlanExecutor(backEnds, null/* TODO: pass indices service */, clusterService),
             new DefaultEngineContext(clusterService, operatorTable, schemaContributors)
         );
     }
@@ -122,11 +114,13 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             b.bind(new TypeLiteral<QueryPlanExecutor<RelNode, Iterable<Object[]>>>() {
             }).to(DefaultPlanExecutor.class);
             b.bind(EngineContext.class).to(DefaultEngineContext.class);
-            // Note: AnalyticsSearchBackendPlugin is NOT Guice-bound here because
-            // the concrete type (DataFusionPlugin) implements DataFormat with methods
-            // referencing sandbox server classes. Guice introspects those methods during
-            // binding, causing ClassNotFoundException. Instead, the backend is registered
-            // via RemoteQueryBackendHolder in createComponents().
+            // Bind ExternalQueryBackend via a lambda adapter to avoid Guice introspecting
+            // the concrete DataFusionPlugin class (which implements DataFormat with methods
+            // referencing sandbox server classes, causing ClassNotFoundException).
+            if (!backEnds.isEmpty()) {
+                ExternalQueryBackend adapter = scanContext -> backEnds.get(0).executeRemoteQuery(scanContext);
+                b.bind(ExternalQueryBackend.class).toInstance(adapter);
+            }
         });
     }
 

@@ -85,7 +85,7 @@ public abstract class LakehouseIntegTestBase extends OpenSearchIntegTestCase {
 
     /**
      * Provides LakehousePlugin with correct extendedPlugins metadata so that
-     * AnalyticsPlugin discovers it as a SchemaContributor and ExternalTableExecutor
+     * AnalyticsPlugin discovers it as a SchemaContributor
      * via the ExtensiblePlugin extension loading mechanism.
      * <p>
      * The default test framework creates PluginInfo with empty extendedPlugins,
