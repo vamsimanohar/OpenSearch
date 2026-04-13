@@ -8,13 +8,10 @@
 
 package org.opensearch.lakehouse.distributed;
 
-import org.opensearch.action.support.ActionFilters;
 import org.opensearch.analytics.exec.ExternalScanContext;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.service.ClusterService;
-import org.opensearch.tasks.TaskManager;
 import org.opensearch.test.OpenSearchTestCase;
-import org.opensearch.transport.TransportService;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -22,7 +19,6 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
@@ -36,22 +32,22 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
     public void setUp() throws Exception {
         super.setUp();
         // Reset the static backend provider before each test
-        WorkerQueryTransportAction.setBackendProvider(null);
+        WorkerQueryExecutor.setBackendProvider(null);
     }
 
     @Override
     public void tearDown() throws Exception {
-        WorkerQueryTransportAction.setBackendProvider(null);
+        WorkerQueryExecutor.setBackendProvider(null);
         super.tearDown();
     }
 
     public void testSetAndGetBackendProvider() {
-        assertNull(WorkerQueryTransportAction.getBackendProvider());
+        assertNull(WorkerQueryExecutor.getBackendProvider());
 
         AnalyticsSearchBackendPlugin mockProvider = mock(AnalyticsSearchBackendPlugin.class);
-        WorkerQueryTransportAction.setBackendProvider(mockProvider);
+        WorkerQueryExecutor.setBackendProvider(mockProvider);
 
-        assertSame(mockProvider, WorkerQueryTransportAction.getBackendProvider());
+        assertSame(mockProvider, WorkerQueryExecutor.getBackendProvider());
     }
 
     public void testBuildResponseWithRows() {
@@ -61,7 +57,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
             new Object[]{3, "charlie", 7.5}
         );
 
-        WorkerQueryResponse response = WorkerQueryTransportAction.buildResponse(rows);
+        WorkerQueryResponse response = WorkerQueryExecutor.buildResponse(rows);
 
         assertEquals(3, response.getRowCount());
         assertEquals(3, response.getColumnNames().size());
@@ -86,7 +82,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
     public void testBuildResponseWithEmptyRows() {
         List<Object[]> rows = List.of();
 
-        WorkerQueryResponse response = WorkerQueryTransportAction.buildResponse(rows);
+        WorkerQueryResponse response = WorkerQueryExecutor.buildResponse(rows);
 
         assertEquals(0, response.getRowCount());
         assertEquals(0, response.getColumnNames().size());
@@ -97,7 +93,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
     public void testBuildResponseWithSingleRow() {
         List<Object[]> rows = List.<Object[]>of(new Object[]{"value"});
 
-        WorkerQueryResponse response = WorkerQueryTransportAction.buildResponse(rows);
+        WorkerQueryResponse response = WorkerQueryExecutor.buildResponse(rows);
 
         assertEquals(1, response.getRowCount());
         assertEquals(1, response.getColumnNames().size());
@@ -112,7 +108,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
             new Object[]{"y", null}
         );
 
-        WorkerQueryResponse response = WorkerQueryTransportAction.buildResponse(rows);
+        WorkerQueryResponse response = WorkerQueryExecutor.buildResponse(rows);
 
         assertEquals(2, response.getRowCount());
         assertNull(response.getColumnData()[0][0]);
@@ -131,7 +127,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
             new Object[]{null}
         );
 
-        WorkerQueryResponse response = WorkerQueryTransportAction.buildResponse(rows);
+        WorkerQueryResponse response = WorkerQueryExecutor.buildResponse(rows);
 
         assertEquals(2, response.getRowCount());
         assertEquals("UNKNOWN", response.getColumnTypes().get(0));
@@ -144,7 +140,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
             new Object[]{42L}
         );
 
-        WorkerQueryResponse response = WorkerQueryTransportAction.buildResponse(rows);
+        WorkerQueryResponse response = WorkerQueryExecutor.buildResponse(rows);
 
         assertEquals("Long", response.getColumnTypes().get(0));
     }
@@ -153,7 +149,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         LocalDateTime dt = LocalDateTime.of(2013, 7, 15, 10, 30, 0);
         Object[] row = new Object[]{1, dt, "text"};
 
-        Object[] sanitized = WorkerQueryTransportAction.sanitizeRow(row);
+        Object[] sanitized = WorkerQueryExecutor.sanitizeRow(row);
 
         assertNotSame(row, sanitized); // defensive copy, not in-place
         assertSame(dt, row[1]); // original not mutated
@@ -166,7 +162,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         LocalDate date = LocalDate.of(2013, 7, 15);
         Object[] row = new Object[]{date};
 
-        Object[] sanitized = WorkerQueryTransportAction.sanitizeRow(row);
+        Object[] sanitized = WorkerQueryExecutor.sanitizeRow(row);
 
         assertSame(date, row[0]); // original not mutated
         assertEquals("2013-07-15", sanitized[0]);
@@ -175,7 +171,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
     public void testSanitizeRowPreservesNullsAndPrimitives() {
         Object[] row = new Object[]{null, 42L, "hello", 3.14, true};
 
-        Object[] sanitized = WorkerQueryTransportAction.sanitizeRow(row);
+        Object[] sanitized = WorkerQueryExecutor.sanitizeRow(row);
 
         assertNotSame(row, sanitized);
         assertNull(sanitized[0]);
@@ -191,25 +187,17 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
             new Object[]{1, dt}
         );
 
-        WorkerQueryResponse response = WorkerQueryTransportAction.buildResponse(rows);
+        WorkerQueryResponse response = WorkerQueryExecutor.buildResponse(rows);
 
         assertEquals(1, response.getRowCount());
         assertEquals("2013-07-15T10:30", response.getColumnData()[1][0]);
         assertEquals("String", response.getColumnTypes().get(1));
     }
 
-    // ---- resolveLocalCredentials tests ----
+    // ---- resolveCredentials tests ----
 
-    private WorkerQueryTransportAction createActionWithMocks(ClusterService clusterService) {
-        TransportService transportService = mock(TransportService.class);
-        when(transportService.getTaskManager()).thenReturn(mock(TaskManager.class));
-        ActionFilters actionFilters = new ActionFilters(Set.of());
-        return new WorkerQueryTransportAction(transportService, actionFilters, clusterService);
-    }
-
-    public void testResolveLocalCredentialsDefaultAuthSkipsCredentialResolution() {
+    public void testResolveCredentialsDefaultAuthSkipsCredentialResolution() {
         ClusterService clusterService = mock(ClusterService.class);
-        WorkerQueryTransportAction action = createActionWithMocks(clusterService);
 
         Map<String, String> config = new HashMap<>();
         config.put("indexName", "test_index");
@@ -217,7 +205,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         config.put("s3Region", "us-west-2");
         config.put("s3Bucket", "test-bucket");
 
-        Map<String, String> result = action.resolveLocalCredentials(config);
+        Map<String, String> result = WorkerQueryExecutor.resolveCredentials(config, clusterService);
 
         // default auth should NOT resolve credentials — Rust handles IMDS directly
         assertNull(result.get("s3AccessKeyId"));
@@ -233,54 +221,51 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         verifyNoInteractions(clusterService);
     }
 
-    public void testResolveLocalCredentialsNoIndexNameReturnsEarly() {
+    public void testResolveCredentialsNoIndexNameReturnsEarly() {
         ClusterService clusterService = mock(ClusterService.class);
-        WorkerQueryTransportAction action = createActionWithMocks(clusterService);
 
         Map<String, String> config = new HashMap<>();
         config.put("s3Region", "us-west-2");
 
-        Map<String, String> result = action.resolveLocalCredentials(config);
+        Map<String, String> result = WorkerQueryExecutor.resolveCredentials(config, clusterService);
 
         assertEquals("us-west-2", result.get("s3Region"));
         assertNull(result.get("s3AccessKeyId"));
         verifyNoInteractions(clusterService);
     }
 
-    public void testResolveLocalCredentialsLocalModeReturnsEarly() {
+    public void testResolveCredentialsLocalModeReturnsEarly() {
         ClusterService clusterService = mock(ClusterService.class);
-        WorkerQueryTransportAction action = createActionWithMocks(clusterService);
 
         Map<String, String> config = new HashMap<>();
         config.put("indexName", "test_index");
         config.put("localMode", "true");
 
-        Map<String, String> result = action.resolveLocalCredentials(config);
+        Map<String, String> result = WorkerQueryExecutor.resolveCredentials(config, clusterService);
 
         assertEquals("true", result.get("localMode"));
         assertNull(result.get("s3AccessKeyId"));
         verifyNoInteractions(clusterService);
     }
 
-    public void testResolveLocalCredentialsMissingAuthTypeDefaultsToDefault() {
+    public void testResolveCredentialsMissingAuthTypeDefaultsToDefault() {
         ClusterService clusterService = mock(ClusterService.class);
-        WorkerQueryTransportAction action = createActionWithMocks(clusterService);
 
         // No authType key → defaults to "default"
         Map<String, String> config = new HashMap<>();
         config.put("indexName", "test_index");
         config.put("s3Region", "us-west-2");
 
-        Map<String, String> result = action.resolveLocalCredentials(config);
+        Map<String, String> result = WorkerQueryExecutor.resolveCredentials(config, clusterService);
 
         // Should take the default auth path (no credentials)
         assertNull(result.get("s3AccessKeyId"));
         verifyNoInteractions(clusterService);
     }
 
-    // ---- executeLocally tests ----
+    // ---- execute tests ----
 
-    public void testExecuteLocallyReturnsResponse() {
+    public void testExecuteReturnsResponse() {
         // Set up a mock backend that returns two rows
         AnalyticsSearchBackendPlugin mockProvider = mock(AnalyticsSearchBackendPlugin.class);
         when(mockProvider.executeRemoteQuery(any(ExternalScanContext.class)))
@@ -288,7 +273,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
                 new Object[]{1, "hello"},
                 new Object[]{2, "world"}
             ));
-        WorkerQueryTransportAction.setBackendProvider(mockProvider);
+        WorkerQueryExecutor.setBackendProvider(mockProvider);
 
         ClusterService clusterService = mock(ClusterService.class);
         Map<String, String> storageConfig = new HashMap<>();
@@ -302,7 +287,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
             "test_table"
         );
 
-        WorkerQueryResponse response = WorkerQueryTransportAction.executeLocally(request, clusterService);
+        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService);
 
         assertEquals(2, response.getRowCount());
         assertEquals(2, response.getColumnNames().size());
@@ -314,7 +299,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         verify(mockProvider).executeRemoteQuery(any(ExternalScanContext.class));
     }
 
-    public void testExecuteLocallyWithNoBackendThrows() {
+    public void testExecuteWithNoBackendThrows() {
         // No backend set — should throw
         ClusterService clusterService = mock(ClusterService.class);
         Map<String, String> storageConfig = new HashMap<>();
@@ -329,15 +314,15 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         );
 
         expectThrows(IllegalStateException.class, () ->
-            WorkerQueryTransportAction.executeLocally(request, clusterService)
+            WorkerQueryExecutor.execute(request, clusterService)
         );
     }
 
-    public void testExecuteLocallyWithDefaultAuthSkipsCredentials() {
+    public void testExecuteWithDefaultAuthSkipsCredentials() {
         AnalyticsSearchBackendPlugin mockProvider = mock(AnalyticsSearchBackendPlugin.class);
         when(mockProvider.executeRemoteQuery(any(ExternalScanContext.class)))
             .thenReturn(List.<Object[]>of(new Object[]{42}));
-        WorkerQueryTransportAction.setBackendProvider(mockProvider);
+        WorkerQueryExecutor.setBackendProvider(mockProvider);
 
         ClusterService clusterService = mock(ClusterService.class);
         Map<String, String> storageConfig = new HashMap<>();
@@ -353,7 +338,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
             "test_table"
         );
 
-        WorkerQueryResponse response = WorkerQueryTransportAction.executeLocally(request, clusterService);
+        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService);
 
         assertEquals(1, response.getRowCount());
         // ClusterService not accessed for default auth

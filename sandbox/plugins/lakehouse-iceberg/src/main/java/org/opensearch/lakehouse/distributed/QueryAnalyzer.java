@@ -10,6 +10,7 @@ package org.opensearch.lakehouse.distributed;
 
 import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.RelVisitor;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.Sort;
@@ -21,6 +22,8 @@ import java.util.List;
 /**
  * Inspects a Calcite {@link RelNode} tree to determine the appropriate {@link MergeStrategy}
  * for distributed query execution.
+ * <p>
+ * Uses Calcite's {@link RelVisitor} pattern for idiomatic tree traversal.
  * <p>
  * Phase 1 classification rules:
  * <ul>
@@ -56,24 +59,24 @@ public final class QueryAnalyzer {
      * @return the detailed analysis result
      */
     public static AnalysisResult analyzeDetailed(RelNode relNode) {
-        AggregateInfo aggInfo = findAggregate(relNode);
-        SortInfo sortInfo = findSort(relNode);
+        PlanClassifier classifier = new PlanClassifier();
+        classifier.go(relNode);
 
-        if (aggInfo != null) {
-            if (!aggInfo.aggregate.getGroupSet().isEmpty()) {
+        if (classifier.aggregate != null) {
+            if (!classifier.aggregate.getGroupSet().isEmpty()) {
                 return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
-            if (hasDistinctOrAvg(aggInfo.aggregate)) {
+            if (hasDistinctOrAvg(classifier.aggregate)) {
                 return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
-            SqlKind[] aggKinds = extractAggKinds(aggInfo.aggregate);
+            SqlKind[] aggKinds = extractAggKinds(classifier.aggregate);
             return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0);
         }
 
-        if (sortInfo != null && sortInfo.sort.fetch != null) {
-            int[] sortColumns = extractSortColumns(sortInfo.sort);
-            boolean[] sortAsc = extractSortDirections(sortInfo.sort);
-            int limit = extractLimit(sortInfo.sort);
+        if (classifier.sort != null && classifier.sort.fetch != null) {
+            int[] sortColumns = extractSortColumns(classifier.sort);
+            boolean[] sortAsc = extractSortDirections(classifier.sort);
+            int limit = extractLimit(classifier.sort);
             return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit);
         }
 
@@ -81,44 +84,24 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Recursively searches for a {@link Sort} node in the plan tree.
-     *
-     * @param node the node to search from
-     * @return the SortInfo if found, null otherwise
+     * Visitor that walks the RelNode tree to find Aggregate and Sort nodes.
      */
-    static SortInfo findSort(RelNode node) {
-        if (node instanceof Sort) {
-            Sort sort = (Sort) node;
-            if (!sort.getCollation().getFieldCollations().isEmpty()) {
-                return new SortInfo(sort);
-            }
-        }
-        for (RelNode input : node.getInputs()) {
-            SortInfo result = findSort(input);
-            if (result != null) {
-                return result;
-            }
-        }
-        return null;
-    }
+    static class PlanClassifier extends RelVisitor {
+        Aggregate aggregate;
+        Sort sort;
 
-    /**
-     * Recursively searches for an {@link Aggregate} node in the plan tree.
-     *
-     * @param node the node to search from
-     * @return the AggregateInfo if found, null otherwise
-     */
-    static AggregateInfo findAggregate(RelNode node) {
-        if (node instanceof Aggregate) {
-            return new AggregateInfo((Aggregate) node);
-        }
-        for (RelNode input : node.getInputs()) {
-            AggregateInfo result = findAggregate(input);
-            if (result != null) {
-                return result;
+        @Override
+        public void visit(RelNode node, int ordinal, RelNode parent) {
+            if (node instanceof Aggregate && aggregate == null) {
+                aggregate = (Aggregate) node;
+            } else if (node instanceof Sort && sort == null) {
+                Sort s = (Sort) node;
+                if (!s.getCollation().getFieldCollations().isEmpty()) {
+                    sort = s;
+                }
             }
+            super.visit(node, ordinal, parent);
         }
-        return null;
     }
 
     /**
@@ -184,28 +167,6 @@ public final class QueryAnalyzer {
             return ((RexLiteral) sort.fetch).getValueAs(Integer.class);
         }
         return 0;
-    }
-
-    /**
-     * Holds a reference to a discovered Aggregate node.
-     */
-    static final class AggregateInfo {
-        final Aggregate aggregate;
-
-        AggregateInfo(Aggregate aggregate) {
-            this.aggregate = aggregate;
-        }
-    }
-
-    /**
-     * Holds a reference to a discovered Sort node.
-     */
-    static final class SortInfo {
-        final Sort sort;
-
-        SortInfo(Sort sort) {
-            this.sort = sort;
-        }
     }
 
     /**

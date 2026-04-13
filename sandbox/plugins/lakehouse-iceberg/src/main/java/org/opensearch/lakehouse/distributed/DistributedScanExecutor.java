@@ -15,9 +15,13 @@ import org.opensearch.action.support.GroupedActionListener;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.core.common.io.stream.StreamInput;
+import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.transport.TransportException;
 import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.TransportService;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -26,19 +30,17 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Orchestrates distributed query execution across multiple cluster nodes.
+ * Unified scan executor that handles both single-node and distributed query execution.
  * <p>
- * Flow:
- * <ol>
- *   <li>NodeDiscovery: get eligible worker nodes</li>
- *   <li>QueryAnalyzer: determine merge strategy from the Calcite plan</li>
- *   <li>If SINGLE_NODE: return null (caller uses single-node path)</li>
- *   <li>FilePartitioner: split files across workers</li>
- *   <li>Dispatch requests to workers via TransportService</li>
- *   <li>Collect responses via GroupedActionListener</li>
- *   <li>ResultMerger: merge worker responses</li>
- *   <li>Convert to Iterable&lt;Object[]&gt; for the pipeline</li>
- * </ol>
+ * When multiple eligible worker nodes are available and the query is distributable,
+ * splits files across workers, dispatches in parallel, and merges results.
+ * Otherwise, delegates to single-node execution via {@link WorkerQueryExecutor}.
+ * <p>
+ * Note: The Calcite query pipeline above this class is synchronous
+ * ({@code prepareScan()} returns {@code ExternalScanContext}), so distributed dispatch
+ * uses {@code CompletableFuture.get()} to bridge async transport to the sync caller.
+ * Fully async execution would require rewriting the Calcite pipeline to use
+ * {@code ActionListener} callbacks throughout — a future improvement.
  *
  * @opensearch.internal
  */
@@ -79,10 +81,14 @@ public class DistributedScanExecutor {
     }
 
     /**
-     * Attempts to execute the query in a distributed fashion.
+     * Executes the query, automatically choosing between distributed and single-node paths.
      * <p>
-     * Returns null if the query should fall back to single-node execution
-     * (either because there's only one eligible node, or the query requires SINGLE_NODE strategy).
+     * Distributed execution is used when:
+     * <ul>
+     *   <li>Multiple eligible worker nodes are available</li>
+     *   <li>The query's merge strategy is not {@link MergeStrategy#SINGLE_NODE}</li>
+     * </ul>
+     * Otherwise, falls back to single-node execution via {@link WorkerQueryExecutor}.
      *
      * @param relNode       the Calcite logical plan (for query analysis)
      * @param sqlQuery      the SQL query string to send to workers
@@ -90,7 +96,7 @@ public class DistributedScanExecutor {
      * @param fileSizes     file sizes in bytes, parallel to filePaths
      * @param storageConfig storage configuration (S3 region, bucket, credentials)
      * @param tableName     the table name for the query
-     * @return merged rows as Iterable&lt;Object[]&gt;, or null if single-node fallback is needed
+     * @return merged rows as Iterable&lt;Object[]&gt;
      */
     public Iterable<Object[]> execute(
         RelNode relNode,
@@ -101,19 +107,21 @@ public class DistributedScanExecutor {
         String tableName
     ) {
         List<DiscoveryNode> workers = nodeDiscovery.getEligibleNodes();
+
+        // Single-node: execute directly without distribution overhead
         if (workers.size() <= 1) {
-            logger.debug("[DistributedScan] Only {} eligible node(s), falling back to single-node", workers.size());
-            return null;
+            logger.debug("[ScanExecutor] Single node, executing locally");
+            return executeSingleNode(sqlQuery, filePaths, fileSizes, storageConfig, tableName);
         }
 
         QueryAnalyzer.AnalysisResult analysis = QueryAnalyzer.analyzeDetailed(relNode);
         if (analysis.strategy == MergeStrategy.SINGLE_NODE) {
-            logger.debug("[DistributedScan] Query requires SINGLE_NODE execution, falling back");
-            return null;
+            logger.debug("[ScanExecutor] Query requires SINGLE_NODE execution");
+            return executeSingleNode(sqlQuery, filePaths, fileSizes, storageConfig, tableName);
         }
 
         logger.info(
-            "[DistributedScan] Distributing query across {} workers, strategy={}, files={}",
+            "[ScanExecutor] Distributing query across {} workers, strategy={}, files={}",
             workers.size(),
             analysis.strategy,
             filePaths.size()
@@ -125,7 +133,7 @@ public class DistributedScanExecutor {
         // Dispatch requests and collect responses
         List<WorkerQueryResponse> responses = dispatchAndCollect(workers, assignments, sqlQuery, storageConfig, tableName);
 
-        // Merge results using analysis metadata (agg kinds for GLOBAL_MERGE, sort/limit for TOPK_MERGE)
+        // Merge results using analysis metadata
         WorkerQueryResponse merged = ResultMerger.merge(
             responses, analysis.strategy, analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
         );
@@ -135,7 +143,26 @@ public class DistributedScanExecutor {
     }
 
     /**
-     * Dispatches worker requests and collects responses synchronously using a CompletableFuture.
+     * Executes the query on the local node only, using {@link WorkerQueryExecutor}.
+     */
+    private Iterable<Object[]> executeSingleNode(
+        String sqlQuery,
+        List<String> filePaths,
+        long[] fileSizes,
+        Map<String, String> storageConfig,
+        String tableName
+    ) {
+        WorkerQueryRequest request = new WorkerQueryRequest(sqlQuery, filePaths, fileSizes, storageConfig, tableName);
+        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService);
+        return ResultSerializer.toRows(response);
+    }
+
+    /**
+     * Dispatches worker requests and collects responses synchronously.
+     * <p>
+     * Uses {@link GroupedActionListener} to collect all worker responses, bridged to
+     * a {@link CompletableFuture} for synchronous consumption. This blocking pattern
+     * is necessary because the Calcite pipeline above is synchronous.
      *
      * @param workers       eligible worker nodes
      * @param assignments   file assignments (one per worker)
@@ -166,7 +193,7 @@ public class DistributedScanExecutor {
             DiscoveryNode targetNode = workers.get(i % workers.size());
 
             if (assignment.getFilePaths().isEmpty()) {
-                // No files for this worker — return empty response
+                logger.warn("[ScanExecutor] Worker {} has no files assigned (more workers than files)", i);
                 groupListener.onResponse(
                     new WorkerQueryResponse(List.of(), List.of(), 0, new Object[0][])
                 );
@@ -207,14 +234,14 @@ public class DistributedScanExecutor {
      * Dispatches a request to a remote worker node via the transport service.
      */
     void dispatchRemote(DiscoveryNode node, WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
-        logger.debug("[DistributedScan] Dispatching to remote node {}: {} files", node.getId(), request.getFilePaths().size());
+        logger.debug("[ScanExecutor] Dispatching to remote node {}: {} files", node.getId(), request.getFilePaths().size());
         transportService.sendRequest(
             node,
             WorkerQueryAction.NAME,
             request,
             new TransportResponseHandler<WorkerQueryResponse>() {
                 @Override
-                public WorkerQueryResponse read(org.opensearch.core.common.io.stream.StreamInput in) throws java.io.IOException {
+                public WorkerQueryResponse read(StreamInput in) throws IOException {
                     return new WorkerQueryResponse(in);
                 }
 
@@ -224,13 +251,13 @@ public class DistributedScanExecutor {
                 }
 
                 @Override
-                public void handleException(org.opensearch.transport.TransportException exp) {
+                public void handleException(TransportException exp) {
                     listener.onFailure(exp);
                 }
 
                 @Override
                 public String executor() {
-                    return org.opensearch.threadpool.ThreadPool.Names.SAME;
+                    return ThreadPool.Names.SAME;
                 }
             }
         );
@@ -239,12 +266,14 @@ public class DistributedScanExecutor {
     /**
      * Dispatches a request to the local node by executing the worker query directly
      * on a GENERIC thread pool thread, bypassing transport serialization entirely.
+     * This is the coordinator-as-worker optimization: saves ~0.1s per query by
+     * avoiding serialize → send to localhost → deserialize round-trip.
      */
     void dispatchLocal(WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
-        logger.debug("[DistributedScan] Executing locally (direct, no transport): {} files", request.getFilePaths().size());
-        transportService.getThreadPool().executor(org.opensearch.threadpool.ThreadPool.Names.GENERIC).execute(() -> {
+        logger.debug("[ScanExecutor] Executing locally (direct, no transport): {} files", request.getFilePaths().size());
+        transportService.getThreadPool().executor(ThreadPool.Names.GENERIC).execute(() -> {
             try {
-                WorkerQueryResponse response = WorkerQueryTransportAction.executeLocally(request, clusterService);
+                WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService);
                 listener.onResponse(response);
             } catch (Exception e) {
                 listener.onFailure(e);

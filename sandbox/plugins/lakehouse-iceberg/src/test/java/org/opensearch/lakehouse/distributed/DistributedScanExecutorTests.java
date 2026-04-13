@@ -10,6 +10,8 @@ package org.opensearch.lakehouse.distributed;
 
 import org.apache.calcite.rel.RelNode;
 import org.opensearch.Version;
+import org.opensearch.analytics.exec.ExternalScanContext;
+import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
@@ -30,8 +32,28 @@ import static org.mockito.Mockito.when;
 
 public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
-    public void testSingleNodeFallbackReturnsNull() {
-        // Only 1 eligible node → returns null (fall back to single-node)
+    @Override
+    public void setUp() throws Exception {
+        super.setUp();
+        WorkerQueryExecutor.setBackendProvider(null);
+    }
+
+    @Override
+    public void tearDown() throws Exception {
+        WorkerQueryExecutor.setBackendProvider(null);
+        super.tearDown();
+    }
+
+    private void setupMockBackend(Object[]... rows) {
+        AnalyticsSearchBackendPlugin mockProvider = mock(AnalyticsSearchBackendPlugin.class);
+        when(mockProvider.executeRemoteQuery(any(ExternalScanContext.class)))
+            .thenReturn(List.of(rows));
+        WorkerQueryExecutor.setBackendProvider(mockProvider);
+    }
+
+    public void testSingleNodeFallbackExecutesLocally() {
+        // Only 1 eligible node → executes locally via WorkerQueryExecutor
+        setupMockBackend(new Object[]{1, "hello"}, new Object[]{2, "world"});
         DiscoveryNode localNode = newNode("local", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         ClusterService clusterService = mockClusterService(List.of(localNode), "local");
         TransportService transportService = mock(TransportService.class);
@@ -44,15 +66,19 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             "SELECT * FROM t",
             List.of("f1", "f2"),
             new long[]{100, 200},
-            Map.of(),
+            Map.of("localMode", "true"),
             "t"
         );
 
-        assertNull(result);
+        assertNotNull(result);
+        List<Object[]> rows = new ArrayList<>();
+        result.forEach(rows::add);
+        assertEquals(2, rows.size());
     }
 
-    public void testSingleNodeStrategyFallbackReturnsNull() {
-        // 2 eligible nodes but query requires SINGLE_NODE → returns null
+    public void testSingleNodeStrategyFallbackExecutesLocally() {
+        // 2 eligible nodes but query requires SINGLE_NODE → executes locally
+        setupMockBackend(new Object[]{42});
         DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
@@ -68,15 +94,19 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             "SELECT col, COUNT(*) FROM t GROUP BY col",
             List.of("f1", "f2"),
             new long[]{100, 200},
-            Map.of(),
+            Map.of("localMode", "true"),
             "t"
         );
 
-        assertNull(result);
+        assertNotNull(result);
+        List<Object[]> rows = new ArrayList<>();
+        result.forEach(rows::add);
+        assertEquals(1, rows.size());
     }
 
-    public void testNoEligibleNodesReturnsNull() {
-        // NodeDiscovery falls back to local node (1 node) → returns null
+    public void testNoEligibleNodesExecutesLocally() {
+        // NodeDiscovery falls back to local node (1 node) → executes locally
+        setupMockBackend(new Object[]{"value"});
         DiscoveryNode localNode = newNode("local", Map.of());
         ClusterService clusterService = mockClusterService(List.of(localNode), "local");
         TransportService transportService = mock(TransportService.class);
@@ -89,11 +119,14 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             "SELECT * FROM t",
             List.of("f1"),
             new long[]{100},
-            Map.of(),
+            Map.of("localMode", "true"),
             "t"
         );
 
-        assertNull(result);
+        assertNotNull(result);
+        List<Object[]> rows = new ArrayList<>();
+        result.forEach(rows::add);
+        assertEquals(1, rows.size());
     }
 
     public void testConstructorWithNodeDiscovery() {

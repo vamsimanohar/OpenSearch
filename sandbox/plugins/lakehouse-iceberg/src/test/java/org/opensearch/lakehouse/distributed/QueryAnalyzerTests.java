@@ -34,6 +34,8 @@ import org.opensearch.test.OpenSearchTestCase;
 import java.math.BigDecimal;
 import java.util.List;
 
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -103,16 +105,6 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.TOPK_MERGE, QueryAnalyzer.analyze(project));
     }
 
-    public void testFindAggregateReturnsNullForNoAggregate() {
-        RelNode simple = mockSimpleNode();
-        assertNull(QueryAnalyzer.findAggregate(simple));
-    }
-
-    public void testFindSortReturnsNullForNoSort() {
-        RelNode simple = mockSimpleNode();
-        assertNull(QueryAnalyzer.findSort(simple));
-    }
-
     public void testHasDistinctOrAvgReturnsFalseForCount() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
         assertFalse(QueryAnalyzer.hasDistinctOrAvg(agg));
@@ -133,18 +125,6 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         AggregateCall distinctSumCall = makeAggCall(SqlStdOperatorTable.SUM, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, distinctSumCall));
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
-    }
-
-    public void testAggregateInfoHoldsReference() {
-        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of());
-        QueryAnalyzer.AggregateInfo info = new QueryAnalyzer.AggregateInfo(agg);
-        assertSame(agg, info.aggregate);
-    }
-
-    public void testSortInfoHoldsReference() {
-        Sort sort = makeSort(true, true);
-        QueryAnalyzer.SortInfo info = new QueryAnalyzer.SortInfo(sort);
-        assertSame(sort, info.sort);
     }
 
     public void testEmptyAggCallListWithGroupByReturnsSingleNode() {
@@ -307,6 +287,12 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
     private RelNode mockNodeWithInput(RelNode input) {
         RelNode node = mock(RelNode.class);
         when(node.getInputs()).thenReturn(List.of(input));
+        // RelVisitor uses childrenAccept(), not getInputs(), for traversal
+        doAnswer(invocation -> {
+            org.apache.calcite.rel.RelVisitor visitor = invocation.getArgument(0);
+            visitor.visit(input, 0, node);
+            return null;
+        }).when(node).childrenAccept(any(org.apache.calcite.rel.RelVisitor.class));
         return node;
     }
 

@@ -189,21 +189,13 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Extern
             })
             .toList();
 
-        // 5. Try distributed execution if multiple worker nodes are available
-        DistributedScanExecutor distExecutor = LakehouseState.instance().distributedScanExecutor();
-        if (distExecutor != null) {
-            try {
-                Iterable<Object[]> distributedResult = distExecutor.execute(
-                    logicalPlan, sqlQuery, filePaths, fileSizes, storageConfig, tableName
-                );
-                if (distributedResult != null) {
-                    logger.info("[LakehousePlugin] Using distributed execution across multiple workers");
-                    return new ExternalScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig, distributedResult);
-                }
-            } catch (Exception e) {
-                logger.error("[LakehousePlugin] Distributed execution failed, query will not be retried", e);
-                throw new RuntimeException("Distributed query execution failed", e);
-            }
+        // 5. Execute query via unified scan executor (handles both single-node and distributed)
+        DistributedScanExecutor scanExecutor = LakehouseState.instance().distributedScanExecutor();
+        if (scanExecutor != null) {
+            Iterable<Object[]> result = scanExecutor.execute(
+                logicalPlan, sqlQuery, filePaths, fileSizes, storageConfig, tableName
+            );
+            return new ExternalScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig, result);
         }
 
         return new ExternalScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig);
