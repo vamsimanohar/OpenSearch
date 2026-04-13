@@ -13,7 +13,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
 import org.opensearch.analytics.EngineContext;
-import org.opensearch.analytics.exec.ExternalQueryBackend;
+import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.lakehouse.exec.LakehouseQueryExecutor;
@@ -39,10 +39,10 @@ public class LakehouseQueryTransportAction extends HandledTransportAction<Lakeho
         TransportService transportService,
         ActionFilters actionFilters,
         EngineContext engineContext,
-        ExternalQueryBackend queryBackend
+        DataWarehouseQueryEngine queryEngine
     ) {
         super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new, ThreadPool.Names.GENERIC);
-        this.queryExecutor = new LakehouseQueryExecutor(engineContext, queryBackend);
+        this.queryExecutor = new LakehouseQueryExecutor(engineContext, queryEngine);
     }
 
     @Override

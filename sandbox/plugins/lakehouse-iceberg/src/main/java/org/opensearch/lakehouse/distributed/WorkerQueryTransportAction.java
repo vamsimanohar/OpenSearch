@@ -12,7 +12,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
-import org.opensearch.analytics.exec.ExternalQueryBackend;
+import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
@@ -39,7 +39,7 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
     private static final Logger logger = LogManager.getLogger(WorkerQueryTransportAction.class);
 
     private final ClusterService clusterService;
-    private final ExternalQueryBackend queryBackend;
+    private final DataWarehouseQueryEngine queryEngine;
 
     /**
      * Creates the transport action via Guice injection.
@@ -50,25 +50,25 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
      * @param transportService the transport service
      * @param actionFilters    the action filters
      * @param clusterService   the cluster service
-     * @param queryBackend     the external query backend for executing queries
+     * @param queryEngine     the external query backend for executing queries
      */
     @Inject
     public WorkerQueryTransportAction(
         TransportService transportService,
         ActionFilters actionFilters,
         ClusterService clusterService,
-        ExternalQueryBackend queryBackend
+        DataWarehouseQueryEngine queryEngine
     ) {
         super(WorkerQueryAction.NAME, transportService, actionFilters, WorkerQueryRequest::new, ThreadPool.Names.GENERIC);
         this.clusterService = clusterService;
-        this.queryBackend = queryBackend;
-        LakehouseState.instance().initDistributedExecutor(transportService, clusterService, queryBackend);
+        this.queryEngine = queryEngine;
+        LakehouseState.instance().initDistributedExecutor(transportService, clusterService, queryEngine);
     }
 
     @Override
     protected void doExecute(Task task, WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
         try {
-            WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryBackend);
+            WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
             listener.onResponse(response);
         } catch (Exception e) {
             logger.error("[WorkerQuery] Execution failed", e);

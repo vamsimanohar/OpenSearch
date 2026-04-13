@@ -10,7 +10,7 @@ package org.opensearch.lakehouse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.analytics.exec.ExternalQueryBackend;
+import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
@@ -75,10 +75,10 @@ public final class LakehouseState {
      *
      * @param transportService the transport service for remote communication
      * @param clusterService   the cluster service for node discovery
-     * @param queryBackend     the external query backend for executing queries
+     * @param queryEngine     the external query backend for executing queries
      */
-    public void initDistributedExecutor(TransportService transportService, ClusterService clusterService, ExternalQueryBackend queryBackend) {
-        this.distributedScanExecutor = new DistributedScanExecutor(transportService, clusterService, queryBackend);
+    public void initDistributedExecutor(TransportService transportService, ClusterService clusterService, DataWarehouseQueryEngine queryEngine) {
+        this.distributedScanExecutor = new DistributedScanExecutor(transportService, clusterService, queryEngine);
         logger.info("[LakehouseState] Distributed scan executor initialized");
     }
 

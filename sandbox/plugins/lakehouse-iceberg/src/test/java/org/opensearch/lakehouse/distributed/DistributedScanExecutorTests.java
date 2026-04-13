@@ -10,8 +10,8 @@ package org.opensearch.lakehouse.distributed;
 
 import org.apache.calcite.rel.RelNode;
 import org.opensearch.Version;
-import org.opensearch.analytics.exec.ExternalScanContext;
-import org.opensearch.analytics.exec.ExternalQueryBackend;
+import org.opensearch.analytics.exec.DataWarehouseScanContext;
+import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
@@ -32,16 +32,16 @@ import static org.mockito.Mockito.when;
 
 public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
-    private ExternalQueryBackend setupMockBackend(Object[]... rows) {
-        ExternalQueryBackend mockBackend = mock(ExternalQueryBackend.class);
-        when(mockBackend.executeRemoteQuery(any(ExternalScanContext.class)))
+    private DataWarehouseQueryEngine setupMockBackend(Object[]... rows) {
+        DataWarehouseQueryEngine mockBackend = mock(DataWarehouseQueryEngine.class);
+        when(mockBackend.executeQuery(any(DataWarehouseScanContext.class)))
             .thenReturn(List.of(rows));
         return mockBackend;
     }
 
     public void testSingleNodeFallbackExecutesLocally() {
         // Only 1 eligible node → executes locally via WorkerQueryExecutor
-        ExternalQueryBackend mockBackend = setupMockBackend(new Object[]{1, "hello"}, new Object[]{2, "world"});
+        DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{1, "hello"}, new Object[]{2, "world"});
         DiscoveryNode localNode = newNode("local", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         ClusterService clusterService = mockClusterService(List.of(localNode), "local");
         TransportService transportService = mock(TransportService.class);
@@ -66,7 +66,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
     public void testSingleNodeStrategyFallbackExecutesLocally() {
         // 2 eligible nodes but query requires SINGLE_NODE → executes locally
-        ExternalQueryBackend mockBackend = setupMockBackend(new Object[]{42});
+        DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{42});
         DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
@@ -94,7 +94,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
     public void testNoEligibleNodesExecutesLocally() {
         // NodeDiscovery falls back to local node (1 node) → executes locally
-        ExternalQueryBackend mockBackend = setupMockBackend(new Object[]{"value"});
+        DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{"value"});
         DiscoveryNode localNode = newNode("local", Map.of());
         ClusterService clusterService = mockClusterService(List.of(localNode), "local");
         TransportService transportService = mock(TransportService.class);
@@ -123,7 +123,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         NodeDiscovery nodeDiscovery = mock(NodeDiscovery.class);
 
         // Use the package-private constructor
-        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, nodeDiscovery, mock(ExternalQueryBackend.class));
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, nodeDiscovery, mock(DataWarehouseQueryEngine.class));
         assertNotNull(executor);
     }
 
@@ -138,7 +138,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
         TransportService transportService = mock(TransportService.class);
 
-        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mock(ExternalQueryBackend.class));
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mock(DataWarehouseQueryEngine.class));
 
         // Create an empty assignment (no files)
         FilePartitioner.FileAssignment emptyAssignment = new FilePartitioner.FileAssignment(List.of(), new long[]{}, 0);
@@ -181,7 +181,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
         TransportService transportService = mock(TransportService.class);
 
-        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mock(ExternalQueryBackend.class));
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mock(DataWarehouseQueryEngine.class));
 
         WorkerQueryRequest request = new WorkerQueryRequest("SELECT 1", List.of("f1"), new long[]{100}, Map.of(), "t");
 
@@ -211,7 +211,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         when(transportService.getThreadPool()).thenReturn(threadPool);
         when(threadPool.executor(org.opensearch.threadpool.ThreadPool.Names.GENERIC)).thenReturn(executorService);
 
-        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mock(ExternalQueryBackend.class));
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mock(DataWarehouseQueryEngine.class));
 
         WorkerQueryRequest request = new WorkerQueryRequest(
             "SELECT 1", List.of("f1"), new long[]{100}, Map.of("localMode", "true"), "t"

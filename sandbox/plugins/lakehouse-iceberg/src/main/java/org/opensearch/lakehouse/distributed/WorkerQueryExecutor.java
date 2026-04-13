@@ -10,8 +10,8 @@ package org.opensearch.lakehouse.distributed;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.analytics.exec.ExternalScanContext;
-import org.opensearch.analytics.exec.ExternalQueryBackend;
+import org.opensearch.analytics.exec.DataWarehouseScanContext;
+import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.lakehouse.LakehouseState;
@@ -33,7 +33,7 @@ import java.util.Map;
  * <p>
  * Responsible for:
  * <ul>
- *   <li>Resolving the DataFusion backend</li>
+ *   <li>Resolving the DataFusion queryEngine</li>
  *   <li>Resolving AWS credentials locally (via IMDS/STS)</li>
  *   <li>Delegating to DataFusion and building the response</li>
  * </ul>
@@ -55,18 +55,18 @@ public final class WorkerQueryExecutor {
      *
      * @param request        the worker query request
      * @param clusterService the cluster service for credential resolution
-     * @param backend        the external query backend for executing queries
+     * @param queryEngine    the data warehouse query engine for executing queries
      * @return the worker query response
      */
     @SuppressWarnings("removal")
-    public static WorkerQueryResponse execute(WorkerQueryRequest request, ClusterService clusterService, ExternalQueryBackend backend) {
-        if (backend == null) {
-            throw new IllegalStateException("No analytics backend registered for worker query execution");
+    public static WorkerQueryResponse execute(WorkerQueryRequest request, ClusterService clusterService, DataWarehouseQueryEngine queryEngine) {
+        if (queryEngine == null) {
+            throw new IllegalStateException("No DataWarehouseQueryEngine registered for worker query execution");
         }
 
         Map<String, String> storageConfig = resolveCredentials(request.getStorageConfig(), clusterService);
 
-        ExternalScanContext scanContext = new ExternalScanContext(
+        DataWarehouseScanContext scanContext = new DataWarehouseScanContext(
             request.getTableName(),
             request.getFilePaths(),
             request.getFileSizes(),
@@ -83,7 +83,7 @@ public final class WorkerQueryExecutor {
 
         long t0 = System.currentTimeMillis();
         Iterable<Object[]> rows = AccessController.doPrivileged(
-            (PrivilegedAction<Iterable<Object[]>>) () -> backend.executeRemoteQuery(scanContext)
+            (PrivilegedAction<Iterable<Object[]>>) () -> queryEngine.executeQuery(scanContext)
         );
         long t1 = System.currentTimeMillis();
 
@@ -142,7 +142,7 @@ public final class WorkerQueryExecutor {
     }
 
     /**
-     * Converts the row-oriented result from the backend into a column-oriented response.
+     * Converts the row-oriented result from the queryEngine into a column-oriented response.
      *
      * @param rows iterable of row arrays from executeRemoteQuery
      * @return column-oriented WorkerQueryResponse

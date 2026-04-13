@@ -20,8 +20,8 @@ import org.apache.iceberg.expressions.Expression;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.EngineContext;
-import org.opensearch.analytics.exec.ExternalQueryBackend;
-import org.opensearch.analytics.exec.ExternalScanContext;
+import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
+import org.opensearch.analytics.exec.DataWarehouseScanContext;
 import org.opensearch.lakehouse.LakehouseState;
 import org.opensearch.lakehouse.catalog.CatalogConfig;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
@@ -49,7 +49,7 @@ import java.util.Map;
  *   <li>Parse SQL/PPL to Calcite RelNode (via {@link UnifiedQueryPlanner})</li>
  *   <li>Iceberg scan planning (manifest pruning to data file paths)</li>
  *   <li>Convert RelNode to DataFusion SQL</li>
- *   <li>Execute via {@link DistributedScanExecutor} or single-node via {@link ExternalQueryBackend}</li>
+ *   <li>Execute via {@link DistributedScanExecutor} or single-node via {@link DataWarehouseQueryEngine}</li>
  * </ol>
  *
  * @opensearch.internal
@@ -60,11 +60,11 @@ public class LakehouseQueryExecutor {
     private static final String DEFAULT_CATALOG = "opensearch";
 
     private final EngineContext engineContext;
-    private final ExternalQueryBackend queryBackend;
+    private final DataWarehouseQueryEngine queryEngine;
 
-    public LakehouseQueryExecutor(EngineContext engineContext, ExternalQueryBackend queryBackend) {
+    public LakehouseQueryExecutor(EngineContext engineContext, DataWarehouseQueryEngine queryEngine) {
         this.engineContext = engineContext;
-        this.queryBackend = queryBackend;
+        this.queryEngine = queryEngine;
     }
 
     /**
@@ -173,8 +173,8 @@ public class LakehouseQueryExecutor {
         }
 
         // Fallback: single-node via backend directly
-        ExternalScanContext scanContext = new ExternalScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig);
-        return queryBackend.executeRemoteQuery(scanContext);
+        DataWarehouseScanContext scanContext = new DataWarehouseScanContext(tableName, filePaths, fileSizes, sqlQuery, storageConfig);
+        return queryEngine.executeQuery(scanContext);
     }
 
     // --- Helper methods ---

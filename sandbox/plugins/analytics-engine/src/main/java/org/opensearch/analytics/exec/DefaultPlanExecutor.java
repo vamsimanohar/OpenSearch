@@ -17,7 +17,7 @@ import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
-import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.index.IndexService;
 import org.opensearch.index.engine.DataFormatAwareEngine;
@@ -39,7 +39,7 @@ import java.util.Set;
 public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<Object[]>> {
 
     private static final Logger logger = LogManager.getLogger(DefaultPlanExecutor.class);
-    private final Map<String, AnalyticsSearchBackendPlugin> backEnds;
+    private final Map<String, SearchExecEngineProvider> backEnds;
     private volatile IndicesService indicesService;
     private final ClusterService clusterService;
 
@@ -51,12 +51,12 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
      * @param clusterService service for accessing cluster state
      */
     public DefaultPlanExecutor(
-        List<AnalyticsSearchBackendPlugin> providers,
+        List<SearchExecEngineProvider> providers,
         IndicesService indicesService,
         ClusterService clusterService
     ) {
         this.backEnds = new LinkedHashMap<>();
-        for (AnalyticsSearchBackendPlugin provider : providers) {
+        for (SearchExecEngineProvider provider : providers) {
             this.backEnds.put(provider.name(), provider);
         }
         this.indicesService = indicesService;
@@ -66,7 +66,7 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
     @Override
     public Iterable<Object[]> execute(RelNode logicalFragment, Object context) {
         String tableName = extractTableName(logicalFragment);
-        AnalyticsSearchBackendPlugin provider = selectBackEnd();
+        SearchExecEngineProvider provider = selectBackEnd();
         if (provider == null) {
             return new ArrayList<>();
         }
@@ -124,7 +124,7 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
         return indexService.getShardOrNull(shardIds.iterator().next());
     }
 
-    private AnalyticsSearchBackendPlugin selectBackEnd() {
+    private SearchExecEngineProvider selectBackEnd() {
         if (backEnds.isEmpty()) {
             logger.warn("No back-end plugins registered — queries will return empty results");
             return null;

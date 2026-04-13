@@ -12,7 +12,7 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.GroupedActionListener;
-import org.opensearch.analytics.exec.ExternalQueryBackend;
+import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
@@ -55,20 +55,20 @@ public class DistributedScanExecutor {
     private final TransportService transportService;
     private final ClusterService clusterService;
     private final NodeDiscovery nodeDiscovery;
-    private final ExternalQueryBackend queryBackend;
+    private final DataWarehouseQueryEngine queryEngine;
 
     /**
      * Creates a new DistributedScanExecutor.
      *
      * @param transportService the transport service for sending requests to remote nodes
      * @param clusterService   the cluster service for node discovery
-     * @param queryBackend     the external query backend for executing queries
+     * @param queryEngine     the external query backend for executing queries
      */
-    public DistributedScanExecutor(TransportService transportService, ClusterService clusterService, ExternalQueryBackend queryBackend) {
+    public DistributedScanExecutor(TransportService transportService, ClusterService clusterService, DataWarehouseQueryEngine queryEngine) {
         this.transportService = transportService;
         this.clusterService = clusterService;
         this.nodeDiscovery = new NodeDiscovery(clusterService);
-        this.queryBackend = queryBackend;
+        this.queryEngine = queryEngine;
     }
 
     /**
@@ -77,13 +77,13 @@ public class DistributedScanExecutor {
      * @param transportService the transport service
      * @param clusterService   the cluster service
      * @param nodeDiscovery    the node discovery instance
-     * @param queryBackend     the external query backend for executing queries
+     * @param queryEngine     the external query backend for executing queries
      */
-    DistributedScanExecutor(TransportService transportService, ClusterService clusterService, NodeDiscovery nodeDiscovery, ExternalQueryBackend queryBackend) {
+    DistributedScanExecutor(TransportService transportService, ClusterService clusterService, NodeDiscovery nodeDiscovery, DataWarehouseQueryEngine queryEngine) {
         this.transportService = transportService;
         this.clusterService = clusterService;
         this.nodeDiscovery = nodeDiscovery;
-        this.queryBackend = queryBackend;
+        this.queryEngine = queryEngine;
     }
 
     /**
@@ -159,7 +159,7 @@ public class DistributedScanExecutor {
         String tableName
     ) {
         WorkerQueryRequest request = new WorkerQueryRequest(sqlQuery, filePaths, fileSizes, storageConfig, tableName);
-        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryBackend);
+        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
         return ResultSerializer.toRows(response);
     }
 
@@ -279,7 +279,7 @@ public class DistributedScanExecutor {
         logger.debug("[ScanExecutor] Executing locally (direct, no transport): {} files", request.getFilePaths().size());
         transportService.getThreadPool().executor(ThreadPool.Names.GENERIC).execute(() -> {
             try {
-                WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryBackend);
+                WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
                 listener.onResponse(response);
             } catch (Exception e) {
                 listener.onFailure(e);

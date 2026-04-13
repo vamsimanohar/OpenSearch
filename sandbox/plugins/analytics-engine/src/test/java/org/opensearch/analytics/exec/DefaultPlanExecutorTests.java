@@ -25,7 +25,7 @@ import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
-import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.Metadata;
@@ -382,7 +382,7 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
         }
     }
 
-    static class MockBackendPlugin implements AnalyticsSearchBackendPlugin {
+    static class MockBackendPlugin implements SearchExecEngineProvider {
         private final DataFormat format;
 
         MockBackendPlugin(DataFormat format) {

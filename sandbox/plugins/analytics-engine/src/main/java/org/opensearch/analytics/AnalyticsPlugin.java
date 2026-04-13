@@ -14,12 +14,12 @@ import org.apache.calcite.sql.SqlOperatorTable;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
-import org.opensearch.analytics.exec.ExternalQueryBackend;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.analytics.schema.SchemaContributor;
-import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
@@ -65,18 +65,21 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
      */
     public AnalyticsPlugin() {}
 
-    private final List<AnalyticsSearchBackendPlugin> backEnds = new ArrayList<>();
+    private final List<SearchExecEngineProvider> shardBackends = new ArrayList<>();
+    private final List<DataWarehouseQueryEngine> warehouseEngines = new ArrayList<>();
     private final List<SchemaContributor> schemaContributors = new ArrayList<>();
     private SqlOperatorTable operatorTable = SqlStdOperatorTable.instance();
 
     @SuppressWarnings("rawtypes")
     @Override
     public void loadExtensions(ExtensionLoader loader) {
-        backEnds.addAll(loader.loadExtensions(AnalyticsSearchBackendPlugin.class));
+        shardBackends.addAll(loader.loadExtensions(SearchExecEngineProvider.class));
+        warehouseEngines.addAll(loader.loadExtensions(DataWarehouseQueryEngine.class));
         schemaContributors.addAll(loader.loadExtensions(SchemaContributor.class));
         logger.info(
-            "[AnalyticsPlugin] loadExtensions: backends={}, schemaContributors={}",
-            backEnds.size(),
+            "[AnalyticsPlugin] loadExtensions: shardBackends={}, warehouseEngines={}, schemaContributors={}",
+            shardBackends.size(),
+            warehouseEngines.size(),
             schemaContributors.size()
         );
         operatorTable = aggregateOperatorTables();
@@ -97,7 +100,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
         return List.of(
-            new DefaultPlanExecutor(backEnds, null/* TODO: pass indices service */, clusterService),
+            new DefaultPlanExecutor(shardBackends, null/* TODO: pass indices service */, clusterService),
             new DefaultEngineContext(clusterService, operatorTable, schemaContributors)
         );
     }
@@ -114,12 +117,8 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             b.bind(new TypeLiteral<QueryPlanExecutor<RelNode, Iterable<Object[]>>>() {
             }).to(DefaultPlanExecutor.class);
             b.bind(EngineContext.class).to(DefaultEngineContext.class);
-            // Bind ExternalQueryBackend via a lambda adapter to avoid Guice introspecting
-            // the concrete DataFusionPlugin class (which implements DataFormat with methods
-            // referencing sandbox server classes, causing ClassNotFoundException).
-            if (!backEnds.isEmpty()) {
-                ExternalQueryBackend adapter = scanContext -> backEnds.get(0).executeRemoteQuery(scanContext);
-                b.bind(ExternalQueryBackend.class).toInstance(adapter);
+            if (!warehouseEngines.isEmpty()) {
+                b.bind(DataWarehouseQueryEngine.class).toInstance(warehouseEngines.get(0));
             }
         });
     }

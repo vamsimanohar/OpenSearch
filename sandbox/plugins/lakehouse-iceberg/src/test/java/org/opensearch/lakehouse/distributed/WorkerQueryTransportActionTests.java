@@ -8,8 +8,8 @@
 
 package org.opensearch.lakehouse.distributed;
 
-import org.opensearch.analytics.exec.ExternalScanContext;
-import org.opensearch.analytics.exec.ExternalQueryBackend;
+import org.opensearch.analytics.exec.DataWarehouseScanContext;
+import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -244,8 +244,8 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
     // ---- execute tests ----
 
     public void testExecuteReturnsResponse() {
-        ExternalQueryBackend mockBackend = mock(ExternalQueryBackend.class);
-        when(mockBackend.executeRemoteQuery(any(ExternalScanContext.class)))
+        DataWarehouseQueryEngine mockBackend = mock(DataWarehouseQueryEngine.class);
+        when(mockBackend.executeQuery(any(DataWarehouseScanContext.class)))
             .thenReturn(List.of(new Object[]{1, "hello"}, new Object[]{2, "world"}));
 
         ClusterService clusterService = mock(ClusterService.class);
@@ -269,7 +269,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         assertEquals(2, response.getColumnData()[0][1]);
         assertEquals("world", response.getColumnData()[1][1]);
 
-        verify(mockBackend).executeRemoteQuery(any(ExternalScanContext.class));
+        verify(mockBackend).executeQuery(any(DataWarehouseScanContext.class));
     }
 
     public void testExecuteWithNoBackendThrows() {
@@ -288,8 +288,8 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
     }
 
     public void testExecuteWithDefaultAuthSkipsCredentials() {
-        ExternalQueryBackend mockBackend = mock(ExternalQueryBackend.class);
-        when(mockBackend.executeRemoteQuery(any(ExternalScanContext.class)))
+        DataWarehouseQueryEngine mockBackend = mock(DataWarehouseQueryEngine.class);
+        when(mockBackend.executeQuery(any(DataWarehouseScanContext.class)))
             .thenReturn(List.<Object[]>of(new Object[]{42}));
 
         ClusterService clusterService = mock(ClusterService.class);
