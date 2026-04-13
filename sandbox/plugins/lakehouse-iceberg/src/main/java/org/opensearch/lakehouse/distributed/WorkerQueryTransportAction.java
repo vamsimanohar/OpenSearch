@@ -17,7 +17,7 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.tasks.Task;
-import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.lakehouse.LakehousePlugin;
 import org.opensearch.transport.TransportService;
 
 /**
@@ -27,9 +27,9 @@ import org.opensearch.transport.TransportService;
  * {@link WorkerQueryExecutor}. The executor handles credential resolution,
  * DataFusion invocation, and response building.
  * <p>
- * Uses {@link ThreadPool.Names#GENERIC} executor to avoid blocking Netty I/O threads
- * with DataFusion JNI calls. This is critical: without it, long-running queries
- * block all transport, causing cluster-wide timeouts.
+ * Uses a dedicated {@code lakehouse_worker} thread pool to avoid blocking GENERIC threads
+ * with DataFusion JNI calls. This is critical: long-running queries on GENERIC threads
+ * would block cluster health checks and cause node disconnections.
  *
  * @opensearch.internal
  */
@@ -47,7 +47,7 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
         ClusterService clusterService,
         DataWarehouseQueryEngine queryEngine
     ) {
-        super(WorkerQueryAction.NAME, transportService, actionFilters, WorkerQueryRequest::new, ThreadPool.Names.GENERIC);
+        super(WorkerQueryAction.NAME, transportService, actionFilters, WorkerQueryRequest::new, LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL);
         this.clusterService = clusterService;
         this.queryEngine = queryEngine;
     }

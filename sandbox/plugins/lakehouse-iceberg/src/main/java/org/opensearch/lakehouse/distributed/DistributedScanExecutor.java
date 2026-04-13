@@ -17,6 +17,7 @@ import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
+import org.opensearch.lakehouse.LakehousePlugin;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportException;
 import org.opensearch.transport.TransportResponseHandler;
@@ -332,7 +333,7 @@ public class DistributedScanExecutor {
      */
     void dispatchLocal(WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
         logger.debug("[ScanExecutor] Executing locally (direct, no transport): {} files", request.getFilePaths().size());
-        transportService.getThreadPool().executor(ThreadPool.Names.GENERIC).execute(() -> {
+        transportService.getThreadPool().executor(LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL).execute(() -> {
             try {
                 WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
                 listener.onResponse(response);

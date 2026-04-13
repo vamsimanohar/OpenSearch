@@ -40,6 +40,10 @@ import java.io.Closeable;
 import java.util.List;
 import java.util.function.Supplier;
 
+import org.opensearch.threadpool.ExecutorBuilder;
+import org.opensearch.threadpool.FixedExecutorBuilder;
+import org.opensearch.common.util.concurrent.OpenSearchExecutors;
+
 /**
  * Lakehouse plugin that enables reading external Apache Iceberg tables via SQL and PPL.
  * <p>
@@ -59,6 +63,9 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Action
     private static final IcebergSchemaContributor schemaContributor = new IcebergSchemaContributor(
         LakehouseState.instance().catalogConnector()
     );
+
+    /** Thread pool name for lakehouse worker queries. Isolated from GENERIC to prevent blocking cluster operations. */
+    public static final String LAKEHOUSE_WORKER_THREAD_POOL = "lakehouse_worker";
 
     /** Creates a new LakehousePlugin instance. */
     public LakehousePlugin() {}
@@ -83,6 +90,19 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Action
     @Override
     public void contributeSchema(SchemaPlus schema, Object clusterState) {
         schemaContributor.contributeSchema(schema, (ClusterState) clusterState);
+    }
+
+    @Override
+    public List<ExecutorBuilder<?>> getExecutorBuilders(Settings settings) {
+        return List.of(
+            new FixedExecutorBuilder(
+                settings,
+                LAKEHOUSE_WORKER_THREAD_POOL,
+                OpenSearchExecutors.allocatedProcessors(settings),
+                1000,
+                "thread_pool." + LAKEHOUSE_WORKER_THREAD_POOL
+            )
+        );
     }
 
     @Override

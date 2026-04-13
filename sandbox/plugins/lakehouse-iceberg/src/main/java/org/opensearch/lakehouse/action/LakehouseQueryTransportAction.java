@@ -21,7 +21,7 @@ import org.opensearch.lakehouse.distributed.DistributedScanExecutor;
 import org.opensearch.lakehouse.exec.LakehouseQueryExecutor;
 import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.tasks.Task;
-import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.lakehouse.LakehousePlugin;
 import org.opensearch.transport.TransportService;
 
 /**
@@ -44,7 +44,7 @@ public class LakehouseQueryTransportAction extends HandledTransportAction<Lakeho
         ClusterService clusterService,
         DataWarehouseQueryEngine queryEngine
     ) {
-        super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new, ThreadPool.Names.GENERIC);
+        super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new, LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL);
         DistributedScanExecutor scanExecutor = new DistributedScanExecutor(transportService, clusterService, queryEngine);
         this.queryExecutor = new LakehouseQueryExecutor(engineContext, scanExecutor);
     }

@@ -209,7 +209,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         org.opensearch.threadpool.ThreadPool threadPool = mock(org.opensearch.threadpool.ThreadPool.class);
         java.util.concurrent.ExecutorService executorService = mock(java.util.concurrent.ExecutorService.class);
         when(transportService.getThreadPool()).thenReturn(threadPool);
-        when(threadPool.executor(org.opensearch.threadpool.ThreadPool.Names.GENERIC)).thenReturn(executorService);
+        when(threadPool.executor(org.opensearch.lakehouse.LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL)).thenReturn(executorService);
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mock(DataWarehouseQueryEngine.class));
 
@@ -223,7 +223,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         executor.dispatchLocal(request, listener);
 
         // Verify thread pool was used (NOT transport sendRequest)
-        org.mockito.Mockito.verify(threadPool).executor(org.opensearch.threadpool.ThreadPool.Names.GENERIC);
+        org.mockito.Mockito.verify(threadPool).executor(org.opensearch.lakehouse.LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL);
         org.mockito.Mockito.verify(executorService).execute(any(Runnable.class));
         // Verify sendRequest was NOT called (local dispatch bypasses transport)
         org.mockito.Mockito.verify(transportService, org.mockito.Mockito.never()).sendRequest(
