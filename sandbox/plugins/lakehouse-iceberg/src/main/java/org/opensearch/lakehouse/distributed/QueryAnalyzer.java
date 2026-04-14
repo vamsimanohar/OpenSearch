@@ -77,6 +77,15 @@ public final class QueryAnalyzer {
         if (classifier.sort != null) {
             if (classifier.sort.fetch != null) {
                 int[] sortColumns = extractSortColumns(classifier.sort);
+                // If sort columns reference fields outside the final output projection
+                // (e.g. ORDER BY EventTime but only SELECT SearchPhrase), we can't
+                // merge-sort on the coordinator — route to single node.
+                int outputFieldCount = relNode.getRowType().getFieldCount();
+                for (int col : sortColumns) {
+                    if (col >= outputFieldCount) {
+                        return new AnalysisResult(MergeStrategy.SINGLE_NODE);
+                    }
+                }
                 boolean[] sortAsc = extractSortDirections(classifier.sort);
                 int limit = extractLimit(classifier.sort);
                 return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit);
@@ -177,12 +186,12 @@ public final class QueryAnalyzer {
     /**
      * Result of plan analysis containing the merge strategy and associated metadata.
      */
-    static final class AnalysisResult {
-        final MergeStrategy strategy;
-        final SqlKind[] aggKinds;
-        final int[] sortColumns;
-        final boolean[] sortAsc;
-        final int limit;
+    public static final class AnalysisResult {
+        public final MergeStrategy strategy;
+        public final SqlKind[] aggKinds;
+        public final int[] sortColumns;
+        public final boolean[] sortAsc;
+        public final int limit;
 
         AnalysisResult(MergeStrategy strategy) {
             this(strategy, null, null, null, 0);

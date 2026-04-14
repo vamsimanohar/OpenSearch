@@ -19,6 +19,7 @@ import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.lakehouse.LakehousePlugin;
 import org.opensearch.lakehouse.distributed.merge.MergeStrategy;
+import org.opensearch.lakehouse.distributed.merge.MergeSqlGenerator;
 import org.opensearch.lakehouse.distributed.merge.ResultMerger;
 import org.opensearch.lakehouse.distributed.merge.ResultSerializer;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryAction;
@@ -31,6 +32,7 @@ import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -145,11 +147,41 @@ public class DistributedScanExecutor {
         dispatchAndCollect(workers, assignments, sqlQuery, storageConfig, tableName, ActionListener.wrap(
             responses -> {
                 try {
-                    // Merge results using analysis metadata
-                    WorkerQueryResponse merged = ResultMerger.merge(
-                        responses, analysis.strategy, analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
-                    );
-                    listener.onResponse(ResultSerializer.toRows(merged));
+                    // Check if workers returned Arrow IPC data
+                    boolean hasArrowIpc = responses.stream().anyMatch(WorkerQueryResponse::isArrowIpc);
+
+                    if (hasArrowIpc) {
+                        // Collect Arrow IPC bytes from non-empty workers
+                        List<byte[]> workerIpcData = new ArrayList<>();
+                        for (WorkerQueryResponse r : responses) {
+                            if (r.isArrowIpc() && r.getArrowIpcData().length > 0) {
+                                workerIpcData.add(r.getArrowIpcData());
+                            }
+                        }
+
+                        if (workerIpcData.isEmpty()) {
+                            listener.onResponse(List.of());
+                            return;
+                        }
+
+                        // Read actual column names from the Arrow IPC data (not Calcite field names)
+                        List<String> columnNames = queryEngine.readArrowIpcColumnNames(workerIpcData.get(0));
+
+                        String mergeSql = MergeSqlGenerator.generate(analysis, columnNames);
+                        logger.info(
+                            "[ScanExecutor] Arrow IPC merge: {} workers, strategy={}, sql={}",
+                            workerIpcData.size(), analysis.strategy, mergeSql
+                        );
+
+                        Iterable<Object[]> rows = queryEngine.executeMerge(workerIpcData, mergeSql);
+                        listener.onResponse(rows);
+                    } else {
+                        // Legacy Java merge path
+                        WorkerQueryResponse merged = ResultMerger.merge(
+                            responses, analysis.strategy, analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
+                        );
+                        listener.onResponse(ResultSerializer.toRows(merged));
+                    }
                 } catch (Exception e) {
                     listener.onFailure(e);
                 }
@@ -174,7 +206,11 @@ public class DistributedScanExecutor {
         transportService.getThreadPool().executor(LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL).execute(() -> {
             try {
                 WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
-                listener.onResponse(ResultSerializer.toRows(response));
+                if (response.isArrowIpc()) {
+                    listener.onResponse(queryEngine.readArrowIpc(response.getArrowIpcData()));
+                } else {
+                    listener.onResponse(ResultSerializer.toRows(response));
+                }
             } catch (Exception e) {
                 listener.onFailure(e);
             }

@@ -15,9 +15,11 @@ import org.opensearch.nativebridge.spi.NativeLibraryLoader;
 
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
+import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.util.List;
 
 /**
  * FFM bridge to native DataFusion library.
@@ -52,6 +54,11 @@ public final class NativeBridge {
     private static final MethodHandle STREAM_CLOSE;
     private static final MethodHandle EXECUTE_ICEBERG_QUERY;
     private static final MethodHandle SQL_TO_SUBSTRAIT;
+    private static final MethodHandle EXECUTE_ICEBERG_QUERY_TO_IPC;
+    private static final MethodHandle IPC_RESULT_DATA_PTR;
+    private static final MethodHandle IPC_RESULT_DATA_LEN;
+    private static final MethodHandle FREE_IPC_RESULT;
+    private static final MethodHandle EXECUTE_FROM_IPC;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -158,6 +165,56 @@ public final class NativeBridge {
                 ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG,
                 ValueLayout.ADDRESS
+            )
+        );
+
+        // Same signature as EXECUTE_ICEBERG_QUERY but returns IpcResult pointer
+        EXECUTE_ICEBERG_QUERY_TO_IPC = linker.downcallHandle(
+            lib.find("df_execute_iceberg_query_to_ipc").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_region
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_bucket
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_access_key
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_secret_key
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_session_token
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_endpoint
+                ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,  // files
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // table_name
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // sql_query
+                ValueLayout.JAVA_LONG                          // runtime_ptr
+            )
+        );
+
+        // i64 df_ipc_result_data_ptr(result_ptr: i64) -> i64
+        IPC_RESULT_DATA_PTR = linker.downcallHandle(
+            lib.find("df_ipc_result_data_ptr").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+
+        // i64 df_ipc_result_data_len(result_ptr: i64) -> i64
+        IPC_RESULT_DATA_LEN = linker.downcallHandle(
+            lib.find("df_ipc_result_data_len").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+
+        // void df_free_ipc_result(result_ptr: i64)
+        FREE_IPC_RESULT = linker.downcallHandle(
+            lib.find("df_free_ipc_result").orElseThrow(),
+            FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG)
+        );
+
+        // i64 df_execute_from_ipc(ipc_ptrs, ipc_lens, ipc_count, sql_ptr, sql_len, runtime_ptr) -> i64
+        EXECUTE_FROM_IPC = linker.downcallHandle(
+            lib.find("df_execute_from_ipc").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,                           // ipc_ptrs (*const *const u8)
+                ValueLayout.ADDRESS,                           // ipc_lens (*const i64)
+                ValueLayout.JAVA_LONG,                         // ipc_count
+                ValueLayout.ADDRESS,                           // sql_ptr
+                ValueLayout.JAVA_LONG,                         // sql_len
+                ValueLayout.JAVA_LONG                          // runtime_ptr
             )
         );
     }
@@ -351,6 +408,141 @@ public final class NativeBridge {
                 runtimePtr
             );
             listener.onResponse(result);
+        } catch (Throwable t) {
+            listener.onFailure(t instanceof Exception ? (Exception) t : new RuntimeException(t));
+        }
+    }
+
+    // ---- Iceberg / S3 query execution returning Arrow IPC bytes ----
+
+    /**
+     * Executes a SQL query against S3-backed Parquet files via DataFusion and returns the result
+     * as Arrow IPC bytes instead of a stream pointer. This avoids the row-by-row stream protocol
+     * and enables efficient binary transport for distributed query execution.
+     */
+    public static void executeIcebergQueryToIpcAsync(
+        String s3Region,
+        String s3Bucket,
+        String s3AccessKeyId,
+        String s3SecretAccessKey,
+        String s3SessionToken,
+        String s3Endpoint,
+        String[] filePaths,
+        long[] fileSizes,
+        String tableName,
+        String sqlQuery,
+        long runtimePtr,
+        ActionListener<byte[]> listener
+    ) {
+        try {
+            NativeHandle.validatePointer(runtimePtr, "runtime");
+        } catch (Exception e) {
+            listener.onFailure(e);
+            return;
+        }
+        try (var call = new NativeCall()) {
+            var region = call.str(s3Region != null ? s3Region : "");
+            var bucket = call.str(s3Bucket != null ? s3Bucket : "");
+            var accessKey = call.str(s3AccessKeyId != null ? s3AccessKeyId : "");
+            var secretKey = call.str(s3SecretAccessKey != null ? s3SecretAccessKey : "");
+            var sessionToken = call.str(s3SessionToken != null ? s3SessionToken : "");
+            var endpoint = call.str(s3Endpoint != null ? s3Endpoint : "");
+            var paths = call.strArray(filePaths);
+            var sizes = call.buf(fileSizes.length * Long.BYTES);
+            for (int i = 0; i < fileSizes.length; i++) {
+                sizes.setAtIndex(ValueLayout.JAVA_LONG, i, fileSizes[i]);
+            }
+            var table = call.str(tableName);
+            var sql = call.str(sqlQuery);
+
+            long resultPtr = call.invoke(
+                EXECUTE_ICEBERG_QUERY_TO_IPC,
+                region.segment(), region.len(),
+                bucket.segment(), bucket.len(),
+                accessKey.segment(), accessKey.len(),
+                secretKey.segment(), secretKey.len(),
+                sessionToken.segment(), sessionToken.len(),
+                endpoint.segment(), endpoint.len(),
+                paths.ptrs(), paths.lens(), sizes, paths.count(),
+                table.segment(), table.len(),
+                sql.segment(), sql.len(),
+                runtimePtr
+            );
+
+            // Extract IPC bytes from the result — these are simple accessors, not #[ffm_safe]
+            long dataPtr = (long) IPC_RESULT_DATA_PTR.invokeExact(resultPtr);
+            long dataLen = (long) IPC_RESULT_DATA_LEN.invokeExact(resultPtr);
+            byte[] ipcBytes = MemorySegment.ofAddress(dataPtr).reinterpret(dataLen).toArray(ValueLayout.JAVA_BYTE);
+
+            // Free the native IpcResult
+            NativeCall.invokeVoid(FREE_IPC_RESULT, resultPtr);
+
+            listener.onResponse(ipcBytes);
+        } catch (Throwable t) {
+            listener.onFailure(t instanceof Exception ? (Exception) t : new RuntimeException(t));
+        }
+    }
+
+    // ---- Merge execution from Arrow IPC data ----
+
+    /**
+     * Executes a merge SQL query over Arrow IPC byte arrays collected from worker nodes.
+     * Each element of {@code workerIpcData} is a complete Arrow IPC stream (schema + batches)
+     * from one worker. The merge SQL is executed by DataFusion using StreamingTable over
+     * the deserialized record batches.
+     *
+     * @param workerIpcData list of Arrow IPC byte arrays from workers
+     * @param sql merge SQL to execute over the combined data
+     * @param runtimePtr DataFusion runtime pointer
+     * @param listener receives the merged result as Arrow IPC bytes
+     */
+    public static void executeFromIpcAsync(
+        List<byte[]> workerIpcData,
+        String sql,
+        long runtimePtr,
+        ActionListener<byte[]> listener
+    ) {
+        try {
+            NativeHandle.validatePointer(runtimePtr, "runtime");
+        } catch (Exception e) {
+            listener.onFailure(e);
+            return;
+        }
+        try (var call = new NativeCall()) {
+            int count = workerIpcData.size();
+
+            // Allocate parallel arrays: pointers to each IPC buffer and their lengths
+            MemorySegment ipcPtrs = call.buf((int) (count * ValueLayout.ADDRESS.byteSize()));
+            MemorySegment ipcLens = call.buf(count * Long.BYTES);
+
+            for (int i = 0; i < count; i++) {
+                byte[] data = workerIpcData.get(i);
+                MemorySegment dataSeg = call.bytes(data);
+                ipcPtrs.setAtIndex(ValueLayout.ADDRESS, i, dataSeg);
+                ipcLens.setAtIndex(ValueLayout.JAVA_LONG, i, data.length);
+            }
+
+            var query = call.str(sql);
+
+            long resultPtr = call.invoke(
+                EXECUTE_FROM_IPC,
+                ipcPtrs,
+                ipcLens,
+                (long) count,
+                query.segment(),
+                query.len(),
+                runtimePtr
+            );
+
+            // Extract IPC bytes from the result — these are simple accessors, not #[ffm_safe]
+            long dataPtr = (long) IPC_RESULT_DATA_PTR.invokeExact(resultPtr);
+            long dataLen = (long) IPC_RESULT_DATA_LEN.invokeExact(resultPtr);
+            byte[] ipcBytes = MemorySegment.ofAddress(dataPtr).reinterpret(dataLen).toArray(ValueLayout.JAVA_BYTE);
+
+            // Free the native IpcResult
+            NativeCall.invokeVoid(FREE_IPC_RESULT, resultPtr);
+
+            listener.onResponse(ipcBytes);
         } catch (Throwable t) {
             listener.onFailure(t instanceof Exception ? (Exception) t : new RuntimeException(t));
         }

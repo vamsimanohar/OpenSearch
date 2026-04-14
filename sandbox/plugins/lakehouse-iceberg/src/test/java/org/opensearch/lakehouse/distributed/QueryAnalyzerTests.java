@@ -89,6 +89,13 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(sort));
     }
 
+    public void testSortWithLimitButSortColumnProjectedAwayReturnsSingleNode() {
+        // Simulates: SELECT SearchPhrase FROM hits ORDER BY EventTime LIMIT 10
+        // Sort on field index 1 (EventTime) but output only has 1 field (SearchPhrase)
+        Sort sort = makeSort(true, true, 1, 1);
+        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(sort));
+    }
+
     public void testSimpleScanReturnsConcat() {
         RelNode scan = mockSimpleNode();
         assertEquals(MergeStrategy.CONCAT, QueryAnalyzer.analyze(scan));
@@ -245,9 +252,13 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
     }
 
     private Sort makeSort(boolean hasCollation, boolean hasFetch) {
+        return makeSort(hasCollation, hasFetch, 0, 2);
+    }
+
+    private Sort makeSort(boolean hasCollation, boolean hasFetch, int sortFieldIndex, int outputFieldCount) {
         RelCollation collation;
         if (hasCollation) {
-            RelFieldCollation fieldCollation = new RelFieldCollation(0, RelFieldCollation.Direction.ASCENDING);
+            RelFieldCollation fieldCollation = new RelFieldCollation(sortFieldIndex, RelFieldCollation.Direction.ASCENDING);
             collation = RelCollations.of(fieldCollation);
         } else {
             collation = RelCollations.EMPTY;
@@ -259,6 +270,7 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
         RelNode input = mockSimpleNode();
         RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(outputFieldCount);
         when(input.getRowType()).thenReturn(rowType);
 
         return new StubSort(cluster, traitSet, input, collation, fetchNode);
@@ -288,6 +300,9 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
     private RelNode mockNodeWithInput(RelNode input) {
         RelNode node = mock(RelNode.class);
         when(node.getInputs()).thenReturn(List.of(input));
+        RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(2);
+        when(node.getRowType()).thenReturn(rowType);
         // RelVisitor uses childrenAccept(), not getInputs(), for traversal
         doAnswer(invocation -> {
             org.apache.calcite.rel.RelVisitor visitor = invocation.getArgument(0);
@@ -310,6 +325,7 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
         RelNode input = mockSimpleNode();
         RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(2);
         when(input.getRowType()).thenReturn(rowType);
 
         return new StubSort(cluster, traitSet, input, collation, fetchLiteral);

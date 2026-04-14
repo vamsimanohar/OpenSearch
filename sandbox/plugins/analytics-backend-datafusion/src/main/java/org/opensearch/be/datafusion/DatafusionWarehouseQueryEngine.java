@@ -9,6 +9,9 @@
 package org.opensearch.be.datafusion;
 
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.backend.EngineResultBatch;
@@ -18,6 +21,8 @@ import org.opensearch.be.datafusion.nativelib.NativeBridge;
 import org.opensearch.be.datafusion.nativelib.StreamHandle;
 import org.opensearch.core.action.ActionListener;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -156,5 +161,202 @@ public class DatafusionWarehouseQueryEngine implements DataWarehouseQueryEngine 
         logger.info("[PERF] Arrow stream read: {}ms ({} rows)", t2 - t1, rows.size());
         logger.info("[PERF] executeQuery total: {}ms", t2 - t0);
         return rows;
+    }
+
+    @Override
+    public byte[] executeQueryArrowIpc(DataWarehouseScanContext scanContext) {
+        long t0 = System.currentTimeMillis();
+        DataFusionService dfService = DataFusionPlugin.ensureSharedService();
+
+        Map<String, String> config = scanContext.getStorageConfig();
+        boolean localMode = "true".equals(config.get("localMode"));
+        String s3Region = localMode ? "" : config.getOrDefault("s3Region", "us-east-1");
+        String s3Bucket = config.get("s3Bucket");
+        String s3AccessKeyId = config.get("s3AccessKeyId");
+        String s3SecretAccessKey = config.get("s3SecretAccessKey");
+        String s3SessionToken = config.get("s3SessionToken");
+        String s3Endpoint = config.get("s3Endpoint");
+
+        String[] filePaths = scanContext.getDataFilePaths().toArray(new String[0]);
+        long[] fileSizes = scanContext.getFileSizes();
+        String tableName = scanContext.getTableName();
+        String sqlQuery = scanContext.getSqlQuery();
+
+        if (filePaths.length == 0) {
+            logger.info("[DatafusionQueryEngine] No data files for table [{}] — returning empty IPC result", tableName);
+            return new byte[0];
+        }
+
+        logger.info("[DatafusionQueryEngine] executeQueryArrowIpc: table={}, files={}, sql={}", tableName, filePaths.length, sqlQuery);
+
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        long runtimePtr = runtimeHandle.get();
+        CompletableFuture<byte[]> future = new CompletableFuture<>();
+        try {
+            NativeBridge.executeIcebergQueryToIpcAsync(
+                s3Region,
+                s3Bucket,
+                s3AccessKeyId,
+                s3SecretAccessKey,
+                s3SessionToken,
+                s3Endpoint,
+                filePaths,
+                fileSizes,
+                tableName,
+                sqlQuery,
+                runtimePtr,
+                new ActionListener<>() {
+                    @Override
+                    public void onResponse(byte[] ipcBytes) {
+                        future.complete(ipcBytes);
+                    }
+
+                    @Override
+                    public void onFailure(Exception e) {
+                        future.completeExceptionally(e);
+                    }
+                }
+            );
+        } catch (UnsatisfiedLinkError e) {
+            logger.warn("[DatafusionQueryEngine] executeIcebergQueryToIpcAsync not available in native library: {}", e.getMessage());
+            throw new UnsupportedOperationException(
+                "Iceberg native IPC execution not available — native library missing executeIcebergQueryToIpcAsync. "
+                    + "Table: " + tableName + ", files: " + filePaths.length + ", sql: " + sqlQuery,
+                e
+            );
+        }
+
+        byte[] ipcBytes;
+        try {
+            ipcBytes = future.get(15, TimeUnit.MINUTES);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new RuntimeException(
+                "Iceberg IPC query execution timed out after 15 minutes — table: " + tableName + ", files: " + filePaths.length, e
+            );
+        } catch (ExecutionException e) {
+            logger.error("[DatafusionQueryEngine] JNI IPC execution failed: {}", e.getCause().getMessage(), e.getCause());
+            throw new RuntimeException("Iceberg IPC query execution failed via DataFusion", e.getCause());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Iceberg IPC query execution interrupted", e);
+        }
+
+        long t1 = System.currentTimeMillis();
+        logger.info("[PERF] JNI execute_iceberg_query_to_ipc: {}ms ({} bytes)", t1 - t0, ipcBytes.length);
+        return ipcBytes;
+    }
+
+    @Override
+    public Iterable<Object[]> readArrowIpc(byte[] arrowIpcData) {
+        long t0 = System.currentTimeMillis();
+        DataFusionService dfService = DataFusionPlugin.ensureSharedService();
+
+        if (arrowIpcData == null || arrowIpcData.length == 0) {
+            return List.of();
+        }
+
+        BufferAllocator allocator = dfService.newChildAllocator();
+        List<Object[]> rows = new ArrayList<>();
+        try (ArrowStreamReader reader = new ArrowStreamReader(new ByteArrayInputStream(arrowIpcData), allocator)) {
+            VectorSchemaRoot root = reader.getVectorSchemaRoot();
+            while (reader.loadNextBatch()) {
+                int rowCount = root.getRowCount();
+                List<FieldVector> vectors = root.getFieldVectors();
+                int colCount = vectors.size();
+                for (int row = 0; row < rowCount; row++) {
+                    Object[] rowValues = new Object[colCount];
+                    for (int col = 0; col < colCount; col++) {
+                        Object val = vectors.get(col).getObject(row);
+                        if (val instanceof org.apache.arrow.vector.util.Text) {
+                            val = val.toString();
+                        }
+                        rowValues[col] = val;
+                    }
+                    rows.add(rowValues);
+                }
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read Arrow IPC data", e);
+        } finally {
+            allocator.close();
+        }
+
+        long t1 = System.currentTimeMillis();
+        logger.info("[PERF] readArrowIpc: {}ms ({} rows from {} bytes)", t1 - t0, rows.size(), arrowIpcData.length);
+        return rows;
+    }
+
+    @Override
+    public List<String> readArrowIpcColumnNames(byte[] arrowIpcData) {
+        DataFusionService dfService = DataFusionPlugin.ensureSharedService();
+        BufferAllocator allocator = dfService.newChildAllocator();
+        try (ArrowStreamReader reader = new ArrowStreamReader(new ByteArrayInputStream(arrowIpcData), allocator)) {
+            VectorSchemaRoot root = reader.getVectorSchemaRoot();
+            return root.getSchema().getFields().stream()
+                .map(f -> f.getName())
+                .toList();
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read Arrow IPC schema", e);
+        } finally {
+            allocator.close();
+        }
+    }
+
+    @Override
+    public Iterable<Object[]> executeMerge(List<byte[]> workerArrowIpcData, String mergeSql) {
+        long t0 = System.currentTimeMillis();
+        DataFusionService dfService = DataFusionPlugin.ensureSharedService();
+
+        logger.info("[DatafusionQueryEngine] executeMerge: workers={}, sql={}", workerArrowIpcData.size(), mergeSql);
+
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        long runtimePtr = runtimeHandle.get();
+        CompletableFuture<byte[]> future = new CompletableFuture<>();
+        try {
+            NativeBridge.executeFromIpcAsync(
+                workerArrowIpcData,
+                mergeSql,
+                runtimePtr,
+                new ActionListener<>() {
+                    @Override
+                    public void onResponse(byte[] ipcBytes) {
+                        future.complete(ipcBytes);
+                    }
+
+                    @Override
+                    public void onFailure(Exception e) {
+                        future.completeExceptionally(e);
+                    }
+                }
+            );
+        } catch (UnsatisfiedLinkError e) {
+            logger.warn("[DatafusionQueryEngine] executeFromIpcAsync not available in native library: {}", e.getMessage());
+            throw new UnsupportedOperationException(
+                "Merge execution not available — native library missing executeFromIpcAsync. sql: " + mergeSql, e
+            );
+        }
+
+        byte[] mergedIpcBytes;
+        try {
+            mergedIpcBytes = future.get(15, TimeUnit.MINUTES);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new RuntimeException("Merge execution timed out after 15 minutes — sql: " + mergeSql, e);
+        } catch (ExecutionException e) {
+            logger.error("[DatafusionQueryEngine] Merge execution failed: {}", e.getCause().getMessage(), e.getCause());
+            throw new RuntimeException("Merge execution failed via DataFusion", e.getCause());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Merge execution interrupted", e);
+        }
+
+        long t1 = System.currentTimeMillis();
+        logger.info("[PERF] JNI execute_from_ipc: {}ms ({} bytes)", t1 - t0, mergedIpcBytes.length);
+
+        Iterable<Object[]> result = readArrowIpc(mergedIpcBytes);
+        long t2 = System.currentTimeMillis();
+        logger.info("[PERF] executeMerge total: {}ms", t2 - t0);
+        return result;
     }
 }
