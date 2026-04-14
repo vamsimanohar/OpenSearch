@@ -151,7 +151,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
         synchronized (INIT_LOCK) {
             if (sharedDataFusionService == null) {
-                String poolType = DATAFUSION_MEMORY_POOL_TYPE.get(settings);
+                String poolType = System.getProperty("datafusion_memory_pool_type", DATAFUSION_MEMORY_POOL_TYPE.get(settings));
                 if ("fair_spill".equals(poolType) && memoryPoolLimit == 0) {
                     memoryPoolLimit = autoDetectPoolLimit();
                     logger.info("FairSpill pool with no explicit limit — auto-detected {}MB", memoryPoolLimit / (1024 * 1024));
