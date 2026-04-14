@@ -220,6 +220,21 @@ public class AggregationReducerTests extends OpenSearchTestCase {
         assertEquals(42, result);
     }
 
+    public void testMinColumnMixedNumericTypes() {
+        // Integer vs Long — previously threw ClassCastException
+        WorkerQueryResponse r1 = makeResponse(new Object[][]{{Integer.valueOf(10)}}, 1);
+        WorkerQueryResponse r2 = makeResponse(new Object[][]{{Long.valueOf(5)}}, 1);
+        Object result = AggregationReducer.minColumn(List.of(r1, r2), 0);
+        assertEquals(Long.valueOf(5), result);
+    }
+
+    public void testMaxColumnMixedNumericTypes() {
+        WorkerQueryResponse r1 = makeResponse(new Object[][]{{Integer.valueOf(10)}}, 1);
+        WorkerQueryResponse r2 = makeResponse(new Object[][]{{Long.valueOf(5)}}, 1);
+        Object result = AggregationReducer.maxColumn(List.of(r1, r2), 0);
+        assertEquals(Integer.valueOf(10), result);
+    }
+
     // --- Helper ---
 
     private WorkerQueryResponse makeResponse(Object[][] columnData, int rowCount) {

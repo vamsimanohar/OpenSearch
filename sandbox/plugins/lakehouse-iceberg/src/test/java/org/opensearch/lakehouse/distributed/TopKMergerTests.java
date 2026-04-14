@@ -149,6 +149,17 @@ public class TopKMergerTests extends OpenSearchTestCase {
         assertTrue(TopKMerger.compareValues(a, b) < 0);
     }
 
+    public void testCompareValuesMixedNumericTypes() {
+        // Integer vs Long — previously threw ClassCastException
+        assertTrue(TopKMerger.compareValues(Integer.valueOf(5), Long.valueOf(10)) < 0);
+        assertTrue(TopKMerger.compareValues(Long.valueOf(10), Integer.valueOf(5)) > 0);
+        assertEquals(0, TopKMerger.compareValues(Integer.valueOf(5), Long.valueOf(5)));
+        // Integer vs Double
+        assertTrue(TopKMerger.compareValues(Integer.valueOf(3), Double.valueOf(3.5)) < 0);
+        // Float vs Long
+        assertTrue(TopKMerger.compareValues(Float.valueOf(2.5f), Long.valueOf(3)) < 0);
+    }
+
     // --- buildComparator tests ---
 
     public void testBuildComparatorAscending() {

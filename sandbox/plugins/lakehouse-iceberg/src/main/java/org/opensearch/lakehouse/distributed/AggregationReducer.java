@@ -84,13 +84,12 @@ public final class AggregationReducer {
      * @param colIdx    the column index to minimize
      * @return the minimum value, or null if all values are null
      */
-    @SuppressWarnings("unchecked")
     static Object minColumn(List<WorkerQueryResponse> responses, int colIdx) {
-        Comparable<Object> min = null;
+        Object min = null;
         for (WorkerQueryResponse r : responses) {
             if (hasValue(r, colIdx)) {
-                Comparable<Object> val = (Comparable<Object>) r.getColumnData()[colIdx][0];
-                if (min == null || val.compareTo((Object) min) < 0) {
+                Object val = r.getColumnData()[colIdx][0];
+                if (min == null || compareForAgg(val, min) < 0) {
                     min = val;
                 }
             }
@@ -106,18 +105,33 @@ public final class AggregationReducer {
      * @param colIdx    the column index to maximize
      * @return the maximum value, or null if all values are null
      */
-    @SuppressWarnings("unchecked")
     static Object maxColumn(List<WorkerQueryResponse> responses, int colIdx) {
-        Comparable<Object> max = null;
+        Object max = null;
         for (WorkerQueryResponse r : responses) {
             if (hasValue(r, colIdx)) {
-                Comparable<Object> val = (Comparable<Object>) r.getColumnData()[colIdx][0];
-                if (max == null || val.compareTo((Object) max) > 0) {
+                Object val = r.getColumnData()[colIdx][0];
+                if (max == null || compareForAgg(val, max) > 0) {
                     max = val;
                 }
             }
         }
         return max;
+    }
+
+    /**
+     * Compares two values for aggregation, handling mixed numeric types safely.
+     * Normalizes Number types to double to avoid ClassCastException when comparing
+     * different widths (e.g., Integer vs Long from different workers).
+     */
+    @SuppressWarnings("unchecked")
+    private static int compareForAgg(Object v1, Object v2) {
+        if (v1 instanceof Number && v2 instanceof Number) {
+            return Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue());
+        }
+        if (v1 instanceof Comparable && v2 instanceof Comparable) {
+            return ((Comparable<Object>) v1).compareTo(v2);
+        }
+        return v1.toString().compareTo(v2.toString());
     }
 
     /**

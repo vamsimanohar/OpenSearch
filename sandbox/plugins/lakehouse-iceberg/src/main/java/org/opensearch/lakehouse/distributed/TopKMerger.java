@@ -99,13 +99,19 @@ public final class TopKMerger {
      * @param v2 second value
      * @return negative if v1 &lt; v2, positive if v1 &gt; v2, zero if equal
      */
-    @SuppressWarnings("unchecked")
     static int compareValues(Object v1, Object v2) {
         if (v1 == null && v2 == null) return 0;
         if (v1 == null) return 1;
         if (v2 == null) return -1;
+        // Normalize numeric types to avoid ClassCastException when comparing
+        // different widths (e.g., Integer vs Long from different workers)
+        if (v1 instanceof Number && v2 instanceof Number) {
+            return Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue());
+        }
         if (v1 instanceof Comparable && v2 instanceof Comparable) {
-            return ((Comparable<Object>) v1).compareTo(v2);
+            @SuppressWarnings("unchecked")
+            int cmp = ((Comparable<Object>) v1).compareTo(v2);
+            return cmp;
         }
         return v1.toString().compareTo(v2.toString());
     }
