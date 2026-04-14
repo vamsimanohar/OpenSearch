@@ -187,17 +187,12 @@ public class DistributedScanExecutor {
     ) {
         int assignmentCount = assignments.size();
         CompletableFuture<Collection<WorkerQueryResponse>> future = new CompletableFuture<>();
-        java.util.concurrent.atomic.AtomicInteger responseCount = new java.util.concurrent.atomic.AtomicInteger(0);
 
         GroupedActionListener<WorkerQueryResponse> groupListener = new GroupedActionListener<>(
             ActionListener.wrap(
-                responses -> {
-                    logger.info("[ScanExecutor] All {} responses received, completing future", assignmentCount);
-                    future.complete(responses);
-                },
+                future::complete,
                 ex -> {
-                    logger.error("[ScanExecutor] GroupedActionListener failure after {}/{} responses: {}",
-                        responseCount.get(), assignmentCount, ex.getMessage(), ex);
+                    logger.error("[ScanExecutor] Worker failure: {}", ex.getMessage(), ex);
                     future.completeExceptionally(ex);
                 }
             ),
@@ -211,7 +206,6 @@ public class DistributedScanExecutor {
             DiscoveryNode targetNode = workers.get(i % workers.size());
 
             if (assignment.getFilePaths().isEmpty()) {
-                logger.debug("[ScanExecutor] Worker {} has no files assigned (more workers than files)", i);
                 groupListener.onResponse(
                     new WorkerQueryResponse(List.of(), List.of(), 0, new Object[0][])
                 );
@@ -227,26 +221,10 @@ public class DistributedScanExecutor {
             );
 
             boolean isLocal = targetNode.getId().equals(localNodeId);
-            final int workerIdx = i;
-            ActionListener<WorkerQueryResponse> listener = ActionListener.wrap(
-                response -> {
-                    int count = responseCount.incrementAndGet();
-                    logger.info("[ScanExecutor] Worker {} ({}) responded: {} rows [{}/{}]",
-                        workerIdx, isLocal ? "local" : targetNode.getId(), response.getRowCount(), count, assignmentCount);
-                    groupListener.onResponse(response);
-                },
-                ex -> {
-                    int count = responseCount.incrementAndGet();
-                    logger.error("[ScanExecutor] Worker {} ({}) FAILED [{}/{}]: {}",
-                        workerIdx, isLocal ? "local" : targetNode.getId(), count, assignmentCount, ex.getMessage(), ex);
-                    groupListener.onFailure(ex);
-                }
-            );
-
             if (isLocal) {
-                dispatchLocal(request, listener);
+                dispatchLocal(request, groupListener);
             } else {
-                dispatchRemote(targetNode, request, listener);
+                dispatchRemote(targetNode, request, groupListener);
             }
         }
 
@@ -257,8 +235,6 @@ public class DistributedScanExecutor {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Distributed query execution interrupted", e);
         } catch (java.util.concurrent.TimeoutException e) {
-            logger.error("[ScanExecutor] TIMEOUT: received {}/{} responses after {}s",
-                responseCount.get(), assignmentCount, DEFAULT_TIMEOUT_SECONDS);
             throw new RuntimeException(
                 "Distributed query execution timed out after " + DEFAULT_TIMEOUT_SECONDS + " seconds", e
             );
@@ -279,27 +255,17 @@ public class DistributedScanExecutor {
             new TransportResponseHandler<WorkerQueryResponse>() {
                 @Override
                 public WorkerQueryResponse read(StreamInput in) throws IOException {
-                    logger.info("[ScanExecutor] Reading response from remote node {}", node.getId());
-                    WorkerQueryResponse resp = new WorkerQueryResponse(in);
-                    logger.info("[ScanExecutor] Deserialized response from {}: {} rows", node.getId(), resp.getRowCount());
-                    return resp;
+                    return new WorkerQueryResponse(in);
                 }
 
                 @Override
                 public void handleResponse(WorkerQueryResponse response) {
-                    logger.info("[ScanExecutor] handleResponse from remote node {}: {} rows", node.getId(), response.getRowCount());
-                    try {
-                        listener.onResponse(response);
-                        logger.info("[ScanExecutor] listener.onResponse completed for remote node {}", node.getId());
-                    } catch (Exception e) {
-                        logger.error("[ScanExecutor] listener.onResponse THREW for remote node {}", node.getId(), e);
-                        throw e;
-                    }
+                    listener.onResponse(response);
                 }
 
                 @Override
                 public void handleException(TransportException exp) {
-                    logger.error("[ScanExecutor] handleException from remote node {}: {}", node.getId(), exp.getMessage(), exp);
+                    logger.error("[ScanExecutor] Remote node {} failed: {}", node.getId(), exp.getMessage(), exp);
                     listener.onFailure(exp);
                 }
 
@@ -318,15 +284,13 @@ public class DistributedScanExecutor {
      * avoiding serialize → send to localhost → deserialize round-trip.
      */
     void dispatchLocal(WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
-        logger.debug("[ScanExecutor] Executing locally (direct, no transport): {} files", request.getFilePaths().size());
+        logger.debug("[ScanExecutor] Executing locally: {} files", request.getFilePaths().size());
         transportService.getThreadPool().executor(LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL).execute(() -> {
             try {
                 WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
-                logger.info("[ScanExecutor] Local execution done: {} rows, calling listener.onResponse", response.getRowCount());
                 listener.onResponse(response);
-                logger.info("[ScanExecutor] Local listener.onResponse completed");
             } catch (Exception e) {
-                logger.error("[ScanExecutor] Local execution or listener FAILED", e);
+                logger.error("[ScanExecutor] Local execution failed", e);
                 listener.onFailure(e);
             }
         });

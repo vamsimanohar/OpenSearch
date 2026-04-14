@@ -32,8 +32,6 @@
 
 package org.opensearch.transport.netty4;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.OpenSearchException;
 import org.opensearch.common.bytes.ReleasableBytesReference;
@@ -61,8 +59,6 @@ import io.netty.channel.ChannelPromise;
  * to the relevant action.
  */
 final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
-
-    private static final Logger logger = LogManager.getLogger(Netty4MessageChannelHandler.class);
 
     private final Netty4Transport transport;
 

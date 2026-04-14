@@ -1,4 +1,0 @@
-#V2
-SET datafusion.execution.listing_table_ignore_subdirectory = false;
-CREATE EXTERNAL TABLE hits STORED AS PARQUET LOCATION 's3://iceberg-benchmark-test-263689514295/iceberg-warehouse/hits/data/' OPTIONS ('binary_as_string' 'true');
-SELECT COUNT(*) FROM hits;
