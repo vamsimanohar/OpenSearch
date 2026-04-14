@@ -24,35 +24,26 @@ import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 /**
  * Unified scan executor that handles both single-node and distributed query execution.
  * <p>
+ * Fully asynchronous: dispatches worker queries via transport or local thread pool,
+ * collects responses via {@link GroupedActionListener}, and delivers merged results
+ * through an {@link ActionListener} callback. No thread ever blocks waiting for results.
+ * <p>
  * When multiple eligible worker nodes are available and the query is distributable,
  * splits files across workers, dispatches in parallel, and merges results.
  * Otherwise, delegates to single-node execution via {@link WorkerQueryExecutor}.
- * <p>
- * Note: The Calcite query pipeline above this class is synchronous
- * ({@code prepareScan()} returns {@code ExternalScanContext}), so distributed dispatch
- * uses {@code CompletableFuture.get()} to bridge async transport to the sync caller.
- * Fully async execution would require rewriting the Calcite pipeline to use
- * {@code ActionListener} callbacks throughout — a future improvement.
  *
  * @opensearch.internal
  */
 public class DistributedScanExecutor {
 
     private static final Logger logger = LogManager.getLogger(DistributedScanExecutor.class);
-
-    /** Default timeout for waiting for worker responses, in seconds. */
-    static final long DEFAULT_TIMEOUT_SECONDS = 120;
 
     private final TransportService transportService;
     private final ClusterService clusterService;
@@ -89,7 +80,7 @@ public class DistributedScanExecutor {
     }
 
     /**
-     * Executes the query, automatically choosing between distributed and single-node paths.
+     * Executes the query asynchronously, choosing between distributed and single-node paths.
      * <p>
      * Distributed execution is used when:
      * <ul>
@@ -97,6 +88,8 @@ public class DistributedScanExecutor {
      *   <li>The query's merge strategy is not {@link MergeStrategy#SINGLE_NODE}</li>
      * </ul>
      * Otherwise, falls back to single-node execution via {@link WorkerQueryExecutor}.
+     * <p>
+     * Results are delivered through the listener callback. No thread blocks waiting.
      *
      * @param relNode       the Calcite logical plan (for query analysis)
      * @param sqlQuery      the SQL query string to send to workers
@@ -104,28 +97,31 @@ public class DistributedScanExecutor {
      * @param fileSizes     file sizes in bytes, parallel to filePaths
      * @param storageConfig storage configuration (S3 region, bucket, credentials)
      * @param tableName     the table name for the query
-     * @return merged rows as Iterable&lt;Object[]&gt;
+     * @param listener      callback for the merged result rows
      */
-    public Iterable<Object[]> execute(
+    public void executeAsync(
         RelNode relNode,
         String sqlQuery,
         List<String> filePaths,
         long[] fileSizes,
         Map<String, String> storageConfig,
-        String tableName
+        String tableName,
+        ActionListener<Iterable<Object[]>> listener
     ) {
         List<DiscoveryNode> workers = nodeDiscovery.getEligibleNodes();
 
         // Single-node: execute directly without distribution overhead
         if (workers.size() <= 1) {
             logger.debug("[ScanExecutor] Single node, executing locally");
-            return executeSingleNode(sqlQuery, filePaths, fileSizes, storageConfig, tableName);
+            executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
+            return;
         }
 
         QueryAnalyzer.AnalysisResult analysis = QueryAnalyzer.analyzeDetailed(relNode);
         if (analysis.strategy == MergeStrategy.SINGLE_NODE) {
             logger.debug("[ScanExecutor] Query requires SINGLE_NODE execution");
-            return executeSingleNode(sqlQuery, filePaths, fileSizes, storageConfig, tableName);
+            executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
+            return;
         }
 
         logger.info(
@@ -138,64 +134,75 @@ public class DistributedScanExecutor {
         // Partition files across workers
         List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());
 
-        // Dispatch requests and collect responses
-        List<WorkerQueryResponse> responses = dispatchAndCollect(workers, assignments, sqlQuery, storageConfig, tableName);
-
-        // Merge results using analysis metadata
-        WorkerQueryResponse merged = ResultMerger.merge(
-            responses, analysis.strategy, analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
-        );
-
-        // Convert to row-oriented
-        return ResultSerializer.toRows(merged);
+        // Dispatch requests and collect responses asynchronously
+        dispatchAndCollect(workers, assignments, sqlQuery, storageConfig, tableName, ActionListener.wrap(
+            responses -> {
+                try {
+                    // Merge results using analysis metadata
+                    WorkerQueryResponse merged = ResultMerger.merge(
+                        responses, analysis.strategy, analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
+                    );
+                    listener.onResponse(ResultSerializer.toRows(merged));
+                } catch (Exception e) {
+                    listener.onFailure(e);
+                }
+            },
+            listener::onFailure
+        ));
     }
 
     /**
-     * Executes the query on the local node only, using {@link WorkerQueryExecutor}.
+     * Executes the query on the local node asynchronously via {@link WorkerQueryExecutor}
+     * on the {@code lakehouse_worker} thread pool.
      */
-    private Iterable<Object[]> executeSingleNode(
+    private void executeSingleNodeAsync(
         String sqlQuery,
         List<String> filePaths,
         long[] fileSizes,
         Map<String, String> storageConfig,
-        String tableName
+        String tableName,
+        ActionListener<Iterable<Object[]>> listener
     ) {
         WorkerQueryRequest request = new WorkerQueryRequest(sqlQuery, filePaths, fileSizes, storageConfig, tableName);
-        WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
-        return ResultSerializer.toRows(response);
+        transportService.getThreadPool().executor(LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL).execute(() -> {
+            try {
+                WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
+                listener.onResponse(ResultSerializer.toRows(response));
+            } catch (Exception e) {
+                listener.onFailure(e);
+            }
+        });
     }
 
     /**
-     * Dispatches worker requests and collects responses synchronously.
+     * Dispatches worker requests and collects responses asynchronously.
      * <p>
-     * Uses {@link GroupedActionListener} to collect all worker responses, bridged to
-     * a {@link CompletableFuture} for synchronous consumption. This blocking pattern
-     * is necessary because the Calcite pipeline above is synchronous.
+     * Uses {@link GroupedActionListener} to collect all worker responses.
+     * When all responses arrive, the listener is called with the collected results.
+     * No thread blocks waiting — the callback fires on the thread that delivers
+     * the last response.
      *
      * @param workers       eligible worker nodes
      * @param assignments   file assignments (one per worker)
      * @param sqlQuery      the SQL query
      * @param storageConfig storage configuration
      * @param tableName     the table name
-     * @return list of worker responses
+     * @param listener      callback for collected responses
      */
-    List<WorkerQueryResponse> dispatchAndCollect(
+    void dispatchAndCollect(
         List<DiscoveryNode> workers,
         List<FilePartitioner.FileAssignment> assignments,
         String sqlQuery,
         Map<String, String> storageConfig,
-        String tableName
+        String tableName,
+        ActionListener<List<WorkerQueryResponse>> listener
     ) {
         int assignmentCount = assignments.size();
-        CompletableFuture<Collection<WorkerQueryResponse>> future = new CompletableFuture<>();
 
         GroupedActionListener<WorkerQueryResponse> groupListener = new GroupedActionListener<>(
             ActionListener.wrap(
-                future::complete,
-                ex -> {
-                    logger.error("[ScanExecutor] Worker failure: {}", ex.getMessage(), ex);
-                    future.completeExceptionally(ex);
-                }
+                collected -> listener.onResponse(List.copyOf(collected)),
+                listener::onFailure
             ),
             assignmentCount
         );
@@ -228,20 +235,6 @@ public class DistributedScanExecutor {
             } else {
                 dispatchRemote(targetNode, request, groupListener);
             }
-        }
-
-        try {
-            Collection<WorkerQueryResponse> collected = future.get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            return new ArrayList<>(collected);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Distributed query execution interrupted", e);
-        } catch (TimeoutException e) {
-            throw new RuntimeException(
-                "Distributed query execution timed out after " + DEFAULT_TIMEOUT_SECONDS + " seconds", e
-            );
-        } catch (Exception e) {
-            throw new RuntimeException("Distributed query execution failed", e);
         }
     }
 

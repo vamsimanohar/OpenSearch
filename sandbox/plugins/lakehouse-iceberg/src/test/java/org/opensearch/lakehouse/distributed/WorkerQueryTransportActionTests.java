@@ -183,7 +183,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         config.put("s3Region", "us-west-2");
         config.put("s3Bucket", "test-bucket");
 
-        Map<String, String> result = WorkerQueryExecutor.resolveCredentials(config, clusterService);
+        Map<String, String> result = WorkerCredentialResolver.resolve(config, clusterService);
 
         // default auth should NOT resolve credentials — Rust handles IMDS directly
         assertNull(result.get("s3AccessKeyId"));
@@ -205,7 +205,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         Map<String, String> config = new HashMap<>();
         config.put("s3Region", "us-west-2");
 
-        Map<String, String> result = WorkerQueryExecutor.resolveCredentials(config, clusterService);
+        Map<String, String> result = WorkerCredentialResolver.resolve(config, clusterService);
 
         assertEquals("us-west-2", result.get("s3Region"));
         assertNull(result.get("s3AccessKeyId"));
@@ -219,7 +219,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         config.put("indexName", "test_index");
         config.put("localMode", "true");
 
-        Map<String, String> result = WorkerQueryExecutor.resolveCredentials(config, clusterService);
+        Map<String, String> result = WorkerCredentialResolver.resolve(config, clusterService);
 
         assertEquals("true", result.get("localMode"));
         assertNull(result.get("s3AccessKeyId"));
@@ -234,7 +234,7 @@ public class WorkerQueryTransportActionTests extends OpenSearchTestCase {
         config.put("indexName", "test_index");
         config.put("s3Region", "us-west-2");
 
-        Map<String, String> result = WorkerQueryExecutor.resolveCredentials(config, clusterService);
+        Map<String, String> result = WorkerCredentialResolver.resolve(config, clusterService);
 
         // Should take the default auth path (no credentials)
         assertNull(result.get("s3AccessKeyId"));

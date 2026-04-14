@@ -9,10 +9,7 @@
 package org.opensearch.lakehouse.exec;
 
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.core.Filter;
-import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
-import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlNode;
@@ -20,11 +17,11 @@ import org.apache.iceberg.expressions.Expression;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.EngineContext;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.lakehouse.LakehouseState;
 import org.opensearch.lakehouse.catalog.CatalogConfig;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.distributed.DistributedScanExecutor;
-import org.opensearch.lakehouse.scan.CalciteToIcebergPredicateConverter;
 import org.opensearch.lakehouse.scan.IcebergScanPlan;
 import org.opensearch.lakehouse.schema.IcebergCalciteTable;
 import org.opensearch.ppl.action.PPLResponse;
@@ -35,7 +32,6 @@ import org.opensearch.sql.executor.QueryType;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -49,6 +45,8 @@ import java.util.Map;
  *   <li>Convert RelNode to DataFusion SQL</li>
  *   <li>Execute via {@link DistributedScanExecutor} (handles both single-node and multi-node)</li>
  * </ol>
+ * <p>
+ * Fully asynchronous: results are delivered through {@link ActionListener} callbacks.
  *
  * @opensearch.internal
  */
@@ -66,20 +64,20 @@ public class LakehouseQueryExecutor {
     }
 
     /**
-     * Executes a SQL query and returns the response.
+     * Executes a SQL query asynchronously.
      */
-    public PPLResponse executeSql(String sql) {
-        return executeInternal(sql, QueryType.SQL);
+    public void executeSql(String sql, ActionListener<PPLResponse> listener) {
+        executeInternal(sql, QueryType.SQL, listener);
     }
 
     /**
-     * Executes a PPL query and returns the response.
+     * Executes a PPL query asynchronously.
      */
-    public PPLResponse executePpl(String ppl) {
-        return executeInternal(ppl, QueryType.PPL);
+    public void executePpl(String ppl, ActionListener<PPLResponse> listener) {
+        executeInternal(ppl, QueryType.PPL, listener);
     }
 
-    private PPLResponse executeInternal(String queryText, QueryType queryType) {
+    private void executeInternal(String queryText, QueryType queryType, ActionListener<PPLResponse> listener) {
         long t0 = System.currentTimeMillis();
         SchemaPlus schema = engineContext.getSchema();
 
@@ -90,7 +88,7 @@ public class LakehouseQueryExecutor {
             .build();
 
         try {
-            // 1. Parse query to Calcite RelNode
+            // 1. Parse query to Calcite RelNode (lightweight, sync)
             UnifiedQueryPlanner planner = new UnifiedQueryPlanner(context);
             RelNode logicalPlan = planner.plan(queryText);
             long t1 = System.currentTimeMillis();
@@ -99,43 +97,66 @@ public class LakehouseQueryExecutor {
             // 2. Extract column names from plan
             List<String> columns = logicalPlan.getRowType().getFieldNames();
 
-            // 3. Execute lakehouse-specific pipeline
-            Iterable<Object[]> result = executeLakehouse(logicalPlan);
-
-            // 4. Build response
-            List<Object[]> rows = new ArrayList<>();
-            for (Object[] row : result) {
-                rows.add(row);
-            }
-            logger.info("[PERF] Total query: {}ms, {} rows", System.currentTimeMillis() - t0, rows.size());
-            return new PPLResponse(columns, rows);
+            // 3. Execute lakehouse pipeline asynchronously
+            executeLakehouse(logicalPlan, ActionListener.wrap(
+                result -> {
+                    try {
+                        List<Object[]> rows = new ArrayList<>();
+                        for (Object[] row : result) {
+                            rows.add(row);
+                        }
+                        logger.info("[PERF] Total query: {}ms, {} rows", System.currentTimeMillis() - t0, rows.size());
+                        listener.onResponse(new PPLResponse(columns, rows));
+                    } catch (Exception e) {
+                        listener.onFailure(e);
+                    } finally {
+                        try { context.close(); } catch (Exception ignored) {}
+                    }
+                },
+                e -> {
+                    try { context.close(); } catch (Exception ignored) {}
+                    listener.onFailure(e);
+                }
+            ));
         } catch (Exception e) {
-            if (e instanceof RuntimeException) throw (RuntimeException) e;
-            throw new RuntimeException("Failed to execute " + queryType + " query: " + e.getMessage(), e);
-        } finally {
             try { context.close(); } catch (Exception ignored) {}
+            if (e instanceof RuntimeException) {
+                listener.onFailure(e);
+            } else {
+                listener.onFailure(new RuntimeException("Failed to plan " + queryType + " query: " + e.getMessage(), e));
+            }
         }
     }
 
     /**
-     * Executes the Iceberg scan pipeline: predicate pushdown, file pruning,
+     * Executes the Iceberg scan pipeline asynchronously: predicate pushdown, file pruning,
      * DataFusion SQL generation, distributed/single-node execution.
+     * <p>
+     * Pipeline: visit plan -> plan scan -> convert SQL -> build config -> execute async.
      */
     @SuppressWarnings("removal")
-    Iterable<Object[]> executeLakehouse(RelNode logicalPlan) {
-        // Find the IcebergCalciteTable in the plan
-        IcebergCalciteTable icebergTable = extractIcebergTable(logicalPlan);
+    void executeLakehouse(RelNode logicalPlan, ActionListener<Iterable<Object[]>> listener) {
+        // 1. Visit plan — extract table, filter, and name in one traversal
+        IcebergPlanVisitor visitor = new IcebergPlanVisitor();
+        visitor.go(logicalPlan);
+
+        IcebergCalciteTable icebergTable = visitor.getIcebergTable();
         if (icebergTable == null) {
-            throw new IllegalArgumentException("No Iceberg table found in query plan");
+            listener.onFailure(new IllegalArgumentException("No Iceberg table found in query plan"));
+            return;
+        }
+        String tableName = visitor.getTableName();
+        if (tableName == null) {
+            listener.onFailure(new IllegalArgumentException("No TableScan found in plan"));
+            return;
         }
 
         IcebergCatalogConnector connector = LakehouseState.instance().catalogConnector();
 
-        // 1. Extract Iceberg predicates for manifest-level file pruning
-        Expression filterExpr = extractIcebergFilter(logicalPlan);
+        // 2. Plan scan — resolves manifests to pruned data file paths
+        Expression filterExpr = visitor.getIcebergFilter();
         List<Expression> predicates = filterExpr != null ? List.of(filterExpr) : List.of();
 
-        // 2. Plan scan — resolves manifests to pruned data file paths
         CatalogConfig catalogConfig = icebergTable.catalogConfig();
         if (catalogConfig != null) connector.setCredentialsOnThread(catalogConfig);
 
@@ -154,59 +175,17 @@ public class LakehouseQueryExecutor {
         logger.info("[PERF] Iceberg scan planning: {}ms ({} files, {} bytes)", t2 - t1, scanPlan.fileCount(), scanPlan.getTotalFileSize());
 
         // 3. Convert Calcite RelNode to DataFusion SQL
-        String tableName = extractTableName(logicalPlan);
         String sqlQuery = convertToDataFusionSql(logicalPlan, tableName);
 
         // 4. Build storage config
-        Map<String, String> storageConfig = buildStorageConfig(connector, icebergTable, scanPlan);
+        Map<String, String> storageConfig = StorageConfigBuilder.buildStorageConfig(icebergTable, scanPlan);
 
         // 5. Normalize file paths
         long[] fileSizes = scanPlan.getFiles().stream().mapToLong(IcebergScanPlan.FileInfo::getFileSizeInBytes).toArray();
-        List<String> filePaths = normalizeFilePaths(scanPlan.getDataFilePaths());
+        List<String> filePaths = StorageConfigBuilder.normalizeFilePaths(scanPlan.getDataFilePaths());
 
-        // 6. Execute — single-node or distributed based on cluster size
-        return scanExecutor.execute(logicalPlan, sqlQuery, filePaths, fileSizes, storageConfig, tableName);
-    }
-
-    // --- Helper methods ---
-
-    private IcebergCalciteTable extractIcebergTable(RelNode node) {
-        if (node instanceof TableScan) {
-            org.apache.calcite.schema.Table table = node.getTable().unwrap(org.apache.calcite.schema.Table.class);
-            if (table instanceof IcebergCalciteTable) return (IcebergCalciteTable) table;
-        }
-        for (RelNode input : node.getInputs()) {
-            IcebergCalciteTable found = extractIcebergTable(input);
-            if (found != null) return found;
-        }
-        return null;
-    }
-
-    private Expression extractIcebergFilter(RelNode node) {
-        if (node instanceof Filter) {
-            Filter filter = (Filter) node;
-            if (filter.getInput() instanceof TableScan) {
-                RelDataType inputRowType = filter.getInput().getRowType();
-                return CalciteToIcebergPredicateConverter.convert(filter.getCondition(), inputRowType);
-            }
-        }
-        for (RelNode input : node.getInputs()) {
-            Expression result = extractIcebergFilter(input);
-            if (result != null) return result;
-        }
-        return null;
-    }
-
-    private String extractTableName(RelNode node) {
-        if (node instanceof TableScan) {
-            List<String> qn = node.getTable().getQualifiedName();
-            return qn.get(qn.size() - 1);
-        }
-        for (RelNode input : node.getInputs()) {
-            String name = extractTableName(input);
-            if (name != null) return name;
-        }
-        throw new IllegalArgumentException("No TableScan found in plan");
+        // 6. Execute asynchronously — single-node or distributed based on cluster size
+        scanExecutor.executeAsync(logicalPlan, sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
     }
 
     private String convertToDataFusionSql(RelNode logicalPlan, String tableName) {
@@ -226,36 +205,4 @@ public class LakehouseQueryExecutor {
         return sql.replaceAll("\"\\w+\"\\." + java.util.regex.Pattern.quote(quotedTable), quotedTable);
     }
 
-    private Map<String, String> buildStorageConfig(
-        IcebergCatalogConnector connector, IcebergCalciteTable icebergTable, IcebergScanPlan scanPlan
-    ) {
-        Map<String, String> config = new HashMap<>();
-        CatalogConfig catalogConfig = icebergTable.catalogConfig();
-        if (catalogConfig != null && catalogConfig.region() != null) config.put("s3Region", catalogConfig.region());
-        List<String> paths = scanPlan.getDataFilePaths();
-        if (!paths.isEmpty()) {
-            String firstPath = paths.get(0);
-            if (firstPath.startsWith("s3://")) {
-                String withoutScheme = firstPath.substring(5);
-                int slashIdx = withoutScheme.indexOf('/');
-                if (slashIdx > 0) config.put("s3Bucket", withoutScheme.substring(0, slashIdx));
-            }
-            if (firstPath.startsWith("file:") || firstPath.startsWith("/")) config.put("localMode", "true");
-        }
-        if (catalogConfig != null) {
-            config.put("indexName", catalogConfig.indexName());
-            config.put("authType", catalogConfig.authType());
-        }
-        return config;
-    }
-
-    private List<String> normalizeFilePaths(List<String> paths) {
-        return paths.stream()
-            .map(p -> {
-                if (p.startsWith("file:/") && !p.startsWith("file://")) return "file://" + p.substring("file:".length());
-                else if (p.startsWith("/")) return "file://" + p;
-                return p;
-            })
-            .toList();
-    }
 }

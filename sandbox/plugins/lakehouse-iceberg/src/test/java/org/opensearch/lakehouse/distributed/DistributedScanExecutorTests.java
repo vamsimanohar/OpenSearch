@@ -25,6 +25,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
@@ -39,81 +42,101 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         return mockBackend;
     }
 
-    public void testSingleNodeFallbackExecutesLocally() {
+    /**
+     * Helper to execute async and block for result in tests.
+     */
+    private List<Object[]> executeAndWait(
+        DistributedScanExecutor executor,
+        RelNode relNode,
+        String sql,
+        List<String> filePaths,
+        long[] fileSizes,
+        Map<String, String> storageConfig,
+        String tableName
+    ) throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<Iterable<Object[]>> resultRef = new AtomicReference<>();
+        AtomicReference<Exception> errorRef = new AtomicReference<>();
+
+        executor.executeAsync(relNode, sql, filePaths, fileSizes, storageConfig, tableName, new ActionListener<>() {
+            @Override
+            public void onResponse(Iterable<Object[]> result) {
+                resultRef.set(result);
+                latch.countDown();
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                errorRef.set(e);
+                latch.countDown();
+            }
+        });
+
+        assertTrue("Timed out waiting for async result", latch.await(10, TimeUnit.SECONDS));
+        if (errorRef.get() != null) throw errorRef.get();
+
+        List<Object[]> rows = new ArrayList<>();
+        resultRef.get().forEach(rows::add);
+        return rows;
+    }
+
+    public void testSingleNodeFallbackExecutesLocally() throws Exception {
         // Only 1 eligible node → executes locally via WorkerQueryExecutor
         DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{1, "hello"}, new Object[]{2, "world"});
         DiscoveryNode localNode = newNode("local", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         ClusterService clusterService = mockClusterService(List.of(localNode), "local");
-        TransportService transportService = mock(TransportService.class);
+        TransportService transportService = mockTransportServiceWithThreadPool();
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
         RelNode relNode = mockSimpleRelNode();
 
-        Iterable<Object[]> result = executor.execute(
-            relNode,
-            "SELECT * FROM t",
-            List.of("f1", "f2"),
-            new long[]{100, 200},
-            Map.of("localMode", "true"),
-            "t"
+        List<Object[]> rows = executeAndWait(
+            executor, relNode, "SELECT * FROM t",
+            List.of("f1", "f2"), new long[]{100, 200},
+            Map.of("localMode", "true"), "t"
         );
 
-        assertNotNull(result);
-        List<Object[]> rows = new ArrayList<>();
-        result.forEach(rows::add);
         assertEquals(2, rows.size());
     }
 
-    public void testSingleNodeStrategyFallbackExecutesLocally() {
+    public void testSingleNodeStrategyFallbackExecutesLocally() throws Exception {
         // 2 eligible nodes but query requires SINGLE_NODE → executes locally
         DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{42});
         DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
-        TransportService transportService = mock(TransportService.class);
+        TransportService transportService = mockTransportServiceWithThreadPool();
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
 
         // Mock a GroupBy aggregate → SINGLE_NODE
         RelNode relNode = mockGroupByRelNode();
 
-        Iterable<Object[]> result = executor.execute(
-            relNode,
-            "SELECT col, COUNT(*) FROM t GROUP BY col",
-            List.of("f1", "f2"),
-            new long[]{100, 200},
-            Map.of("localMode", "true"),
-            "t"
+        List<Object[]> rows = executeAndWait(
+            executor, relNode, "SELECT col, COUNT(*) FROM t GROUP BY col",
+            List.of("f1", "f2"), new long[]{100, 200},
+            Map.of("localMode", "true"), "t"
         );
 
-        assertNotNull(result);
-        List<Object[]> rows = new ArrayList<>();
-        result.forEach(rows::add);
         assertEquals(1, rows.size());
     }
 
-    public void testNoEligibleNodesExecutesLocally() {
+    public void testNoEligibleNodesExecutesLocally() throws Exception {
         // NodeDiscovery falls back to local node (1 node) → executes locally
         DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{"value"});
         DiscoveryNode localNode = newNode("local", Map.of());
         ClusterService clusterService = mockClusterService(List.of(localNode), "local");
-        TransportService transportService = mock(TransportService.class);
+        TransportService transportService = mockTransportServiceWithThreadPool();
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
         RelNode relNode = mockSimpleRelNode();
 
-        Iterable<Object[]> result = executor.execute(
-            relNode,
-            "SELECT * FROM t",
-            List.of("f1"),
-            new long[]{100},
-            Map.of("localMode", "true"),
-            "t"
+        List<Object[]> rows = executeAndWait(
+            executor, relNode, "SELECT * FROM t",
+            List.of("f1"), new long[]{100},
+            Map.of("localMode", "true"), "t"
         );
 
-        assertNotNull(result);
-        List<Object[]> rows = new ArrayList<>();
-        result.forEach(rows::add);
         assertEquals(1, rows.size());
     }
 
@@ -127,12 +150,8 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         assertNotNull(executor);
     }
 
-    public void testDefaultTimeoutConstant() {
-        assertEquals(120L, DistributedScanExecutor.DEFAULT_TIMEOUT_SECONDS);
-    }
-
     @SuppressWarnings("unchecked")
-    public void testDispatchAndCollectWithEmptyAssignment() {
+    public void testDispatchAndCollectWithEmptyAssignment() throws Exception {
         DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
@@ -147,7 +166,6 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         FilePartitioner.FileAssignment realAssignment = new FilePartitioner.FileAssignment(List.of("f1"), new long[]{100}, 100);
 
         // For the local node dispatch, the transport service will be called
-        // We need to simulate response via the handler
         org.mockito.stubbing.Answer<Void> answerWithResponse = invocation -> {
             @SuppressWarnings("unchecked")
             org.opensearch.transport.TransportResponseHandler<WorkerQueryResponse> handler =
@@ -163,15 +181,31 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             any(org.opensearch.transport.TransportResponseHandler.class)
         );
 
-        List<WorkerQueryResponse> responses = executor.dispatchAndCollect(
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<List<WorkerQueryResponse>> resultRef = new AtomicReference<>();
+
+        executor.dispatchAndCollect(
             List.of(node1, node2),
             List.of(emptyAssignment, realAssignment),
             "SELECT * FROM t",
             Map.of(),
-            "t"
+            "t",
+            new ActionListener<>() {
+                @Override
+                public void onResponse(List<WorkerQueryResponse> responses) {
+                    resultRef.set(responses);
+                    latch.countDown();
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    latch.countDown();
+                }
+            }
         );
 
-        assertEquals(2, responses.size());
+        assertTrue("Timed out", latch.await(10, TimeUnit.SECONDS));
+        assertEquals(2, resultRef.get().size());
     }
 
     @SuppressWarnings("unchecked")
@@ -263,6 +297,29 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         ClusterService clusterService = mock(ClusterService.class);
         when(clusterService.state()).thenReturn(clusterState);
         return clusterService;
+    }
+
+    /**
+     * Creates a mock TransportService with a real thread pool for async tests.
+     * The thread pool executor runs tasks immediately on the calling thread.
+     */
+    private static TransportService mockTransportServiceWithThreadPool() {
+        TransportService transportService = mock(TransportService.class);
+        org.opensearch.threadpool.ThreadPool threadPool = mock(org.opensearch.threadpool.ThreadPool.class);
+        // Use a direct executor that runs tasks immediately (for deterministic tests)
+        java.util.concurrent.ExecutorService directExecutor = new java.util.concurrent.AbstractExecutorService() {
+            private volatile boolean shutdown = false;
+
+            @Override public void execute(Runnable command) { command.run(); }
+            @Override public void shutdown() { shutdown = true; }
+            @Override public List<Runnable> shutdownNow() { shutdown = true; return List.of(); }
+            @Override public boolean isShutdown() { return shutdown; }
+            @Override public boolean isTerminated() { return shutdown; }
+            @Override public boolean awaitTermination(long timeout, TimeUnit unit) { return true; }
+        };
+        when(transportService.getThreadPool()).thenReturn(threadPool);
+        when(threadPool.executor(org.opensearch.lakehouse.LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL)).thenReturn(directExecutor);
+        return transportService;
     }
 
     private RelNode mockSimpleRelNode() {

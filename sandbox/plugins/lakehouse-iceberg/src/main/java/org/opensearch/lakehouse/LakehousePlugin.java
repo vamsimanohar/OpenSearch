@@ -64,7 +64,7 @@ public class LakehousePlugin extends Plugin implements SchemaContributor, Action
         LakehouseState.instance().catalogConnector()
     );
 
-    /** Thread pool name for lakehouse worker queries. Isolated from GENERIC to prevent blocking cluster operations. */
+    /** Thread pool for lakehouse worker queries (DataFusion execution). Isolated from GENERIC to prevent blocking cluster operations. */
     public static final String LAKEHOUSE_WORKER_THREAD_POOL = "lakehouse_worker";
 
     /** Creates a new LakehousePlugin instance. */

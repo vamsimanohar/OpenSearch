@@ -12,19 +12,13 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.exec.DataWarehouseScanContext;
 import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
-import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
-import org.opensearch.lakehouse.LakehouseState;
-import org.opensearch.lakehouse.catalog.AwsCredentials;
-import org.opensearch.lakehouse.catalog.CatalogConfig;
-import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -34,7 +28,7 @@ import java.util.Map;
  * Responsible for:
  * <ul>
  *   <li>Resolving the DataFusion queryEngine</li>
- *   <li>Resolving AWS credentials locally (via IMDS/STS)</li>
+ *   <li>Delegating credential resolution to {@link WorkerCredentialResolver}</li>
  *   <li>Delegating to DataFusion and building the response</li>
  * </ul>
  * <p>
@@ -64,7 +58,7 @@ public final class WorkerQueryExecutor {
             throw new IllegalStateException("No DataWarehouseQueryEngine registered for worker query execution");
         }
 
-        Map<String, String> storageConfig = resolveCredentials(request.getStorageConfig(), clusterService);
+        Map<String, String> storageConfig = WorkerCredentialResolver.resolve(request.getStorageConfig(), clusterService);
 
         DataWarehouseScanContext scanContext = new DataWarehouseScanContext(
             request.getTableName(),
@@ -90,55 +84,6 @@ public final class WorkerQueryExecutor {
         WorkerQueryResponse response = buildResponse(rows);
         logger.info("[PERF] Worker query: {}ms ({} rows)", t1 - t0, response.getRowCount());
         return response;
-    }
-
-    /**
-     * Resolves AWS credentials locally on this worker node using the index settings
-     * from cluster state. The coordinator passes only the index name (no secrets);
-     * each worker independently calls IMDS/STS/DefaultCredentialsProvider.
-     *
-     * @param original       the storageConfig from the coordinator (contains region, bucket, indexName)
-     * @param clusterService the cluster service for reading index metadata
-     * @return a new map with credentials added
-     */
-    @SuppressWarnings("removal")
-    static Map<String, String> resolveCredentials(Map<String, String> original, ClusterService clusterService) {
-        Map<String, String> config = new HashMap<>(original);
-        String indexName = config.remove("indexName");
-        if (indexName == null || "true".equals(config.get("localMode"))) {
-            return config;
-        }
-
-        // For "default" auth, Rust's object_store uses IMDS directly on each worker.
-        String authType = config.getOrDefault("authType", "default");
-        if ("default".equals(authType)) {
-            logger.debug("[WorkerQuery] auth_type=default for index [{}], Rust will use IMDS directly", indexName);
-            return config;
-        }
-
-        // For "role" and "keys" auth, resolve credentials locally from cluster state.
-        try {
-            IndexMetadata indexMetadata = clusterService.state().metadata().index(indexName);
-            if (indexMetadata == null) {
-                logger.warn("[WorkerQuery] Index [{}] not found in cluster state, skipping credential resolution", indexName);
-                return config;
-            }
-            CatalogConfig catalogConfig = CatalogConfig.fromIndexSettings(indexMetadata);
-            IcebergCatalogConnector connector = LakehouseState.instance().catalogConnector();
-            AwsCredentials creds = AccessController.doPrivileged(
-                (PrivilegedAction<AwsCredentials>) () -> connector.getCredentials(catalogConfig)
-            );
-            if (creds != null && creds.isComplete()) {
-                config.put("s3AccessKeyId", creds.getAccessKeyId());
-                config.put("s3SecretAccessKey", creds.getSecretAccessKey());
-                if (creds.getSessionToken() != null) {
-                    config.put("s3SessionToken", creds.getSessionToken());
-                }
-            }
-        } catch (Exception e) {
-            logger.warn("[WorkerQuery] Local credential resolution failed for index [{}]: {}", indexName, e.getMessage());
-        }
-        return config;
     }
 
     /**

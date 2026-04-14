@@ -21,14 +21,18 @@ import org.opensearch.lakehouse.distributed.DistributedScanExecutor;
 import org.opensearch.lakehouse.exec.LakehouseQueryExecutor;
 import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.tasks.Task;
-import org.opensearch.lakehouse.LakehousePlugin;
-import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 /**
  * Transport action for lakehouse SQL and PPL query execution.
- * Uses {@link LakehouseQueryExecutor} directly, bypassing the analytics-engine
- * PushDownPlanner/DefaultPlanExecutor pipeline.
+ * <p>
+ * Fully asynchronous: delegates to {@link LakehouseQueryExecutor} which delivers
+ * results via {@link ActionListener} callbacks. No thread blocks waiting for results,
+ * similar to how OpenSearch search dispatches shard queries.
+ * <p>
+ * The Netty event loop thread that calls {@code doExecute()} returns immediately after
+ * kicking off the async pipeline. Actual DataFusion execution happens on the
+ * {@code lakehouse_worker} thread pool via {@link DistributedScanExecutor}.
  *
  * @opensearch.internal
  */
@@ -36,7 +40,6 @@ public class LakehouseQueryTransportAction extends HandledTransportAction<Lakeho
 
     private static final Logger logger = LogManager.getLogger(LakehouseQueryTransportAction.class);
     private final LakehouseQueryExecutor queryExecutor;
-    private final ThreadPool threadPool;
 
     @Inject
     public LakehouseQueryTransportAction(
@@ -47,32 +50,18 @@ public class LakehouseQueryTransportAction extends HandledTransportAction<Lakeho
         DataWarehouseQueryEngine queryEngine
     ) {
         super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new);
-        this.threadPool = transportService.getThreadPool();
         DistributedScanExecutor scanExecutor = new DistributedScanExecutor(transportService, clusterService, queryEngine);
         this.queryExecutor = new LakehouseQueryExecutor(engineContext, scanExecutor);
     }
 
     @Override
     protected void doExecute(Task task, LakehouseQueryRequest request, ActionListener<PPLResponse> listener) {
-        // Fork to lakehouse_worker pool to avoid blocking Netty event loop threads.
-        // REST requests arrive on Netty IO threads via NodeClient.executeLocally() which
-        // calls doExecute() directly — blocking here would prevent transport responses
-        // from being processed on the same event loop thread, causing a self-deadlock.
-        threadPool.executor(LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL).execute(() -> {
-            try {
-                PPLResponse response;
-                if (request.isSql()) {
-                    logger.info("[Lakehouse] Executing SQL: {}", request.getQueryText());
-                    response = queryExecutor.executeSql(request.getQueryText());
-                } else {
-                    logger.info("[Lakehouse] Executing PPL: {}", request.getQueryText());
-                    response = queryExecutor.executePpl(request.getQueryText());
-                }
-                listener.onResponse(response);
-            } catch (Exception e) {
-                logger.error("[Lakehouse] Query execution failed", e);
-                listener.onFailure(e);
-            }
-        });
+        if (request.isSql()) {
+            logger.info("[Lakehouse] Executing SQL: {}", request.getQueryText());
+            queryExecutor.executeSql(request.getQueryText(), listener);
+        } else {
+            logger.info("[Lakehouse] Executing PPL: {}", request.getQueryText());
+            queryExecutor.executePpl(request.getQueryText(), listener);
+        }
     }
 }
