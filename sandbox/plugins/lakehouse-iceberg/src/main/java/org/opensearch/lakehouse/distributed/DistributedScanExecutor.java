@@ -296,6 +296,7 @@ public class DistributedScanExecutor {
      * Dispatches a request to a remote worker node via the transport service.
      */
     void dispatchRemote(DiscoveryNode node, WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
+        long dispatchTime = System.currentTimeMillis();
         logger.debug("[ScanExecutor] Dispatching to remote node {}: {} files", node.getId(), request.getFilePaths().size());
         transportService.sendRequest(
             node,
@@ -304,16 +305,22 @@ public class DistributedScanExecutor {
             new TransportResponseHandler<WorkerQueryResponse>() {
                 @Override
                 public WorkerQueryResponse read(StreamInput in) throws IOException {
-                    return new WorkerQueryResponse(in);
+                    long readStart = System.currentTimeMillis();
+                    logger.info("[ScanExecutor] read() called for node {}, {}ms after dispatch", node.getId(), readStart - dispatchTime);
+                    WorkerQueryResponse response = new WorkerQueryResponse(in);
+                    logger.info("[ScanExecutor] read() done for node {}, deserialized in {}ms", node.getId(), System.currentTimeMillis() - readStart);
+                    return response;
                 }
 
                 @Override
                 public void handleResponse(WorkerQueryResponse response) {
+                    logger.info("[ScanExecutor] handleResponse() for node {}, {}ms after dispatch", node.getId(), System.currentTimeMillis() - dispatchTime);
                     listener.onResponse(response);
                 }
 
                 @Override
                 public void handleException(TransportException exp) {
+                    logger.error("[ScanExecutor] handleException() for node {}, {}ms after dispatch: {}", node.getId(), System.currentTimeMillis() - dispatchTime, exp.getMessage());
                     listener.onFailure(exp);
                 }
 

@@ -8,6 +8,8 @@
 
 package org.opensearch.lakehouse.distributed;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
@@ -27,6 +29,8 @@ import java.util.List;
  * @opensearch.internal
  */
 public class WorkerQueryResponse extends ActionResponse implements ToXContentObject {
+
+    private static final Logger logger = LogManager.getLogger(WorkerQueryResponse.class);
 
     private final List<String> columnNames;
     private final List<String> columnTypes;
@@ -55,6 +59,7 @@ public class WorkerQueryResponse extends ActionResponse implements ToXContentObj
      * @throws IOException if reading fails
      */
     public WorkerQueryResponse(StreamInput in) throws IOException {
+        long start = System.currentTimeMillis();
         this.columnNames = in.readStringList();
         this.columnTypes = in.readStringList();
         this.rowCount = in.readVInt();
@@ -66,10 +71,12 @@ public class WorkerQueryResponse extends ActionResponse implements ToXContentObj
                 this.columnData[col][row] = in.readGenericValue();
             }
         }
+        logger.info("[WorkerQueryResponse] Deserialized: {} cols, {} rows in {}ms", numCols, rowCount, System.currentTimeMillis() - start);
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
+        long start = System.currentTimeMillis();
         out.writeStringCollection(columnNames);
         out.writeStringCollection(columnTypes);
         out.writeVInt(rowCount);
@@ -79,6 +86,7 @@ public class WorkerQueryResponse extends ActionResponse implements ToXContentObj
                 out.writeGenericValue(column[row]);
             }
         }
+        logger.info("[WorkerQueryResponse] Serialized: {} cols, {} rows in {}ms", columnData.length, rowCount, System.currentTimeMillis() - start);
     }
 
     @Override
