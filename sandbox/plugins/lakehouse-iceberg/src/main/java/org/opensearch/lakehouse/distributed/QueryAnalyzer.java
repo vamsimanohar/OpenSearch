@@ -16,6 +16,7 @@ import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.sql.SqlKind;
+import org.opensearch.lakehouse.distributed.merge.MergeStrategy;
 
 import java.util.List;
 

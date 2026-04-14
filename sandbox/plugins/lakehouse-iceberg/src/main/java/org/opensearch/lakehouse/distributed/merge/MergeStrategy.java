@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.lakehouse.distributed;
+package org.opensearch.lakehouse.distributed.merge;
 
 /**
  * Merge strategy for combining partial results from distributed worker nodes.

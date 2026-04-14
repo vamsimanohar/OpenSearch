@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.lakehouse.distributed;
+package org.opensearch.lakehouse.distributed.worker;
 
 import org.opensearch.common.io.stream.BytesStreamOutput;
 import org.opensearch.common.xcontent.XContentFactory;

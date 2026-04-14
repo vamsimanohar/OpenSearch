@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.lakehouse.distributed;
+package org.opensearch.lakehouse.distributed.worker;
 
 import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.StreamInput;

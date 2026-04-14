@@ -17,6 +17,9 @@ import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.lakehouse.distributed.worker.WorkerQueryAction;
+import org.opensearch.lakehouse.distributed.worker.WorkerQueryRequest;
+import org.opensearch.lakehouse.distributed.worker.WorkerQueryResponse;
 import org.opensearch.test.OpenSearchTestCase;
 import org.opensearch.transport.TransportService;
 

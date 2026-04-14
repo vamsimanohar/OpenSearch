@@ -6,9 +6,10 @@
  * compatible open source license.
  */
 
-package org.opensearch.lakehouse.distributed;
+package org.opensearch.lakehouse.distributed.merge;
 
 import org.apache.calcite.sql.SqlKind;
+import org.opensearch.lakehouse.distributed.worker.WorkerQueryResponse;
 
 import java.util.ArrayList;
 import java.util.Collections;

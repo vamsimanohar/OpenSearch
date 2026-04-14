@@ -29,6 +29,7 @@ import org.apache.calcite.sql.type.BasicSqlType;
 import org.apache.calcite.sql.type.SqlTypeFactoryImpl;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.util.ImmutableBitSet;
+import org.opensearch.lakehouse.distributed.merge.MergeStrategy;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.math.BigDecimal;
