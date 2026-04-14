@@ -22,6 +22,7 @@ import org.opensearch.lakehouse.exec.LakehouseQueryExecutor;
 import org.opensearch.ppl.action.PPLResponse;
 import org.opensearch.tasks.Task;
 import org.opensearch.lakehouse.LakehousePlugin;
+import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 
 /**
@@ -35,6 +36,7 @@ public class LakehouseQueryTransportAction extends HandledTransportAction<Lakeho
 
     private static final Logger logger = LogManager.getLogger(LakehouseQueryTransportAction.class);
     private final LakehouseQueryExecutor queryExecutor;
+    private final ThreadPool threadPool;
 
     @Inject
     public LakehouseQueryTransportAction(
@@ -44,26 +46,33 @@ public class LakehouseQueryTransportAction extends HandledTransportAction<Lakeho
         ClusterService clusterService,
         DataWarehouseQueryEngine queryEngine
     ) {
-        super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new, LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL);
+        super(LakehouseQueryAction.NAME, transportService, actionFilters, LakehouseQueryRequest::new);
+        this.threadPool = transportService.getThreadPool();
         DistributedScanExecutor scanExecutor = new DistributedScanExecutor(transportService, clusterService, queryEngine);
         this.queryExecutor = new LakehouseQueryExecutor(engineContext, scanExecutor);
     }
 
     @Override
     protected void doExecute(Task task, LakehouseQueryRequest request, ActionListener<PPLResponse> listener) {
-        try {
-            PPLResponse response;
-            if (request.isSql()) {
-                logger.info("[Lakehouse] Executing SQL: {}", request.getQueryText());
-                response = queryExecutor.executeSql(request.getQueryText());
-            } else {
-                logger.info("[Lakehouse] Executing PPL: {}", request.getQueryText());
-                response = queryExecutor.executePpl(request.getQueryText());
+        // Fork to lakehouse_worker pool to avoid blocking Netty event loop threads.
+        // REST requests arrive on Netty IO threads via NodeClient.executeLocally() which
+        // calls doExecute() directly — blocking here would prevent transport responses
+        // from being processed on the same event loop thread, causing a self-deadlock.
+        threadPool.executor(LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL).execute(() -> {
+            try {
+                PPLResponse response;
+                if (request.isSql()) {
+                    logger.info("[Lakehouse] Executing SQL: {}", request.getQueryText());
+                    response = queryExecutor.executeSql(request.getQueryText());
+                } else {
+                    logger.info("[Lakehouse] Executing PPL: {}", request.getQueryText());
+                    response = queryExecutor.executePpl(request.getQueryText());
+                }
+                listener.onResponse(response);
+            } catch (Exception e) {
+                logger.error("[Lakehouse] Query execution failed", e);
+                listener.onFailure(e);
             }
-            listener.onResponse(response);
-        } catch (Exception e) {
-            logger.error("[Lakehouse] Query execution failed", e);
-            listener.onFailure(e);
-        }
+        });
     }
 }
