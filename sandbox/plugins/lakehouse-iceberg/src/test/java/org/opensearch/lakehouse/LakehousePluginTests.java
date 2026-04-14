@@ -11,7 +11,6 @@ package org.opensearch.lakehouse;
 import org.apache.calcite.jdbc.CalciteSchema;
 import org.apache.calcite.schema.SchemaPlus;
 import org.opensearch.Version;
-import org.opensearch.analytics.schema.ExternalTable;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.Metadata;
@@ -56,29 +55,6 @@ public class LakehousePluginTests extends OpenSearchTestCase {
         }
     }
 
-    public void testSupportsIcebergFormat() throws IOException {
-        try (LakehousePlugin plugin = new LakehousePlugin()) {
-            ExternalTable icebergTable = mock(ExternalTable.class);
-            when(icebergTable.format()).thenReturn("iceberg");
-            assertTrue(plugin.supports(icebergTable));
-        }
-    }
-
-    public void testDoesNotSupportOtherFormats() throws IOException {
-        try (LakehousePlugin plugin = new LakehousePlugin()) {
-            ExternalTable deltaTable = mock(ExternalTable.class);
-            when(deltaTable.format()).thenReturn("delta");
-            assertFalse(plugin.supports(deltaTable));
-        }
-    }
-
-    public void testPrepareScanRejectsNonIcebergTable() throws IOException {
-        try (LakehousePlugin plugin = new LakehousePlugin()) {
-            ExternalTable table = mock(ExternalTable.class);
-            expectThrows(IllegalArgumentException.class, () -> plugin.prepareScan(null, table));
-        }
-    }
-
     public void testContributeSchemaWithNoLakehouseIndices() throws IOException {
         try (LakehousePlugin plugin = new LakehousePlugin()) {
             IndexMetadata normalIdx = indexMetadata("normal_index", Settings.builder());
@@ -115,11 +91,19 @@ public class LakehousePluginTests extends OpenSearchTestCase {
         assertNotNull(LakehouseState.instance().catalogConnector());
     }
 
-    public void testSupportsNullFormat() throws IOException {
+    public void testGetActionsIncludesWorkerQueryAction() throws IOException {
         try (LakehousePlugin plugin = new LakehousePlugin()) {
-            ExternalTable table = mock(ExternalTable.class);
-            when(table.format()).thenReturn(null);
-            assertFalse(plugin.supports(table));
+            var actions = plugin.getActions();
+            assertEquals(2, actions.size());
+            assertEquals("cluster:internal/lakehouse/query", actions.get(0).getAction().name());
+            assertEquals("cluster:internal/lakehouse/worker/query", actions.get(1).getAction().name());
+        }
+    }
+
+    public void testAdditionalSettingsRegistersNodeAttribute() throws IOException {
+        try (LakehousePlugin plugin = new LakehousePlugin()) {
+            Settings settings = plugin.additionalSettings();
+            assertEquals("true", settings.get("node.attr.lakehouse.worker"));
         }
     }
 

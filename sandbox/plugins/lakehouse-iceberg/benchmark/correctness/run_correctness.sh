@@ -11,7 +11,8 @@
 #   --endpoint URL      OpenSearch endpoint (default: http://localhost:9200)
 #   --table TABLE       OpenSearch table name (default: hits_s3)
 #   --data-path PATH    Path to parquet data for datafusion-cli
-#                       (single file or directory of parquet files)
+#                       (S3 path, local file, or local directory)
+#                       Default: s3://iceberg-benchmark-test-263689514295/iceberg-warehouse/hits/data/
 #   --queries-dir DIR   Custom queries directory (default: ./queries)
 #   --output-dir DIR    Output directory for results (default: ./results)
 #   --timeout SECS      Query timeout in seconds (default: 120)
@@ -28,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ── Defaults ─────────────────────────────────────────────────────────────────
 ENDPOINT="http://localhost:9200"
 TABLE="hits_s3"
-DATA_PATH=""
+DATA_PATH="s3://iceberg-benchmark-test-263689514295/iceberg-warehouse/hits/data/"
 QUERIES_DIR="${SCRIPT_DIR}/queries"
 OUTPUT_DIR="${SCRIPT_DIR}/results"
 TIMEOUT=120
@@ -36,7 +37,7 @@ MAX_ROWS=100
 SKIP_OS=false
 SKIP_DF=false
 QUERY_FILTER=""
-DATAFUSION_CLI="/home/reddyvam/.cargo/bin/datafusion-cli"
+DATAFUSION_CLI=""
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -63,26 +64,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Validate ─────────────────────────────────────────────────────────────────
-if [ "$SKIP_DF" = false ] && [ -z "$DATA_PATH" ]; then
-    # Try default paths
-    if [ -f "/local/home/reddyvam/ClickBench/datafusion/hits.parquet" ]; then
-        DATA_PATH="/local/home/reddyvam/ClickBench/datafusion/hits.parquet"
-    elif [ -d "/local/home/reddyvam/ClickBench/datafusion-30-flat" ]; then
-        DATA_PATH="/local/home/reddyvam/ClickBench/datafusion-30-flat/"
-    else
-        echo "ERROR: --data-path is required for DataFusion execution."
-        echo "  Provide path to parquet file(s) or use --skip-df to skip DF execution."
-        exit 1
-    fi
-fi
-
-if [ "$SKIP_DF" = false ] && [ ! -x "$DATAFUSION_CLI" ]; then
-    # Try PATH
-    if command -v datafusion-cli &>/dev/null; then
-        DATAFUSION_CLI="$(command -v datafusion-cli)"
-    else
-        echo "ERROR: datafusion-cli not found at $DATAFUSION_CLI or in PATH."
-        exit 1
+if [ "$SKIP_DF" = false ]; then
+    # Find datafusion-cli
+    if [ -z "$DATAFUSION_CLI" ]; then
+        if command -v datafusion-cli &>/dev/null; then
+            DATAFUSION_CLI="$(command -v datafusion-cli)"
+        elif [ -x "$HOME/.cargo/bin/datafusion-cli" ]; then
+            DATAFUSION_CLI="$HOME/.cargo/bin/datafusion-cli"
+        else
+            echo "ERROR: datafusion-cli not found in PATH or ~/.cargo/bin/"
+            echo "  Install with: cargo install datafusion-cli"
+            exit 1
+        fi
     fi
 fi
 

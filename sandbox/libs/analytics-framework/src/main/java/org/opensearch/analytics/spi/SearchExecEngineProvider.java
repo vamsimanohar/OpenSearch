@@ -13,12 +13,11 @@ import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
 
 /**
- * Optional capability interface for {@link AnalyticsSearchBackendPlugin}
- * implementations that can provide a full {@link SearchExecEngine} with prepare/execute/stream
- * semantics for the analytics query path.
+ * SPI for shard-level query execution backends that provide a full {@link SearchExecEngine}
+ * with prepare/execute/stream semantics for the analytics query path.
  * <p>
- * Plugins that implement this interface are used by the analytics executor for the
- * complete query lifecycle.
+ * Discovered via {@link org.opensearch.plugins.ExtensiblePlugin} and used by the
+ * analytics executor for shard-level query lifecycle.
  *
  * @opensearch.internal
  */

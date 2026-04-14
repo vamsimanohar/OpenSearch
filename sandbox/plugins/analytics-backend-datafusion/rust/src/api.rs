@@ -480,9 +480,10 @@ pub async fn execute_iceberg_query(
     }).collect();
     eprintln!("[PERF] Built {} synthetic ObjectMeta (no HEAD calls): {}ms", object_metas.len(), t_start.elapsed().as_millis());
 
-    // Build session — use all available CPUs for maximum parallelism
+    // Build session — limit partitions to file count to avoid empty partition tasks
+    let num_files = object_metas.len();
     let mut config = SessionConfig::new();
-    config.options_mut().execution.target_partitions = num_cpus::get();
+    config.options_mut().execution.target_partitions = num_files.min(4).max(1);
     config.options_mut().execution.batch_size = 8192;
 
     let state = SessionStateBuilder::new()
