@@ -128,7 +128,7 @@ public final class AggregationReducer {
         if (v1 instanceof Number && v2 instanceof Number) {
             return Double.compare(((Number) v1).doubleValue(), ((Number) v2).doubleValue());
         }
-        if (v1 instanceof Comparable && v2 instanceof Comparable) {
+        if (v1 instanceof Comparable && v2 instanceof Comparable && v1.getClass().equals(v2.getClass())) {
             return ((Comparable<Object>) v1).compareTo(v2);
         }
         return v1.toString().compareTo(v2.toString());

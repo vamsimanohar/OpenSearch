@@ -12,7 +12,6 @@ import org.apache.calcite.sql.SqlKind;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -167,40 +166,4 @@ public final class ResultMerger {
         return new WorkerQueryResponse(Collections.emptyList(), Collections.emptyList(), 0, new Object[0][]);
     }
 
-    // --- Backward-compatible delegates for existing tests ---
-
-    /**
-     * Delegates to {@link AggregationReducer#sumColumn}.
-     */
-    static Object sumColumn(List<WorkerQueryResponse> responses, int colIdx) {
-        return AggregationReducer.sumColumn(responses, colIdx);
-    }
-
-    /**
-     * Delegates to {@link AggregationReducer#minColumn}.
-     */
-    static Object minColumn(List<WorkerQueryResponse> responses, int colIdx) {
-        return AggregationReducer.minColumn(responses, colIdx);
-    }
-
-    /**
-     * Delegates to {@link AggregationReducer#maxColumn}.
-     */
-    static Object maxColumn(List<WorkerQueryResponse> responses, int colIdx) {
-        return AggregationReducer.maxColumn(responses, colIdx);
-    }
-
-    /**
-     * Delegates to {@link TopKMerger#compareValues}.
-     */
-    static int compareValues(Object v1, Object v2) {
-        return TopKMerger.compareValues(v1, v2);
-    }
-
-    /**
-     * Delegates to {@link TopKMerger#buildComparator}.
-     */
-    static Comparator<Object[]> buildComparator(int[] sortColumns, boolean[] sortAsc) {
-        return TopKMerger.buildComparator(sortColumns, sortAsc);
-    }
 }

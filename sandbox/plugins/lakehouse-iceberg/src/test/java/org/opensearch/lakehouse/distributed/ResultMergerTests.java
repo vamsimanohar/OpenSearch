@@ -11,7 +11,6 @@ package org.opensearch.lakehouse.distributed;
 import org.apache.calcite.sql.SqlKind;
 import org.opensearch.test.OpenSearchTestCase;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
@@ -281,13 +280,13 @@ public class ResultMergerTests extends OpenSearchTestCase {
         WorkerQueryResponse r1 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{30}}, 1);
         WorkerQueryResponse r2 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{10}}, 1);
         WorkerQueryResponse r3 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{20}}, 1);
-        assertEquals(10, ResultMerger.minColumn(List.of(r1, r2, r3), 0));
+        assertEquals(10, AggregationReducer.minColumn(List.of(r1, r2, r3), 0));
     }
 
     public void testMaxColumnDirectly() {
         WorkerQueryResponse r1 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{30}}, 1);
         WorkerQueryResponse r2 = makeResponse(List.of("v"), List.of("Integer"), new Object[][]{{10}}, 1);
-        assertEquals(30, ResultMerger.maxColumn(List.of(r1, r2), 0));
+        assertEquals(30, AggregationReducer.maxColumn(List.of(r1, r2), 0));
     }
 
     // --- TOPK_MERGE tests ---
@@ -415,15 +414,15 @@ public class ResultMergerTests extends OpenSearchTestCase {
     // --- Comparator tests ---
 
     public void testCompareValuesNulls() {
-        assertEquals(0, ResultMerger.compareValues(null, null));
-        assertEquals(1, ResultMerger.compareValues(null, "a"));
-        assertEquals(-1, ResultMerger.compareValues("a", null));
+        assertEquals(0, TopKMerger.compareValues(null, null));
+        assertEquals(1, TopKMerger.compareValues(null, "a"));
+        assertEquals(-1, TopKMerger.compareValues("a", null));
     }
 
     public void testCompareValuesComparable() {
-        assertTrue(ResultMerger.compareValues(1, 2) < 0);
-        assertTrue(ResultMerger.compareValues(2, 1) > 0);
-        assertEquals(0, ResultMerger.compareValues(5, 5));
+        assertTrue(TopKMerger.compareValues(1, 2) < 0);
+        assertTrue(TopKMerger.compareValues(2, 1) > 0);
+        assertEquals(0, TopKMerger.compareValues(5, 5));
     }
 
     public void testCompareValuesNonComparableUsesToString() {
@@ -440,25 +439,25 @@ public class ResultMergerTests extends OpenSearchTestCase {
                 return "banana";
             }
         };
-        assertTrue(ResultMerger.compareValues(a, b) < 0);
+        assertTrue(TopKMerger.compareValues(a, b) < 0);
     }
 
     public void testBuildComparator() {
-        Comparator<Object[]> cmp = ResultMerger.buildComparator(new int[]{0}, new boolean[]{true});
+        Comparator<Object[]> cmp = TopKMerger.buildComparator(new int[]{0}, new boolean[]{true});
         Object[] row1 = {1};
         Object[] row2 = {2};
         assertTrue(cmp.compare(row1, row2) < 0);
     }
 
     public void testBuildComparatorDescending() {
-        Comparator<Object[]> cmp = ResultMerger.buildComparator(new int[]{0}, new boolean[]{false});
+        Comparator<Object[]> cmp = TopKMerger.buildComparator(new int[]{0}, new boolean[]{false});
         Object[] row1 = {1};
         Object[] row2 = {2};
         assertTrue(cmp.compare(row1, row2) > 0);
     }
 
     public void testBuildComparatorMultiColumn() {
-        Comparator<Object[]> cmp = ResultMerger.buildComparator(new int[]{0, 1}, new boolean[]{true, false});
+        Comparator<Object[]> cmp = TopKMerger.buildComparator(new int[]{0, 1}, new boolean[]{true, false});
         Object[] row1 = {1, "b"};
         Object[] row2 = {1, "a"};
         // First column equal, second column descending: "b" > "a" but reversed → row1 before row2 (negative)
@@ -467,7 +466,7 @@ public class ResultMergerTests extends OpenSearchTestCase {
 
     public void testBuildComparatorNullSortAsc() {
         // null sortAsc defaults to ascending
-        Comparator<Object[]> cmp = ResultMerger.buildComparator(new int[]{0}, null);
+        Comparator<Object[]> cmp = TopKMerger.buildComparator(new int[]{0}, null);
         Object[] row1 = {1};
         Object[] row2 = {2};
         assertTrue(cmp.compare(row1, row2) < 0);
