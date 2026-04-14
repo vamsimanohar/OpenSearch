@@ -110,17 +110,20 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
                 }
                 long effectiveLimit = "fair_spill".equals(poolType) && memPool > 0 ? -memPool : memPool;
                 String spillDir = System.getProperty("java.io.tmpdir");
+                int cpuThreads = (int) getConfiguredLong("datafusion_cpu_threads", Runtime.getRuntime().availableProcessors() * 3L / 4);
                 sharedDataFusionService = DataFusionService.builder()
                     .memoryPoolLimit(effectiveLimit)
                     .spillMemoryLimit(spillLimit)
                     .spillDirectory(spillDir)
+                    .cpuThreads(cpuThreads)
                     .build();
                 sharedDataFusionService.start();
                 logger.info(
-                    "DataFusion service lazy-initialized (SPI path) — pool type={}, memory pool {}B, spill limit {}B",
+                    "DataFusion service lazy-initialized (SPI path) — pool type={}, memory pool {}B, spill limit {}B, cpuThreads={}",
                     poolType,
                     effectiveLimit,
-                    spillLimit
+                    spillLimit,
+                    cpuThreads
                 );
             }
             return sharedDataFusionService;
@@ -154,17 +157,20 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
                     logger.info("FairSpill pool with no explicit limit — auto-detected {}MB", memoryPoolLimit / (1024 * 1024));
                 }
                 long effectiveLimit = "fair_spill".equals(poolType) && memoryPoolLimit > 0 ? -memoryPoolLimit : memoryPoolLimit;
+                int cpuThreads = (int) getConfiguredLong("datafusion_cpu_threads", Runtime.getRuntime().availableProcessors() * 3L / 4);
                 sharedDataFusionService = DataFusionService.builder()
                     .memoryPoolLimit(effectiveLimit)
                     .spillMemoryLimit(spillMemoryLimit)
                     .spillDirectory(spillDir)
+                    .cpuThreads(cpuThreads)
                     .build();
                 sharedDataFusionService.start();
                 logger.info(
-                    "DataFusion plugin initialized — pool type={}, memory pool {}B, spill limit {}B",
+                    "DataFusion plugin initialized — pool type={}, memory pool {}B, spill limit {}B, cpuThreads={}",
                     poolType,
                     effectiveLimit,
-                    spillMemoryLimit
+                    spillMemoryLimit,
+                    cpuThreads
                 );
             }
         }
