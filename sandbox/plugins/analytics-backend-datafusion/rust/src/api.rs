@@ -482,7 +482,7 @@ pub async fn execute_iceberg_query(
 
     // Build session — use all available CPUs for maximum parallelism
     let mut config = SessionConfig::new();
-    config.options_mut().execution.target_partitions = num_cpus::get();
+    config.options_mut().execution.target_partitions = num_cpus::get() / 2;
     config.options_mut().execution.batch_size = 8192;
 
     let state = SessionStateBuilder::new()
