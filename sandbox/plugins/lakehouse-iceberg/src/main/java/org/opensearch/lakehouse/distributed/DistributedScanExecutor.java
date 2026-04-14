@@ -29,6 +29,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -276,6 +277,19 @@ public class DistributedScanExecutor {
             }
         }
 
+        // DIAGNOSTIC: periodic health check while waiting for workers
+        ScheduledFuture<?> healthCheck = transportService.getThreadPool().scheduler().scheduleAtFixedRate(() -> {
+            int done = completedCount.get();
+            if (done < assignmentCount) {
+                logger.warn(
+                    "[ScanExecutor] WAITING: {}/{} workers responded after {}ms",
+                    done,
+                    assignmentCount,
+                    System.currentTimeMillis() - dispatchStartTime
+                );
+            }
+        }, 5, 5, TimeUnit.SECONDS);
+
         try {
             Collection<WorkerQueryResponse> collected = future.get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             return new ArrayList<>(collected);
@@ -289,6 +303,8 @@ public class DistributedScanExecutor {
             );
         } catch (Exception e) {
             throw new RuntimeException("Distributed query execution failed", e);
+        } finally {
+            healthCheck.cancel(false);
         }
     }
 

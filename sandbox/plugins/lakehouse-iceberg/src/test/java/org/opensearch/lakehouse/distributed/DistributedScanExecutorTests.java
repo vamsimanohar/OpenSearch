@@ -138,6 +138,14 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
         TransportService transportService = mock(TransportService.class);
 
+        // Mock the thread pool scheduler for health check logging
+        org.opensearch.threadpool.ThreadPool threadPool = mock(org.opensearch.threadpool.ThreadPool.class);
+        java.util.concurrent.ScheduledExecutorService scheduler = mock(java.util.concurrent.ScheduledExecutorService.class);
+        when(transportService.getThreadPool()).thenReturn(threadPool);
+        when(threadPool.scheduler()).thenReturn(scheduler);
+        org.mockito.Mockito.doReturn(mock(java.util.concurrent.ScheduledFuture.class))
+            .when(scheduler).scheduleAtFixedRate(any(Runnable.class), any(Long.class), any(Long.class), any(java.util.concurrent.TimeUnit.class));
+
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mock(DataWarehouseQueryEngine.class));
 
         // Create an empty assignment (no files)

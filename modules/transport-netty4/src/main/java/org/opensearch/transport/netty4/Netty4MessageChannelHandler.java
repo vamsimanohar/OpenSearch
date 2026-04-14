@@ -32,6 +32,8 @@
 
 package org.opensearch.transport.netty4;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.OpenSearchException;
 import org.opensearch.common.bytes.ReleasableBytesReference;
@@ -59,6 +61,8 @@ import io.netty.channel.ChannelPromise;
  * to the relevant action.
  */
 final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
+
+    private static final Logger logger = LogManager.getLogger(Netty4MessageChannelHandler.class);
 
     private final Netty4Transport transport;
 
@@ -89,6 +93,15 @@ final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
         assert msg instanceof ByteBuf : "Expected message type ByteBuf, found: " + msg.getClass();
 
         final ByteBuf buffer = (ByteBuf) msg;
+        if (logger.isTraceEnabled()) {
+            logger.trace(
+                "[Netty4Diag] channelRead: {} bytes from {}, queuedWrites={}, writable={}",
+                buffer.readableBytes(),
+                ctx.channel().remoteAddress(),
+                queuedWrites.size(),
+                ctx.channel().isWritable()
+            );
+        }
         Netty4TcpChannel channel = ctx.channel().attr(Netty4Transport.CHANNEL_KEY).get();
         final BytesReference wrapped = Netty4Utils.toBytesReference(buffer);
         try (ReleasableBytesReference reference = new ReleasableBytesReference(wrapped, buffer::release)) {
@@ -116,13 +129,30 @@ final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
         assert Transports.assertDefaultThreadContext(transport.getThreadPool().getThreadContext());
         final boolean queued = queuedWrites.offer(new WriteOperation((ByteBuf) msg, promise));
         assert queued;
+        int queueSize = queuedWrites.size();
+        if (queueSize > 1 || !ctx.channel().isWritable()) {
+            logger.info(
+                "[Netty4Diag] write() queued: {} bytes, queueDepth={}, writable={}, remote={}",
+                ((ByteBuf) msg).readableBytes(),
+                queueSize,
+                ctx.channel().isWritable(),
+                ctx.channel().remoteAddress()
+            );
+        }
         assert Transports.assertDefaultThreadContext(transport.getThreadPool().getThreadContext());
     }
 
     @Override
     public void channelWritabilityChanged(ChannelHandlerContext ctx) {
         assert Transports.assertDefaultThreadContext(transport.getThreadPool().getThreadContext());
-        if (ctx.channel().isWritable()) {
+        boolean writable = ctx.channel().isWritable();
+        logger.info(
+            "[Netty4Diag] channelWritabilityChanged: writable={}, remote={}, queuedWrites={}",
+            writable,
+            ctx.channel().remoteAddress(),
+            queuedWrites.size()
+        );
+        if (writable) {
             doFlush(ctx);
         }
         ctx.fireChannelWritabilityChanged();
@@ -134,6 +164,14 @@ final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
         Channel channel = ctx.channel();
         if (channel.isWritable() || channel.isActive() == false) {
             doFlush(ctx);
+        } else {
+            // DIAGNOSTIC: channel not writable — writes stuck in queue!
+            logger.warn(
+                "[Netty4Diag] flush() SKIPPED: channel NOT writable! remote={}, queuedWrites={}, active={}",
+                channel.remoteAddress(),
+                queuedWrites.size(),
+                channel.isActive()
+            );
         }
     }
 
