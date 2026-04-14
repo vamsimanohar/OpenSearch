@@ -29,9 +29,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Unified scan executor that handles both single-node and distributed query execution.
@@ -188,28 +186,10 @@ public class DistributedScanExecutor {
         String tableName
     ) {
         int assignmentCount = assignments.size();
-        long dispatchStartTime = System.currentTimeMillis();
         CompletableFuture<Collection<WorkerQueryResponse>> future = new CompletableFuture<>();
-        AtomicInteger completedCount = new AtomicInteger(0);
 
         GroupedActionListener<WorkerQueryResponse> groupListener = new GroupedActionListener<>(
-            ActionListener.wrap(responses -> {
-                logger.info(
-                    "[ScanExecutor] All {} workers responded in {}ms",
-                    assignmentCount,
-                    System.currentTimeMillis() - dispatchStartTime
-                );
-                future.complete(responses);
-            }, ex -> {
-                logger.error(
-                    "[ScanExecutor] Dispatch failed after {}/{} workers responded in {}ms",
-                    completedCount.get(),
-                    assignmentCount,
-                    System.currentTimeMillis() - dispatchStartTime,
-                    ex
-                );
-                future.completeExceptionally(ex);
-            }),
+            ActionListener.wrap(future::complete, future::completeExceptionally),
             assignmentCount
         );
 
@@ -220,8 +200,7 @@ public class DistributedScanExecutor {
             DiscoveryNode targetNode = workers.get(i % workers.size());
 
             if (assignment.getFilePaths().isEmpty()) {
-                logger.warn("[ScanExecutor] Worker {} has no files assigned (more workers than files)", i);
-                completedCount.incrementAndGet();
+                logger.debug("[ScanExecutor] Worker {} has no files assigned (more workers than files)", i);
                 groupListener.onResponse(
                     new WorkerQueryResponse(List.of(), List.of(), 0, new Object[0][])
                 );
@@ -237,58 +216,17 @@ public class DistributedScanExecutor {
             );
 
             boolean isLocal = targetNode.getId().equals(localNodeId);
-            int workerIdx = i;
-            ActionListener<WorkerQueryResponse> trackingListener = ActionListener.wrap(
-                response -> {
-                    int done = completedCount.incrementAndGet();
-                    logger.info(
-                        "[ScanExecutor] Worker {} ({}{}) responded: {} rows, {}ms elapsed ({}/{})",
-                        workerIdx,
-                        targetNode.getId(),
-                        isLocal ? "/local" : "",
-                        response.getRowCount(),
-                        System.currentTimeMillis() - dispatchStartTime,
-                        done,
-                        assignmentCount
-                    );
-                    groupListener.onResponse(response);
-                },
-                ex -> {
-                    int done = completedCount.incrementAndGet();
-                    logger.error(
-                        "[ScanExecutor] Worker {} ({}{}) FAILED after {}ms ({}/{}): {}",
-                        workerIdx,
-                        targetNode.getId(),
-                        isLocal ? "/local" : "",
-                        System.currentTimeMillis() - dispatchStartTime,
-                        done,
-                        assignmentCount,
-                        ex.getMessage(),
-                        ex
-                    );
-                    groupListener.onFailure(ex);
-                }
+            ActionListener<WorkerQueryResponse> listener = ActionListener.wrap(
+                groupListener::onResponse,
+                groupListener::onFailure
             );
 
             if (isLocal) {
-                dispatchLocal(request, trackingListener);
+                dispatchLocal(request, listener);
             } else {
-                dispatchRemote(targetNode, request, trackingListener);
+                dispatchRemote(targetNode, request, listener);
             }
         }
-
-        // DIAGNOSTIC: periodic health check while waiting for workers
-        ScheduledFuture<?> healthCheck = transportService.getThreadPool().scheduler().scheduleAtFixedRate(() -> {
-            int done = completedCount.get();
-            if (done < assignmentCount) {
-                logger.warn(
-                    "[ScanExecutor] WAITING: {}/{} workers responded after {}ms",
-                    done,
-                    assignmentCount,
-                    System.currentTimeMillis() - dispatchStartTime
-                );
-            }
-        }, 5, 5, TimeUnit.SECONDS);
 
         try {
             Collection<WorkerQueryResponse> collected = future.get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -298,13 +236,10 @@ public class DistributedScanExecutor {
             throw new RuntimeException("Distributed query execution interrupted", e);
         } catch (java.util.concurrent.TimeoutException e) {
             throw new RuntimeException(
-                "Distributed query execution timed out after " + DEFAULT_TIMEOUT_SECONDS
-                    + " seconds. Workers responded: " + completedCount.get() + "/" + assignmentCount, e
+                "Distributed query execution timed out after " + DEFAULT_TIMEOUT_SECONDS + " seconds", e
             );
         } catch (Exception e) {
             throw new RuntimeException("Distributed query execution failed", e);
-        } finally {
-            healthCheck.cancel(false);
         }
     }
 
@@ -312,7 +247,6 @@ public class DistributedScanExecutor {
      * Dispatches a request to a remote worker node via the transport service.
      */
     void dispatchRemote(DiscoveryNode node, WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
-        long dispatchTime = System.currentTimeMillis();
         logger.debug("[ScanExecutor] Dispatching to remote node {}: {} files", node.getId(), request.getFilePaths().size());
         transportService.sendRequest(
             node,
@@ -321,22 +255,16 @@ public class DistributedScanExecutor {
             new TransportResponseHandler<WorkerQueryResponse>() {
                 @Override
                 public WorkerQueryResponse read(StreamInput in) throws IOException {
-                    long readStart = System.currentTimeMillis();
-                    logger.info("[ScanExecutor] read() called for node {}, {}ms after dispatch", node.getId(), readStart - dispatchTime);
-                    WorkerQueryResponse response = new WorkerQueryResponse(in);
-                    logger.info("[ScanExecutor] read() done for node {}, deserialized in {}ms", node.getId(), System.currentTimeMillis() - readStart);
-                    return response;
+                    return new WorkerQueryResponse(in);
                 }
 
                 @Override
                 public void handleResponse(WorkerQueryResponse response) {
-                    logger.info("[ScanExecutor] handleResponse() for node {}, {}ms after dispatch", node.getId(), System.currentTimeMillis() - dispatchTime);
                     listener.onResponse(response);
                 }
 
                 @Override
                 public void handleException(TransportException exp) {
-                    logger.error("[ScanExecutor] handleException() for node {}, {}ms after dispatch: {}", node.getId(), System.currentTimeMillis() - dispatchTime, exp.getMessage());
                     listener.onFailure(exp);
                 }
 

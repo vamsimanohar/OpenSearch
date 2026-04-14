@@ -93,15 +93,6 @@ final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
         assert msg instanceof ByteBuf : "Expected message type ByteBuf, found: " + msg.getClass();
 
         final ByteBuf buffer = (ByteBuf) msg;
-        int readableBytes = buffer.readableBytes();
-        if (readableBytes > 100) {
-            logger.info(
-                "[Netty4Diag] channelRead: {} bytes from {}, thread={}",
-                readableBytes,
-                ctx.channel().remoteAddress(),
-                Thread.currentThread().getName()
-            );
-        }
         Netty4TcpChannel channel = ctx.channel().attr(Netty4Transport.CHANNEL_KEY).get();
         final BytesReference wrapped = Netty4Utils.toBytesReference(buffer);
         try (ReleasableBytesReference reference = new ReleasableBytesReference(wrapped, buffer::release)) {
@@ -129,30 +120,13 @@ final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
         assert Transports.assertDefaultThreadContext(transport.getThreadPool().getThreadContext());
         final boolean queued = queuedWrites.offer(new WriteOperation((ByteBuf) msg, promise));
         assert queued;
-        int queueSize = queuedWrites.size();
-        if (queueSize > 1 || !ctx.channel().isWritable()) {
-            logger.info(
-                "[Netty4Diag] write() queued: {} bytes, queueDepth={}, writable={}, remote={}",
-                ((ByteBuf) msg).readableBytes(),
-                queueSize,
-                ctx.channel().isWritable(),
-                ctx.channel().remoteAddress()
-            );
-        }
         assert Transports.assertDefaultThreadContext(transport.getThreadPool().getThreadContext());
     }
 
     @Override
     public void channelWritabilityChanged(ChannelHandlerContext ctx) {
         assert Transports.assertDefaultThreadContext(transport.getThreadPool().getThreadContext());
-        boolean writable = ctx.channel().isWritable();
-        logger.info(
-            "[Netty4Diag] channelWritabilityChanged: writable={}, remote={}, queuedWrites={}",
-            writable,
-            ctx.channel().remoteAddress(),
-            queuedWrites.size()
-        );
-        if (writable) {
+        if (ctx.channel().isWritable()) {
             doFlush(ctx);
         }
         ctx.fireChannelWritabilityChanged();
@@ -164,14 +138,6 @@ final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
         Channel channel = ctx.channel();
         if (channel.isWritable() || channel.isActive() == false) {
             doFlush(ctx);
-        } else {
-            // DIAGNOSTIC: channel not writable — writes stuck in queue!
-            logger.warn(
-                "[Netty4Diag] flush() SKIPPED: channel NOT writable! remote={}, queuedWrites={}, active={}",
-                channel.remoteAddress(),
-                queuedWrites.size(),
-                channel.isActive()
-            );
         }
     }
 
