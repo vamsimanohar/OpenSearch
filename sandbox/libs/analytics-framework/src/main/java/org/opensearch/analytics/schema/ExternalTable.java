@@ -10,8 +10,8 @@ package org.opensearch.analytics.schema;
 
 /**
  * Marker interface for external (non-OpenSearch) tables in the Calcite schema.
- * Implementations carry catalog metadata needed by {@link org.opensearch.analytics.exec.ExternalTableExecutor}
- * to plan and execute scans against external data sources (e.g., Iceberg, Delta Lake).
+ * Implementations carry catalog metadata needed to plan and execute scans
+ * against external data sources (e.g., Iceberg, Delta Lake).
  *
  * @opensearch.internal
  */

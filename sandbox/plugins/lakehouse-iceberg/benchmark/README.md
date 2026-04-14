@@ -62,10 +62,10 @@ For a 32GB node running lakehouse benchmarks:
 
 ```
 -Xms4g -Xmx4g
--Ddatafusion_memory_pool_type=fair_spill
--Ddatafusion_memory_pool_limit_bytes=17179869184
--Ddatafusion_spill_memory_limit_bytes=107374182400
+--enable-native-access=ALL-UNNAMED
 ```
+
+DataFusion defaults to Greedy Unlimited memory pool (no additional config needed).
 
 ## Correctness Suite
 

@@ -3,31 +3,32 @@
 Compares query results from the OpenSearch lakehouse plugin against DataFusion CLI
 to verify correctness across all 43 ClickBench queries.
 
+DataFusion CLI results are treated as the **ground truth**. Both engines query the
+same ClickBench dataset (99.9M rows) — OpenSearch via Iceberg/Glue, DataFusion CLI
+reads the same S3 parquet files directly.
+
 ## Prerequisites
 
 1. **OpenSearch** running with the lakehouse plugin and a registered Iceberg table
-2. **datafusion-cli** installed (default: `/home/reddyvam/.cargo/bin/datafusion-cli`)
-3. **Parquet data** accessible locally for datafusion-cli
+2. **datafusion-cli** installed (found via `PATH` or `~/.cargo/bin/`)
+3. **S3 access** to the ClickBench parquet data (default), or local parquet files
 4. **Python 3** available on the system
 
 ## Quick Start
 
 ```bash
-# Run against local OpenSearch + local parquet file
-./run_correctness.sh \
-    --endpoint http://localhost:9200 \
-    --table hits_s3 \
-    --data-path /local/home/reddyvam/ClickBench/datafusion/hits.parquet
-
-# Run against local OpenSearch + 30-file split
-./run_correctness.sh \
-    --data-path /local/home/reddyvam/ClickBench/datafusion-30-flat/
+# Default: run against localhost OpenSearch + S3 parquet data
+# Works on both EC2 nodes and dev machine (with AWS_PROFILE=default)
+./run_correctness.sh
 
 # Run only specific queries
-./run_correctness.sh --queries 1,2,3,7,37,38 --data-path /path/to/parquet
+./run_correctness.sh --queries 1,2,3,7,37,38
+
+# Use local parquet file instead of S3
+./run_correctness.sh --data-path /path/to/hits.parquet
 
 # Skip OpenSearch execution (use previous results)
-./run_correctness.sh --skip-os --data-path /path/to/parquet
+./run_correctness.sh --skip-os
 
 # Skip DataFusion execution (use previous results)
 ./run_correctness.sh --skip-df
@@ -42,7 +43,7 @@ to verify correctness across all 43 ClickBench queries.
 |------|---------|-------------|
 | `--endpoint URL` | `http://localhost:9200` | OpenSearch endpoint |
 | `--table TABLE` | `hits_s3` | OpenSearch table name |
-| `--data-path PATH` | auto-detect | Path to parquet data for DF CLI |
+| `--data-path PATH` | S3 ClickBench path | Path to parquet data for DF CLI (S3 or local) |
 | `--queries-dir DIR` | `./queries` | Custom queries directory |
 | `--output-dir DIR` | `./results` | Output directory for results |
 | `--timeout SECS` | `120` | Query timeout in seconds |
@@ -56,7 +57,7 @@ to verify correctness across all 43 ClickBench queries.
 The output shows three phases:
 
 1. **Phase 1**: Executes queries on OpenSearch, saves raw JSON responses
-2. **Phase 2**: Executes queries on DataFusion CLI, saves raw text output
+2. **Phase 2**: Executes queries on DataFusion CLI (ground truth), saves raw text output
 3. **Phase 3**: Compares results using `compare_results.py`
 
 Summary codes:

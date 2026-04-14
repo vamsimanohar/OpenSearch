@@ -12,10 +12,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Carries the resolved scan context from an external table plugin (e.g., Iceberg)
- * to the native execution backend (e.g., DataFusion).
+ * Carries the resolved scan context from a data warehouse plugin (e.g., Iceberg)
+ * to the query engine (e.g., DataFusion).
  */
-public class ExternalScanContext {
+public class DataWarehouseScanContext {
     private final String tableName;
     private final List<String> dataFilePaths;
     private final long[] fileSizes;
@@ -31,7 +31,13 @@ public class ExternalScanContext {
      * @param sqlQuery       SQL query string for the target execution engine
      * @param storageConfig  storage configuration (S3 region, bucket, credentials)
      */
-    public ExternalScanContext(String tableName, List<String> dataFilePaths, long[] fileSizes, String sqlQuery, Map<String, String> storageConfig) {
+    public DataWarehouseScanContext(
+        String tableName,
+        List<String> dataFilePaths,
+        long[] fileSizes,
+        String sqlQuery,
+        Map<String, String> storageConfig
+    ) {
         this.tableName = tableName;
         this.dataFilePaths = dataFilePaths;
         this.fileSizes = fileSizes;
@@ -60,7 +66,7 @@ public class ExternalScanContext {
     }
 
     /**
-     * Storage configuration for the external data source.
+     * Storage configuration for the data source.
      * Keys: s3Region, s3Bucket, s3AccessKeyId (optional), s3SecretAccessKey (optional),
      *        s3SessionToken (optional), s3Endpoint (optional).
      */

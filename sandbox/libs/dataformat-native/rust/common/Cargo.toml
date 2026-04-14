@@ -10,3 +10,4 @@ crate-type = ["rlib"]
 
 [dependencies]
 native-bridge-macros = { path = "../macros" }
+log = { workspace = true }
