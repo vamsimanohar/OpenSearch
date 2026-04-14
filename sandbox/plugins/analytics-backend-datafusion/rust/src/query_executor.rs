@@ -71,7 +71,7 @@ pub async fn execute_query(
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = false;
     let num_files = list_file_cache.get(&table_scoped_path).map_or(1, |v| v.len());
-    config.options_mut().execution.target_partitions = num_files.min(num_cpus::get() / 2).max(1);
+    config.options_mut().execution.target_partitions = num_files.min(4).max(1);
     config.options_mut().execution.batch_size = 8192;
 
     let state = SessionStateBuilder::new()
