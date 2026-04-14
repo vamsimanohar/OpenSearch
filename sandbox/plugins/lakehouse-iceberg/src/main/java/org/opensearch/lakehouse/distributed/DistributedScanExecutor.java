@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Unified scan executor that handles both single-node and distributed query execution.
@@ -206,6 +207,7 @@ public class DistributedScanExecutor {
             DiscoveryNode targetNode = workers.get(i % workers.size());
 
             if (assignment.getFilePaths().isEmpty()) {
+                logger.warn("[ScanExecutor] Worker {} has no files assigned (more workers than files)", i);
                 groupListener.onResponse(
                     new WorkerQueryResponse(List.of(), List.of(), 0, new Object[0][])
                 );
@@ -234,7 +236,7 @@ public class DistributedScanExecutor {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Distributed query execution interrupted", e);
-        } catch (java.util.concurrent.TimeoutException e) {
+        } catch (TimeoutException e) {
             throw new RuntimeException(
                 "Distributed query execution timed out after " + DEFAULT_TIMEOUT_SECONDS + " seconds", e
             );
@@ -279,9 +281,9 @@ public class DistributedScanExecutor {
 
     /**
      * Dispatches a request to the local node by executing the worker query directly
-     * on a GENERIC thread pool thread, bypassing transport serialization entirely.
-     * This is the coordinator-as-worker optimization: saves ~0.1s per query by
-     * avoiding serialize → send to localhost → deserialize round-trip.
+     * on a {@code lakehouse_worker} thread pool thread, bypassing transport serialization.
+     * This is the coordinator-as-worker optimization: avoids the serialize → send to
+     * localhost → deserialize round-trip overhead.
      */
     void dispatchLocal(WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
         logger.debug("[ScanExecutor] Executing locally: {} files", request.getFilePaths().size());

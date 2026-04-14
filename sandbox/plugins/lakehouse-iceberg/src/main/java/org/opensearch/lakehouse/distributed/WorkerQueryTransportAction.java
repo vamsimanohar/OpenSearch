@@ -56,11 +56,7 @@ public class WorkerQueryTransportAction extends HandledTransportAction<WorkerQue
     protected void doExecute(Task task, WorkerQueryRequest request, ActionListener<WorkerQueryResponse> listener) {
         try {
             WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
-            long beforeSend = System.currentTimeMillis();
-            logger.info("[WorkerQuery] Calling listener.onResponse: {} rows at t={}", response.getRowCount(), beforeSend);
             listener.onResponse(response);
-            long afterSend = System.currentTimeMillis();
-            logger.info("[WorkerQuery] listener.onResponse returned: took {}ms", afterSend - beforeSend);
         } catch (Exception e) {
             logger.error("[WorkerQuery] Execution failed", e);
             listener.onFailure(e);
