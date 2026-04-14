@@ -93,13 +93,13 @@ final class Netty4MessageChannelHandler extends ChannelDuplexHandler {
         assert msg instanceof ByteBuf : "Expected message type ByteBuf, found: " + msg.getClass();
 
         final ByteBuf buffer = (ByteBuf) msg;
-        if (logger.isTraceEnabled()) {
-            logger.trace(
-                "[Netty4Diag] channelRead: {} bytes from {}, queuedWrites={}, writable={}",
-                buffer.readableBytes(),
+        int readableBytes = buffer.readableBytes();
+        if (readableBytes > 100) {
+            logger.info(
+                "[Netty4Diag] channelRead: {} bytes from {}, thread={}",
+                readableBytes,
                 ctx.channel().remoteAddress(),
-                queuedWrites.size(),
-                ctx.channel().isWritable()
+                Thread.currentThread().getName()
             );
         }
         Netty4TcpChannel channel = ctx.channel().attr(Netty4Transport.CHANNEL_KEY).get();

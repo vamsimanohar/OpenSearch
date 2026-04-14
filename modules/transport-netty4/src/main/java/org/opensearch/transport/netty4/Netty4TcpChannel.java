@@ -32,6 +32,8 @@
 
 package org.opensearch.transport.netty4;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.ExceptionsHelper;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.concurrent.CompletableContext;
@@ -48,6 +50,8 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
 
 public class Netty4TcpChannel implements TcpChannel {
+
+    private static final Logger logger = LogManager.getLogger(Netty4TcpChannel.class);
 
     private final Channel channel;
     private final boolean isServer;
@@ -158,7 +162,33 @@ public class Netty4TcpChannel implements TcpChannel {
 
     @Override
     public void sendMessage(BytesReference reference, ActionListener<Void> listener) {
-        channel.writeAndFlush(Netty4Utils.toByteBuf(reference), addPromise(listener, channel));
+        int bytes = reference.length();
+        long submitTime = System.currentTimeMillis();
+        boolean onEventLoop = channel.eventLoop().inEventLoop();
+        if (bytes > 100) {
+            logger.info(
+                "[Netty4Diag] sendMessage: {} bytes to {}, onEventLoop={}, thread={}",
+                bytes,
+                channel.remoteAddress(),
+                onEventLoop,
+                Thread.currentThread().getName()
+            );
+        }
+        ChannelPromise promise = addPromise(listener, channel);
+        promise.addListener(f -> {
+            long elapsed = System.currentTimeMillis() - submitTime;
+            if (elapsed > 50 || !f.isSuccess()) {
+                logger.warn(
+                    "[Netty4Diag] writeComplete: {} bytes to {}, success={}, elapsed={}ms, thread={}",
+                    bytes,
+                    channel.remoteAddress(),
+                    f.isSuccess(),
+                    elapsed,
+                    Thread.currentThread().getName()
+                );
+            }
+        });
+        channel.writeAndFlush(Netty4Utils.toByteBuf(reference), promise);
 
         if (channel.eventLoop().isShutdown()) {
             listener.onFailure(new TransportException("Cannot send message, event loop is shutting down."));
