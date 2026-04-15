@@ -143,6 +143,31 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         assertEquals(1, rows.size());
     }
 
+    // ---- stripHavingClause tests ----
+
+    public void testStripHavingClauseBeforeOrderBy() {
+        assertEquals(
+            "SELECT \"counterid\", AVG(LENGTH(\"url\")) AS \"l\", COUNT(*) AS \"c\" FROM \"hits\" WHERE \"url\" <> '' GROUP BY \"counterid\" ORDER BY \"l\" DESC LIMIT 25",
+            DistributedScanExecutor.stripHavingClause(
+                "SELECT \"counterid\", AVG(LENGTH(\"url\")) AS \"l\", COUNT(*) AS \"c\" FROM \"hits\" WHERE \"url\" <> '' GROUP BY \"counterid\" HAVING COUNT(*) > 100000 ORDER BY \"l\" DESC LIMIT 25"
+            )
+        );
+    }
+
+    public void testStripHavingClauseAtEnd() {
+        assertEquals(
+            "SELECT \"counterid\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"counterid\"",
+            DistributedScanExecutor.stripHavingClause(
+                "SELECT \"counterid\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"counterid\" HAVING COUNT(*) > 100000"
+            )
+        );
+    }
+
+    public void testStripHavingClauseNoHaving() {
+        String sql = "SELECT \"counterid\", COUNT(*) FROM \"hits\" GROUP BY \"counterid\" ORDER BY \"counterid\" DESC";
+        assertEquals(sql, DistributedScanExecutor.stripHavingClause(sql));
+    }
+
     // ---- stripOrderByAndLimit tests ----
 
     public void testStripOrderByAndLimit() {

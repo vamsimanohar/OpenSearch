@@ -95,6 +95,8 @@ public final class AvgDecomposer {
         List<String> groupByExprs = new ArrayList<>();
         // Track original output column names for ORDER BY reference
         List<String> outputColumnNames = new ArrayList<>();
+        // Track re-aggregation expressions for HAVING reference (indexed by original output column)
+        List<String> reAggExprs = new ArrayList<>();
 
         int colIdx = 0;
         // Walk the original analysis columns (not the expanded worker columns)
@@ -112,8 +114,10 @@ public final class AvgDecomposer {
                 // For now, produce the AVG merge expression
                 String alias = "\"avg_" + colName.substring("__avg_sum_".length()) + "\"";
 
-                selectExprs.add("CAST(SUM(" + sumCol + ") AS DOUBLE) / SUM(" + countCol + ") AS " + alias);
+                String avgExpr = "CAST(SUM(" + sumCol + ") AS DOUBLE) / SUM(" + countCol + ")";
+                selectExprs.add(avgExpr + " AS " + alias);
                 outputColumnNames.add("avg_" + colName.substring("__avg_sum_".length()));
+                reAggExprs.add(avgExpr);
                 colIdx += 2; // skip sum and count columns
                 origColIdx++;
             } else {
@@ -126,6 +130,7 @@ public final class AvgDecomposer {
                 if (isKey) {
                     selectExprs.add(quoted);
                     groupByExprs.add(quoted);
+                    reAggExprs.add(quoted);
                 } else {
                     // Non-AVG aggregate column
                     SqlKind kind = (aggKinds != null && origColIdx < aggKinds.length && aggKinds[origColIdx] != null)
@@ -135,7 +140,9 @@ public final class AvgDecomposer {
                         case MAX -> "MAX";
                         default -> "SUM";
                     };
-                    selectExprs.add(aggFunc + "(" + quoted + ") AS " + quoted);
+                    String reAggExpr = aggFunc + "(" + quoted + ")";
+                    selectExprs.add(reAggExpr + " AS " + quoted);
+                    reAggExprs.add(reAggExpr);
                 }
                 outputColumnNames.add(colName);
                 colIdx++;
@@ -143,7 +150,7 @@ public final class AvgDecomposer {
             }
         }
 
-        return new MergeColumnInfo(selectExprs, groupByExprs, outputColumnNames);
+        return new MergeColumnInfo(selectExprs, groupByExprs, outputColumnNames, reAggExprs);
     }
 
     private static String quoteIdentifier(String name) {
@@ -157,11 +164,15 @@ public final class AvgDecomposer {
         public final List<String> selectExprs;
         public final List<String> groupByExprs;
         public final List<String> outputColumnNames;
+        /** Re-aggregation expressions indexed by original output column position (for HAVING). */
+        public final List<String> reAggExprs;
 
-        MergeColumnInfo(List<String> selectExprs, List<String> groupByExprs, List<String> outputColumnNames) {
+        MergeColumnInfo(List<String> selectExprs, List<String> groupByExprs, List<String> outputColumnNames,
+            List<String> reAggExprs) {
             this.selectExprs = selectExprs;
             this.groupByExprs = groupByExprs;
             this.outputColumnNames = outputColumnNames;
+            this.reAggExprs = reAggExprs;
         }
     }
 }

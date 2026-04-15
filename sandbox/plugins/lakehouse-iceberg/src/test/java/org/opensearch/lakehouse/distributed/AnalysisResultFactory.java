@@ -44,4 +44,20 @@ public final class AnalysisResultFactory {
     ) {
         return new QueryAnalyzer.AnalysisResult(strategy, aggKinds, sortColumns, sortAsc, limit, isGroupKey);
     }
+
+    public static QueryAnalyzer.AnalysisResult createWithHaving(
+        MergeStrategy strategy,
+        SqlKind[] aggKinds,
+        int[] sortColumns,
+        boolean[] sortAsc,
+        int limit,
+        boolean[] isGroupKey,
+        QueryAnalyzer.HavingCondition having
+    ) {
+        return new QueryAnalyzer.AnalysisResult(strategy, aggKinds, sortColumns, sortAsc, limit, isGroupKey, having);
+    }
+
+    public static QueryAnalyzer.HavingCondition createHaving(int columnIndex, SqlKind operator, long value) {
+        return new QueryAnalyzer.HavingCondition(columnIndex, operator, value);
+    }
 }

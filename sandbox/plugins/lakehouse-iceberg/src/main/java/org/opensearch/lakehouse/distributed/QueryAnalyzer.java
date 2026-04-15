@@ -13,8 +13,10 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelVisitor;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.core.Filter;
 import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.core.Sort;
+import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
@@ -102,6 +104,14 @@ public final class QueryAnalyzer {
         // Find the node directly above the Aggregate (skip Sort)
         RelNode nodeAboveAggregate = (sort != null) ? sort.getInput() : relNode;
 
+        // Look through Filter (HAVING clause) to find the Aggregate or Project
+        HavingCondition having = null;
+        if (nodeAboveAggregate instanceof Filter) {
+            Filter havingFilter = (Filter) nodeAboveAggregate;
+            having = extractHavingCondition(havingFilter, groupKeyCount);
+            nodeAboveAggregate = havingFilter.getInput();
+        }
+
         // Determine column roles from plan structure
         boolean[] isGroupKey;
         SqlKind[] outputAggKinds;
@@ -167,7 +177,36 @@ public final class QueryAnalyzer {
             }
         }
 
-        return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, outputAggKinds, sortColumns, sortAsc, limit, isGroupKey);
+        return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, outputAggKinds, sortColumns, sortAsc, limit, isGroupKey, having);
+    }
+
+    /**
+     * Extracts a HAVING condition from a Filter node above an Aggregate.
+     * Handles simple comparison conditions like {@code column > value}.
+     *
+     * @param filter the Filter node representing the HAVING clause
+     * @param groupKeyCount number of GROUP BY keys in the Aggregate output
+     * @return the extracted HavingCondition, or null if the condition is too complex
+     */
+    static HavingCondition extractHavingCondition(Filter filter, int groupKeyCount) {
+        RexNode condition = filter.getCondition();
+        if (!(condition instanceof RexCall)) return null;
+
+        RexCall call = (RexCall) condition;
+        SqlKind op = call.getKind();
+        if (call.getOperands().size() != 2) return null;
+
+        RexNode left = call.getOperands().get(0);
+        RexNode right = call.getOperands().get(1);
+
+        if (left instanceof RexInputRef && right instanceof RexLiteral) {
+            int colIndex = ((RexInputRef) left).getIndex();
+            Number value = ((RexLiteral) right).getValueAs(Number.class);
+            if (value != null) {
+                return new HavingCondition(colIndex, op, value.longValue());
+            }
+        }
+        return null;
     }
 
     /**
@@ -289,6 +328,36 @@ public final class QueryAnalyzer {
         return 0;
     }
 
+    /**
+     * Represents a simple HAVING condition: column op value (e.g., COUNT(*) > 100000).
+     */
+    public static final class HavingCondition {
+        public final int columnIndex;
+        public final SqlKind operator;
+        public final long value;
+
+        HavingCondition(int columnIndex, SqlKind operator, long value) {
+            this.columnIndex = columnIndex;
+            this.operator = operator;
+            this.value = value;
+        }
+
+        public String operatorSql() {
+            return switch (operator) {
+                case GREATER_THAN -> ">";
+                case GREATER_THAN_OR_EQUAL -> ">=";
+                case LESS_THAN -> "<";
+                case LESS_THAN_OR_EQUAL -> "<=";
+                case EQUALS -> "=";
+                case NOT_EQUALS -> "!=";
+                default -> ">";
+            };
+        }
+    }
+
+    /**
+     * Result of query plan analysis, containing the merge strategy and metadata for distributed execution.
+     */
     public static final class AnalysisResult {
         public final MergeStrategy strategy;
         public final SqlKind[] aggKinds;
@@ -297,18 +366,26 @@ public final class QueryAnalyzer {
         public final int limit;
         /** Per-output-column: true = GROUP BY key/literal, false = aggregate. */
         public final boolean[] isGroupKey;
+        /** HAVING condition extracted from Filter above Aggregate, or null. */
+        public final HavingCondition having;
 
         AnalysisResult(MergeStrategy strategy) {
-            this(strategy, null, null, null, 0, null);
+            this(strategy, null, null, null, 0, null, null);
         }
 
         AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit, boolean[] isGroupKey) {
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, isGroupKey, null);
+        }
+
+        AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit, boolean[] isGroupKey,
+            HavingCondition having) {
             this.strategy = strategy;
             this.aggKinds = aggKinds;
             this.sortColumns = sortColumns;
             this.sortAsc = sortAsc;
             this.limit = limit;
             this.isGroupKey = isGroupKey;
+            this.having = having;
         }
     }
 }

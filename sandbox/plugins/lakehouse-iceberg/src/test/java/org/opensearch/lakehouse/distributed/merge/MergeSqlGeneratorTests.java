@@ -218,6 +218,69 @@ public class MergeSqlGeneratorTests extends OpenSearchTestCase {
         assertEquals("SELECT * FROM input ORDER BY \"order-total\" ASC LIMIT 3", sql);
     }
 
+    // ---- HAVING tests ----
+
+    public void testTwoPhaseGroupByWithHaving() {
+        boolean[] isGroupKey = new boolean[] { true, false, false };
+        SqlKind[] aggKinds = new SqlKind[] { null, SqlKind.COUNT, SqlKind.SUM };
+        int[] sortColumns = new int[] { 1 };
+        boolean[] sortAsc = new boolean[] { false };
+        QueryAnalyzer.HavingCondition having = AnalysisResultFactory.createHaving(1, SqlKind.GREATER_THAN, 100000);
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.createWithHaving(
+            MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, 25, isGroupKey, having
+        );
+        List<String> columns = List.of("counterid", "c", "total");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertTrue("Should contain HAVING clause", sql.contains("HAVING SUM(\"c\") > 100000"));
+        assertTrue("Should contain GROUP BY", sql.contains("GROUP BY \"counterid\""));
+        assertTrue("Should contain ORDER BY", sql.contains("ORDER BY \"c\" DESC"));
+        assertTrue("Should contain LIMIT", sql.contains("LIMIT 25"));
+    }
+
+    public void testTwoPhaseGroupByWithAvgAndHaving() {
+        boolean[] isGroupKey = new boolean[] { true, false, false };
+        SqlKind[] aggKinds = new SqlKind[] { null, SqlKind.AVG, SqlKind.COUNT };
+        int[] sortColumns = new int[] { 1 };
+        boolean[] sortAsc = new boolean[] { false };
+        QueryAnalyzer.HavingCondition having = AnalysisResultFactory.createHaving(2, SqlKind.GREATER_THAN, 100000);
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.createWithHaving(
+            MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, 25, isGroupKey, having
+        );
+        // Workers: counterid, __avg_sum_0, __avg_count_0, COUNT(*)
+        List<String> columns = List.of("counterid", "__avg_sum_0", "__avg_count_0", "COUNT(*)");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertTrue("Should contain HAVING for COUNT", sql.contains("HAVING SUM(\"COUNT(*)\") > 100000"));
+        assertTrue("Should contain AVG merge", sql.contains("CAST(SUM(\"__avg_sum_0\") AS DOUBLE) / SUM(\"__avg_count_0\")"));
+    }
+
+    public void testTwoPhaseGroupByWithoutHaving() {
+        boolean[] isGroupKey = new boolean[] { true, false };
+        SqlKind[] aggKinds = new SqlKind[] { null, SqlKind.COUNT };
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.create(
+            MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, null, null, 0, isGroupKey
+        );
+        List<String> columns = List.of("key", "cnt");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertFalse("Should NOT contain HAVING", sql.contains("HAVING"));
+    }
+
+    // ---- DISTINCT_EXPAND ----
+
+    public void testDistinctExpandThrowsIllegalArgumentException() {
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.create(MergeStrategy.DISTINCT_EXPAND);
+        List<String> columns = List.of("col");
+
+        IllegalArgumentException ex = expectThrows(IllegalArgumentException.class, () -> MergeSqlGenerator.generate(analysis, columns));
+
+        assertEquals("DISTINCT_EXPAND uses DistinctExpander.generateMergeSql()", ex.getMessage());
+    }
+
     // ---- AVG merge tests ----
 
     public void testGlobalMergeWithAvgUsesAvgMergePath() {

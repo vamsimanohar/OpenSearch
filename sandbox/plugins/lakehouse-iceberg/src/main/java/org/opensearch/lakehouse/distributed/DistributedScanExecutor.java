@@ -153,6 +153,7 @@ public class DistributedScanExecutor {
                 }
             }
             if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY) {
+                workerSql = stripHavingClause(workerSql);
                 workerSql = stripOrderByAndLimit(workerSql);
             }
         }
@@ -332,6 +333,15 @@ public class DistributedScanExecutor {
                 }
             }
         );
+    }
+
+    /**
+     * Strips the HAVING clause from SQL for two-phase GROUP BY workers.
+     * Workers produce partial aggregates — HAVING must be applied on the coordinator
+     * after re-aggregation, not on individual workers with partial data.
+     */
+    static String stripHavingClause(String sql) {
+        return sql.replaceAll("(?is)\\s+HAVING\\s+.*?(?=\\s+ORDER\\s+BY|\\s+LIMIT\\s+|$)", "");
     }
 
     /**

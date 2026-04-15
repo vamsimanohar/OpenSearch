@@ -88,7 +88,7 @@ public final class MergeSqlGenerator {
      * TWO_PHASE_GROUP_BY: re-aggregate partial GROUP BY results from workers.
      * GROUP BY key columns pass through. Aggregate columns are re-aggregated:
      * COUNT→SUM, SUM→SUM, MIN→MIN, MAX→MAX.
-     * Then apply ORDER BY + LIMIT from the original query.
+     * Then apply HAVING + ORDER BY + LIMIT from the original query.
      */
     static String generateTwoPhaseGroupBy(QueryAnalyzer.AnalysisResult analysis, List<String> columnNames) {
         boolean[] isGroupKey = analysis.isGroupKey;
@@ -96,6 +96,8 @@ public final class MergeSqlGenerator {
 
         StringJoiner selectCols = new StringJoiner(", ");
         StringJoiner groupByCols = new StringJoiner(", ");
+        // Track re-aggregation expressions for HAVING reference
+        String[] reAggExprs = new String[columnNames.size()];
 
         for (int i = 0; i < columnNames.size(); i++) {
             String col = quoteIdentifier(columnNames.get(i));
@@ -104,6 +106,7 @@ public final class MergeSqlGenerator {
             if (isKey) {
                 selectCols.add(col);
                 groupByCols.add(col);
+                reAggExprs[i] = col;
             } else {
                 // Aggregate column — re-aggregate
                 SqlKind kind = (aggKinds != null && i < aggKinds.length) ? aggKinds[i] : SqlKind.SUM;
@@ -112,7 +115,9 @@ public final class MergeSqlGenerator {
                     case MAX -> "MAX";
                     default -> "SUM"; // COUNT partial→SUM, SUM partial→SUM
                 };
-                selectCols.add(aggFunc + "(" + col + ") AS " + col);
+                String reAggExpr = aggFunc + "(" + col + ")";
+                selectCols.add(reAggExpr + " AS " + col);
+                reAggExprs[i] = reAggExpr;
             }
         }
 
@@ -120,15 +125,11 @@ public final class MergeSqlGenerator {
         sb.append("SELECT ").append(selectCols).append(" FROM input");
         sb.append(" GROUP BY ").append(groupByCols);
 
+        // Apply HAVING from original query (column reference → re-aggregated expression)
+        appendHaving(sb, analysis, reAggExprs);
+
         // Apply ORDER BY from original query
-        if (analysis.sortColumns != null && analysis.sortColumns.length > 0) {
-            sb.append(" ORDER BY ");
-            for (int i = 0; i < analysis.sortColumns.length; i++) {
-                if (i > 0) sb.append(", ");
-                sb.append(quoteIdentifier(columnNames.get(analysis.sortColumns[i])));
-                sb.append(analysis.sortAsc[i] ? " ASC" : " DESC");
-            }
-        }
+        appendOrderBy(sb, analysis, columnNames);
 
         // Apply LIMIT from original query
         if (analysis.limit > 0) {
@@ -154,6 +155,13 @@ public final class MergeSqlGenerator {
             sb.append(" GROUP BY ").append(String.join(", ", info.groupByExprs));
         }
 
+        // Apply HAVING — use re-aggregation expressions from MergeColumnInfo
+        if (analysis.having != null && analysis.having.columnIndex < info.reAggExprs.size()) {
+            sb.append(" HAVING ").append(info.reAggExprs.get(analysis.having.columnIndex));
+            sb.append(" ").append(analysis.having.operatorSql());
+            sb.append(" ").append(analysis.having.value);
+        }
+
         // Apply ORDER BY — need to map original sort column indices to output column names
         if (analysis.sortColumns != null && analysis.sortColumns.length > 0) {
             sb.append(" ORDER BY ");
@@ -173,6 +181,32 @@ public final class MergeSqlGenerator {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * Appends a HAVING clause to the SQL if the analysis contains a HAVING condition.
+     * Uses the re-aggregation expression at the HAVING column index.
+     */
+    static void appendHaving(StringBuilder sb, QueryAnalyzer.AnalysisResult analysis, String[] reAggExprs) {
+        if (analysis.having != null && analysis.having.columnIndex < reAggExprs.length) {
+            sb.append(" HAVING ").append(reAggExprs[analysis.having.columnIndex]);
+            sb.append(" ").append(analysis.having.operatorSql());
+            sb.append(" ").append(analysis.having.value);
+        }
+    }
+
+    /**
+     * Appends ORDER BY clause from analysis sort info.
+     */
+    static void appendOrderBy(StringBuilder sb, QueryAnalyzer.AnalysisResult analysis, List<String> columnNames) {
+        if (analysis.sortColumns != null && analysis.sortColumns.length > 0) {
+            sb.append(" ORDER BY ");
+            for (int i = 0; i < analysis.sortColumns.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(quoteIdentifier(columnNames.get(analysis.sortColumns[i])));
+                sb.append(analysis.sortAsc[i] ? " ASC" : " DESC");
+            }
+        }
     }
 
     // Quote identifier with double quotes for DataFusion (case-sensitive)

@@ -16,10 +16,13 @@ import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.core.Filter;
 import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rel.type.RelDataTypeSystem;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlAggFunction;
@@ -356,6 +359,76 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(0, QueryAnalyzer.extractLimit(sort));
     }
 
+    // --- HAVING clause tests ---
+
+    public void testFilterAboveAggregateReturnsTwoPhaseGroupBy() {
+        // Plan: Filter(HAVING) → Aggregate(GROUP BY + COUNT) — no Sort
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        Filter havingFilter = mockHavingFilter(agg, 1, SqlKind.GREATER_THAN, 100000);
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(havingFilter);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNotNull(result.having);
+        assertEquals(1, result.having.columnIndex);
+        assertEquals(SqlKind.GREATER_THAN, result.having.operator);
+        assertEquals(100000, result.having.value);
+    }
+
+    public void testFilterAboveAggregateWithAvgReturnsTwoPhaseGroupBy() {
+        // Plan: Filter(HAVING) → Aggregate(GROUP BY + AVG + COUNT) — no Sort
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(
+            makeAggCall(SqlStdOperatorTable.AVG, false),
+            makeAggCall(SqlStdOperatorTable.COUNT, false)
+        ));
+        Filter havingFilter = mockHavingFilter(agg, 2, SqlKind.GREATER_THAN, 100000);
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(havingFilter);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNotNull(result.having);
+        assertEquals(2, result.having.columnIndex);
+        assertEquals(100000, result.having.value);
+    }
+
+    public void testHavingConditionOperatorSql() {
+        assertEquals(">", new QueryAnalyzer.HavingCondition(0, SqlKind.GREATER_THAN, 0).operatorSql());
+        assertEquals(">=", new QueryAnalyzer.HavingCondition(0, SqlKind.GREATER_THAN_OR_EQUAL, 0).operatorSql());
+        assertEquals("<", new QueryAnalyzer.HavingCondition(0, SqlKind.LESS_THAN, 0).operatorSql());
+        assertEquals("<=", new QueryAnalyzer.HavingCondition(0, SqlKind.LESS_THAN_OR_EQUAL, 0).operatorSql());
+        assertEquals("=", new QueryAnalyzer.HavingCondition(0, SqlKind.EQUALS, 0).operatorSql());
+        assertEquals("!=", new QueryAnalyzer.HavingCondition(0, SqlKind.NOT_EQUALS, 0).operatorSql());
+    }
+
+    public void testExtractHavingConditionWithComparison() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        Filter filter = mockHavingFilter(agg, 1, SqlKind.GREATER_THAN, 100000);
+
+        QueryAnalyzer.HavingCondition having = QueryAnalyzer.extractHavingCondition(filter, 1);
+
+        assertNotNull(having);
+        assertEquals(1, having.columnIndex);
+        assertEquals(SqlKind.GREATER_THAN, having.operator);
+        assertEquals(100000, having.value);
+    }
+
+    public void testExtractHavingConditionWithNonCallReturnsNull() {
+        Filter filter = mock(Filter.class);
+        RexNode nonCall = mock(RexNode.class);
+        when(filter.getCondition()).thenReturn(nonCall);
+
+        assertNull(QueryAnalyzer.extractHavingCondition(filter, 1));
+    }
+
+    public void testGroupByWithoutHavingHasNullHaving() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNull(result.having);
+    }
+
     // --- Helper methods ---
 
     private Aggregate mockAggregate(ImmutableBitSet groupSet, List<AggregateCall> aggCalls) {
@@ -434,6 +507,32 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
             return null;
         }).when(node).childrenAccept(any(org.apache.calcite.rel.RelVisitor.class));
         return node;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Filter mockHavingFilter(Aggregate input, int columnIndex, SqlKind operator, long value) {
+        Filter filter = mock(Filter.class);
+        when(filter.getInput()).thenReturn(input);
+        when(filter.getInputs()).thenReturn(List.of(input));
+        doAnswer(invocation -> {
+            org.apache.calcite.rel.RelVisitor visitor = invocation.getArgument(0);
+            visitor.visit(input, 0, filter);
+            return null;
+        }).when(filter).childrenAccept(any(org.apache.calcite.rel.RelVisitor.class));
+
+        // Build RexCall: column op value
+        RexInputRef colRef = mock(RexInputRef.class);
+        when(colRef.getIndex()).thenReturn(columnIndex);
+
+        RexLiteral valueLiteral = mock(RexLiteral.class);
+        when(valueLiteral.getValueAs(Number.class)).thenReturn(value);
+
+        RexCall call = mock(RexCall.class);
+        when(call.getKind()).thenReturn(operator);
+        when(call.getOperands()).thenReturn(List.of(colRef, valueLiteral));
+
+        when(filter.getCondition()).thenReturn(call);
+        return filter;
     }
 
     private Sort makeSortWithLimit(int limitValue) {
