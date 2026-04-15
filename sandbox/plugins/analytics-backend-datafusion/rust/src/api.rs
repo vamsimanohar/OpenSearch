@@ -173,6 +173,22 @@ use object_store::ObjectStore;
 use crate::cross_rt_stream::CrossRtStream;
 use crate::runtime_manager::RuntimeManager;
 
+// mimalloc C API — linked via the global allocator set in the native lib crate.
+extern "C" {
+    /// Force mimalloc to return unused pages to the OS.
+    /// `force = true` aggressively decommits all freed pages.
+    fn mi_collect(force: bool);
+}
+
+/// Forces mimalloc to decommit freed pages back to the OS.
+///
+/// Called after each query completes to prevent RSS accumulation across queries.
+/// Without this, mimalloc retains freed pages in thread-local heaps for reuse,
+/// causing the process RSS to grow monotonically until the OS OOM killer triggers.
+fn mimalloc_purge() {
+    unsafe { mi_collect(true) };
+}
+
 /// Result container for Arrow IPC bytes returned to Java.
 /// Java accesses the data via `ipc_result_data_ptr` and `ipc_result_data_len`,
 /// then frees via `free_ipc_result`.
@@ -685,6 +701,8 @@ pub async unsafe fn stream_next(
 }
 
 /// Closes a result stream. Safe to call with 0 (no-op).
+/// After dropping the stream, forces mimalloc to return freed pages to the OS
+/// so that accumulated native memory from previous queries doesn't cause OOM.
 ///
 /// # Safety
 /// `stream_ptr` must be 0 or a valid pointer returned by `execute_query`.
@@ -692,6 +710,10 @@ pub unsafe fn stream_close(stream_ptr: i64) {
     if stream_ptr != 0 {
         let _ = Box::from_raw(stream_ptr as *mut MemoryTrackingStream);
     }
+    // Force mimalloc to decommit freed pages back to the OS.
+    // Without this, mimalloc holds freed virtual memory pages in thread-local
+    // heaps for reuse, causing RSS to accumulate across queries until OOM.
+    mimalloc_purge();
 }
 
 /// Executes a SQL query against Parquet files and returns results as Arrow IPC bytes.
@@ -890,6 +912,13 @@ pub async fn execute_iceberg_query_to_ipc(
     let ipc_bytes = batches_to_ipc(&schema, &batches)?;
     eprintln!("[PERF] Arrow IPC serialization: {} bytes", ipc_bytes.len());
 
+    // Drop intermediate data before purging
+    drop(batches);
+
+    // Force mimalloc to return freed pages to the OS after query execution.
+    // Without this, worker RSS accumulates across queries causing OOM.
+    mimalloc_purge();
+
     Ok(ipc_bytes)
 }
 
@@ -1004,7 +1033,15 @@ pub async fn execute_from_ipc(
     );
 
     // Serialize result to Arrow IPC
-    batches_to_ipc(&result_schema, &result_batches)
+    let ipc = batches_to_ipc(&result_schema, &result_batches)?;
+
+    // Drop intermediate data before purging
+    drop(result_batches);
+
+    // Force mimalloc to return freed pages to the OS after merge.
+    mimalloc_purge();
+
+    Ok(ipc)
 }
 
 /// Converts SQL to Substrait plan bytes (test only).
