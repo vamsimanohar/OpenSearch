@@ -45,18 +45,20 @@ public final class QueryAnalyzer {
 
         if (classifier.aggregate != null) {
             boolean hasGroupBy = !classifier.aggregate.getGroupSet().isEmpty();
-            boolean hasDistinctOrAvg = hasDistinctOrAvg(classifier.aggregate);
+            boolean hasDistinct = hasDistinct(classifier.aggregate);
 
             if (hasGroupBy) {
-                if (hasDistinctOrAvg) {
+                if (hasDistinct) {
                     return new AnalysisResult(MergeStrategy.SINGLE_NODE);
                 }
+                // AVG is allowed — decomposed into SUM/COUNT on workers
                 return buildTwoPhaseResult(classifier, relNode);
             }
 
-            if (hasDistinctOrAvg) {
+            if (hasDistinct) {
                 return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
+            // Global aggregates (including AVG) — AVG decomposed into SUM/COUNT on workers
             SqlKind[] aggKinds = extractAggKinds(classifier.aggregate);
             return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0, null);
         }
@@ -182,6 +184,24 @@ public final class QueryAnalyzer {
             if (call.isDistinct()) {
                 return true;
             }
+            if (call.getAggregation().getKind() == SqlKind.AVG) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean hasDistinct(Aggregate aggregate) {
+        for (AggregateCall call : aggregate.getAggCallList()) {
+            if (call.isDistinct()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean hasAvg(Aggregate aggregate) {
+        for (AggregateCall call : aggregate.getAggCallList()) {
             if (call.getAggregation().getKind() == SqlKind.AVG) {
                 return true;
             }

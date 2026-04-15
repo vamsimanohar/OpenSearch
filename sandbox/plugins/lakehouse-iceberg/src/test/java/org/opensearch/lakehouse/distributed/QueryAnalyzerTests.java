@@ -69,9 +69,9 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, QueryAnalyzer.analyze(agg));
     }
 
-    public void testGroupByWithAvgReturnsSingleNode() {
+    public void testGroupByWithAvgReturnsTwoPhaseGroupBy() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
-        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, QueryAnalyzer.analyze(agg));
     }
 
     public void testGroupByWithDistinctReturnsSingleNode() {
@@ -84,9 +84,9 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
     }
 
-    public void testAvgReturnsSingleNode() {
+    public void testAvgReturnsGlobalMerge() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
-        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+        assertEquals(MergeStrategy.GLOBAL_MERGE, QueryAnalyzer.analyze(agg));
     }
 
     public void testSortWithLimitReturnsTopKMerge() {
@@ -209,13 +209,61 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
     }
 
     public void testAnalyzeDetailedSingleNodeHasNoMetadata() {
-        // AVG forces SINGLE_NODE
-        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+        // DISTINCT forces SINGLE_NODE
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
 
         QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
 
         assertEquals(MergeStrategy.SINGLE_NODE, result.strategy);
         assertNull(result.aggKinds);
+    }
+
+    public void testGroupByWithAvgHasAvgInAggKinds() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNotNull(result.aggKinds);
+        assertEquals(SqlKind.AVG, result.aggKinds[1]); // index 0 is group key (null), index 1 is AVG
+    }
+
+    public void testGlobalAvgHasAvgInAggKinds() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.GLOBAL_MERGE, result.strategy);
+        assertNotNull(result.aggKinds);
+        assertEquals(1, result.aggKinds.length);
+        assertEquals(SqlKind.AVG, result.aggKinds[0]);
+    }
+
+    // --- hasDistinct / hasAvg tests ---
+
+    public void testHasDistinctReturnsFalseForCount() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        assertFalse(QueryAnalyzer.hasDistinct(agg));
+    }
+
+    public void testHasDistinctReturnsTrueForDistinctCount() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        assertTrue(QueryAnalyzer.hasDistinct(agg));
+    }
+
+    public void testHasDistinctReturnsFalseForAvg() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+        assertFalse(QueryAnalyzer.hasDistinct(agg));
+    }
+
+    public void testHasAvgReturnsTrueForAvg() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+        assertTrue(QueryAnalyzer.hasAvg(agg));
+    }
+
+    public void testHasAvgReturnsFalseForCount() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        assertFalse(QueryAnalyzer.hasAvg(agg));
     }
 
     public void testExtractAggKinds() {

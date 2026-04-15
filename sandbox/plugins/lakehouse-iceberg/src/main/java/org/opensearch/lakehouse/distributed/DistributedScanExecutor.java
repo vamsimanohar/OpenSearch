@@ -18,6 +18,7 @@ import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.lakehouse.LakehousePlugin;
+import org.opensearch.lakehouse.distributed.merge.AvgDecomposer;
 import org.opensearch.lakehouse.distributed.merge.MergeStrategy;
 import org.opensearch.lakehouse.distributed.merge.MergeSqlGenerator;
 import org.opensearch.lakehouse.distributed.merge.ResultMerger;
@@ -140,10 +141,16 @@ public class DistributedScanExecutor {
             filePaths.size()
         );
 
-        // For TWO_PHASE_GROUP_BY, workers run partial GROUP BY (no ORDER BY/LIMIT)
-        String workerSql = (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY)
-            ? stripOrderByAndLimit(sqlQuery)
-            : sqlQuery;
+        // Build worker SQL: strip ORDER BY/LIMIT for GROUP BY, decompose AVG into SUM+COUNT
+        String workerSql = sqlQuery;
+        if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY || analysis.strategy == MergeStrategy.GLOBAL_MERGE) {
+            if (AvgDecomposer.hasAvg(analysis)) {
+                workerSql = AvgDecomposer.decomposeWorkerSql(workerSql);
+            }
+        }
+        if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY) {
+            workerSql = stripOrderByAndLimit(workerSql);
+        }
 
         // Partition files across workers
         List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());

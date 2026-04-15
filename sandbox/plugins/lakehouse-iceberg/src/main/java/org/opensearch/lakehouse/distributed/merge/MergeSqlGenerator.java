@@ -33,11 +33,16 @@ public final class MergeSqlGenerator {
      * @return the merge SQL to execute against the "input" StreamingTable
      */
     public static String generate(QueryAnalyzer.AnalysisResult analysis, List<String> columnNames) {
+        boolean hasAvg = AvgDecomposer.hasAvg(analysis);
         return switch (analysis.strategy) {
             case CONCAT -> generateConcat();
-            case GLOBAL_MERGE -> generateGlobalMerge(analysis.aggKinds, columnNames);
+            case GLOBAL_MERGE -> hasAvg
+                ? generateAvgMerge(analysis, columnNames)
+                : generateGlobalMerge(analysis.aggKinds, columnNames);
             case TOPK_MERGE -> generateTopKMerge(analysis.sortColumns, analysis.sortAsc, analysis.limit, columnNames);
-            case TWO_PHASE_GROUP_BY -> generateTwoPhaseGroupBy(analysis, columnNames);
+            case TWO_PHASE_GROUP_BY -> hasAvg
+                ? generateAvgMerge(analysis, columnNames)
+                : generateTwoPhaseGroupBy(analysis, columnNames);
             case SINGLE_NODE -> throw new IllegalArgumentException("SINGLE_NODE should not reach merge SQL generation");
         };
     }
@@ -125,6 +130,43 @@ public final class MergeSqlGenerator {
         }
 
         // Apply LIMIT from original query
+        if (analysis.limit > 0) {
+            sb.append(" LIMIT ").append(analysis.limit);
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Generates merge SQL for queries containing AVG aggregates (both GLOBAL_MERGE and TWO_PHASE_GROUP_BY).
+     * AVG columns are decomposed: workers return __avg_sum_N and __avg_count_N,
+     * coordinator computes CAST(SUM(__avg_sum_N) AS DOUBLE) / SUM(__avg_count_N).
+     */
+    static String generateAvgMerge(QueryAnalyzer.AnalysisResult analysis, List<String> columnNames) {
+        AvgDecomposer.MergeColumnInfo info = AvgDecomposer.buildMergeColumns(analysis, columnNames);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("SELECT ").append(String.join(", ", info.selectExprs));
+        sb.append(" FROM input");
+
+        if (!info.groupByExprs.isEmpty()) {
+            sb.append(" GROUP BY ").append(String.join(", ", info.groupByExprs));
+        }
+
+        // Apply ORDER BY — need to map original sort column indices to output column names
+        if (analysis.sortColumns != null && analysis.sortColumns.length > 0) {
+            sb.append(" ORDER BY ");
+            for (int i = 0; i < analysis.sortColumns.length; i++) {
+                if (i > 0) sb.append(", ");
+                int sortIdx = analysis.sortColumns[i];
+                String colName = (sortIdx < info.outputColumnNames.size())
+                    ? info.outputColumnNames.get(sortIdx)
+                    : info.outputColumnNames.get(info.outputColumnNames.size() - 1);
+                sb.append(quoteIdentifier(colName));
+                sb.append(analysis.sortAsc[i] ? " ASC" : " DESC");
+            }
+        }
+
         if (analysis.limit > 0) {
             sb.append(" LIMIT ").append(analysis.limit);
         }

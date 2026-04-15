@@ -217,4 +217,39 @@ public class MergeSqlGeneratorTests extends OpenSearchTestCase {
 
         assertEquals("SELECT * FROM input ORDER BY \"order-total\" ASC LIMIT 3", sql);
     }
+
+    // ---- AVG merge tests ----
+
+    public void testGlobalMergeWithAvgUsesAvgMergePath() {
+        SqlKind[] aggKinds = new SqlKind[] { SqlKind.AVG };
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.create(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0);
+        // Workers return __avg_sum_0 and __avg_count_0
+        List<String> columns = List.of("__avg_sum_0", "__avg_count_0");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertTrue(sql.contains("CAST(SUM(\"__avg_sum_0\") AS DOUBLE) / SUM(\"__avg_count_0\")"));
+        assertTrue(sql.contains("FROM input"));
+    }
+
+    public void testTwoPhaseGroupByWithAvgUsesAvgMergePath() {
+        boolean[] isGroupKey = new boolean[] { true, false, false };
+        SqlKind[] aggKinds = new SqlKind[] { null, SqlKind.COUNT, SqlKind.AVG };
+        int[] sortColumns = new int[] { 1 };
+        boolean[] sortAsc = new boolean[] { false };
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.create(
+            MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, 10, isGroupKey
+        );
+        // Workers: group_key, count_col, __avg_sum_0, __avg_count_0
+        List<String> columns = List.of("group_key", "count_col", "__avg_sum_0", "__avg_count_0");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertTrue(sql.contains("\"group_key\""));
+        assertTrue(sql.contains("SUM(\"count_col\")"));
+        assertTrue(sql.contains("CAST(SUM(\"__avg_sum_0\") AS DOUBLE) / SUM(\"__avg_count_0\")"));
+        assertTrue(sql.contains("GROUP BY \"group_key\""));
+        assertTrue(sql.contains("ORDER BY"));
+        assertTrue(sql.contains("LIMIT 10"));
+    }
 }
