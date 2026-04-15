@@ -53,7 +53,7 @@ pub async fn execute_query(
     let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
         .with_cache_manager(
             CacheManagerConfig::default()
-                .with_list_files_cache(Some(list_file_cache))
+                .with_list_files_cache(Some(list_file_cache.clone()))
                 .with_file_metadata_cache(Some(
                     runtime.runtime_env.cache_manager.get_file_metadata_cache(),
                 ))
@@ -71,7 +71,7 @@ pub async fn execute_query(
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = false;
     let num_files = list_file_cache.get(&table_scoped_path).map_or(1, |v| v.len());
-    config.options_mut().execution.target_partitions = num_files.min(4).max(1);
+    config.options_mut().execution.target_partitions = num_files.min(16).max(1);
     config.options_mut().execution.batch_size = 8192;
 
     let state = SessionStateBuilder::new()
