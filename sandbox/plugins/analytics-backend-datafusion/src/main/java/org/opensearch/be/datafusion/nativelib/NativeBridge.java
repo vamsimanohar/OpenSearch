@@ -42,6 +42,17 @@ import java.util.List;
  */
 public final class NativeBridge {
 
+    /**
+     * Maximum Arrow IPC transport size per worker response (default 1GB).
+     * Workers producing IPC data larger than this limit will error,
+     * triggering single-node fallback for high-cardinality queries
+     * that would otherwise OOM the coordinator's Java heap when
+     * collecting multiple workers' responses.
+     */
+    static final long MAX_IPC_TRANSPORT_BYTES = Long.getLong(
+        "datafusion_max_ipc_transport_bytes", 1L * 1024 * 1024 * 1024
+    );
+
     private static final MethodHandle INIT_RUNTIME_MANAGER;
     private static final MethodHandle SHUTDOWN_RUNTIME_MANAGER;
     private static final MethodHandle CREATE_GLOBAL_RUNTIME;
@@ -473,9 +484,10 @@ public final class NativeBridge {
             try {
                 long dataPtr = (long) IPC_RESULT_DATA_PTR.invokeExact(resultPtr);
                 long dataLen = (long) IPC_RESULT_DATA_LEN.invokeExact(resultPtr);
-                if (dataLen > Integer.MAX_VALUE) {
+                if (dataLen > MAX_IPC_TRANSPORT_BYTES) {
                     throw new IllegalStateException(
-                        "Arrow IPC result too large for byte[] transport (" + dataLen + " bytes). "
+                        "Arrow IPC result too large for transport (" + dataLen + " bytes, limit "
+                            + MAX_IPC_TRANSPORT_BYTES + " bytes). "
                             + "Query produces too much data for distributed execution."
                     );
                 }
