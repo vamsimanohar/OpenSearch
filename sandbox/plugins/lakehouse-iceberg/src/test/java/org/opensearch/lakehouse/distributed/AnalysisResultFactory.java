@@ -57,6 +57,18 @@ public final class AnalysisResultFactory {
         return new QueryAnalyzer.AnalysisResult(strategy, aggKinds, sortColumns, sortAsc, limit, isGroupKey, having);
     }
 
+    public static QueryAnalyzer.AnalysisResult createWithOffset(
+        MergeStrategy strategy,
+        SqlKind[] aggKinds,
+        int[] sortColumns,
+        boolean[] sortAsc,
+        int limit,
+        int offset,
+        boolean[] isGroupKey
+    ) {
+        return new QueryAnalyzer.AnalysisResult(strategy, aggKinds, sortColumns, sortAsc, limit, offset, isGroupKey, null);
+    }
+
     public static QueryAnalyzer.HavingCondition createHaving(int columnIndex, SqlKind operator, long value) {
         return new QueryAnalyzer.HavingCondition(columnIndex, operator, value);
     }

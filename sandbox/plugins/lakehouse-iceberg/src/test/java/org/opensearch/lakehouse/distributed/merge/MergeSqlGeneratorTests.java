@@ -218,6 +218,50 @@ public class MergeSqlGeneratorTests extends OpenSearchTestCase {
         assertEquals("SELECT * FROM input ORDER BY \"order-total\" ASC LIMIT 3", sql);
     }
 
+    // ---- OFFSET tests ----
+
+    public void testTopKMergeWithOffset() {
+        int[] sortColumns = new int[] { 1 };
+        boolean[] sortAsc = new boolean[] { false };
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.createWithOffset(
+            MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, 10, 1000, null
+        );
+        List<String> columns = List.of("name", "score");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertEquals("SELECT * FROM input ORDER BY \"score\" DESC LIMIT 10 OFFSET 1000", sql);
+    }
+
+    public void testTwoPhaseGroupByWithOffset() {
+        boolean[] isGroupKey = new boolean[] { true, false };
+        SqlKind[] aggKinds = new SqlKind[] { null, SqlKind.COUNT };
+        int[] sortColumns = new int[] { 1 };
+        boolean[] sortAsc = new boolean[] { false };
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.createWithOffset(
+            MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, 10, 1000, isGroupKey
+        );
+        List<String> columns = List.of("url", "pageviews");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertTrue("Should contain LIMIT 10", sql.contains("LIMIT 10"));
+        assertTrue("Should contain OFFSET 1000", sql.contains("OFFSET 1000"));
+    }
+
+    public void testZeroOffsetOmitsOffsetClause() {
+        int[] sortColumns = new int[] { 0 };
+        boolean[] sortAsc = new boolean[] { true };
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.createWithOffset(
+            MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, 5, 0, null
+        );
+        List<String> columns = List.of("id");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertFalse("Should NOT contain OFFSET", sql.contains("OFFSET"));
+    }
+
     // ---- HAVING tests ----
 
     public void testTwoPhaseGroupByWithHaving() {

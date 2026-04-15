@@ -39,7 +39,7 @@ public final class MergeSqlGenerator {
             case GLOBAL_MERGE -> hasAvg
                 ? generateAvgMerge(analysis, columnNames)
                 : generateGlobalMerge(analysis.aggKinds, columnNames);
-            case TOPK_MERGE -> generateTopKMerge(analysis.sortColumns, analysis.sortAsc, analysis.limit, columnNames);
+            case TOPK_MERGE -> generateTopKMerge(analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.offset, columnNames);
             case TWO_PHASE_GROUP_BY -> hasAvg
                 ? generateAvgMerge(analysis, columnNames)
                 : generateTwoPhaseGroupBy(analysis, columnNames);
@@ -70,8 +70,8 @@ public final class MergeSqlGenerator {
         return "SELECT " + cols + " FROM input";
     }
 
-    // TOPK_MERGE: merge-sort worker results and apply limit
-    static String generateTopKMerge(int[] sortColumns, boolean[] sortAsc, int limit, List<String> columnNames) {
+    // TOPK_MERGE: merge-sort worker results and apply limit/offset
+    static String generateTopKMerge(int[] sortColumns, boolean[] sortAsc, int limit, int offset, List<String> columnNames) {
         StringBuilder sb = new StringBuilder("SELECT * FROM input ORDER BY ");
         for (int i = 0; i < sortColumns.length; i++) {
             if (i > 0) sb.append(", ");
@@ -81,6 +81,9 @@ public final class MergeSqlGenerator {
         }
         if (limit > 0) {
             sb.append(" LIMIT ").append(limit);
+        }
+        if (offset > 0) {
+            sb.append(" OFFSET ").append(offset);
         }
         return sb.toString();
     }
@@ -132,10 +135,8 @@ public final class MergeSqlGenerator {
         // Apply ORDER BY from original query
         appendOrderBy(sb, analysis, columnNames);
 
-        // Apply LIMIT from original query
-        if (analysis.limit > 0) {
-            sb.append(" LIMIT ").append(analysis.limit);
-        }
+        // Apply LIMIT and OFFSET from original query
+        appendLimitOffset(sb, analysis);
 
         return sb.toString();
     }
@@ -177,11 +178,21 @@ public final class MergeSqlGenerator {
             }
         }
 
+        appendLimitOffset(sb, analysis);
+
+        return sb.toString();
+    }
+
+    /**
+     * Appends LIMIT and OFFSET clauses from the analysis.
+     */
+    static void appendLimitOffset(StringBuilder sb, QueryAnalyzer.AnalysisResult analysis) {
         if (analysis.limit > 0) {
             sb.append(" LIMIT ").append(analysis.limit);
         }
-
-        return sb.toString();
+        if (analysis.offset > 0) {
+            sb.append(" OFFSET ").append(analysis.offset);
+        }
     }
 
     /**

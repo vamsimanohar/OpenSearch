@@ -88,7 +88,8 @@ public final class QueryAnalyzer {
                 }
                 boolean[] sortAsc = extractSortDirections(classifier.sort);
                 int limit = extractLimit(classifier.sort);
-                return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit, null);
+                int offset = extractOffset(classifier.sort);
+                return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit, offset, null, null);
             }
             return new AnalysisResult(MergeStrategy.SINGLE_NODE);
         }
@@ -163,10 +164,11 @@ public final class QueryAnalyzer {
             return new AnalysisResult(MergeStrategy.SINGLE_NODE);
         }
 
-        // Extract sort/limit info
+        // Extract sort/limit/offset info
         int[] sortColumns = null;
         boolean[] sortAsc = null;
         int limit = 0;
+        int offset = 0;
 
         if (sort != null) {
             if (!sort.getCollation().getFieldCollations().isEmpty()) {
@@ -181,9 +183,10 @@ public final class QueryAnalyzer {
             if (sort.fetch != null) {
                 limit = extractLimit(sort);
             }
+            offset = extractOffset(sort);
         }
 
-        return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, outputAggKinds, sortColumns, sortAsc, limit, isGroupKey, having);
+        return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, outputAggKinds, sortColumns, sortAsc, limit, offset, isGroupKey, having);
     }
 
     /**
@@ -222,10 +225,10 @@ public final class QueryAnalyzer {
     private static AnalysisResult buildDistinctExpandResult(PlanClassifier classifier, RelNode relNode) {
         Sort sort = classifier.sort;
 
-        // Extract sort/limit from the plan
         int[] sortColumns = null;
         boolean[] sortAsc = null;
         int limit = 0;
+        int offset = 0;
 
         if (sort != null) {
             if (!sort.getCollation().getFieldCollations().isEmpty()) {
@@ -235,9 +238,10 @@ public final class QueryAnalyzer {
             if (sort.fetch != null) {
                 limit = extractLimit(sort);
             }
+            offset = extractOffset(sort);
         }
 
-        return new AnalysisResult(MergeStrategy.DISTINCT_EXPAND, null, sortColumns, sortAsc, limit, null);
+        return new AnalysisResult(MergeStrategy.DISTINCT_EXPAND, null, sortColumns, sortAsc, limit, offset, null, null);
     }
 
     /**
@@ -249,6 +253,7 @@ public final class QueryAnalyzer {
         int[] sortColumns = null;
         boolean[] sortAsc = null;
         int limit = 0;
+        int offset = 0;
 
         if (sort != null) {
             if (!sort.getCollation().getFieldCollations().isEmpty()) {
@@ -258,9 +263,10 @@ public final class QueryAnalyzer {
             if (sort.fetch != null) {
                 limit = extractLimit(sort);
             }
+            offset = extractOffset(sort);
         }
 
-        return new AnalysisResult(MergeStrategy.MIXED_DISTINCT, null, sortColumns, sortAsc, limit, null);
+        return new AnalysisResult(MergeStrategy.MIXED_DISTINCT, null, sortColumns, sortAsc, limit, offset, null, null);
     }
 
     static class PlanClassifier extends RelVisitor {
@@ -374,6 +380,13 @@ public final class QueryAnalyzer {
         return 0;
     }
 
+    static int extractOffset(Sort sort) {
+        if (sort.offset instanceof RexLiteral) {
+            return ((RexLiteral) sort.offset).getValueAs(Integer.class);
+        }
+        return 0;
+    }
+
     /**
      * Represents a simple HAVING condition: column op value (e.g., COUNT(*) > 100000).
      */
@@ -410,26 +423,33 @@ public final class QueryAnalyzer {
         public final int[] sortColumns;
         public final boolean[] sortAsc;
         public final int limit;
+        public final int offset;
         /** Per-output-column: true = GROUP BY key/literal, false = aggregate. */
         public final boolean[] isGroupKey;
         /** HAVING condition extracted from Filter above Aggregate, or null. */
         public final HavingCondition having;
 
         AnalysisResult(MergeStrategy strategy) {
-            this(strategy, null, null, null, 0, null, null);
+            this(strategy, null, null, null, 0, 0, null, null);
         }
 
         AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit, boolean[] isGroupKey) {
-            this(strategy, aggKinds, sortColumns, sortAsc, limit, isGroupKey, null);
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, 0, isGroupKey, null);
         }
 
         AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit, boolean[] isGroupKey,
             HavingCondition having) {
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, 0, isGroupKey, having);
+        }
+
+        AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit, int offset,
+            boolean[] isGroupKey, HavingCondition having) {
             this.strategy = strategy;
             this.aggKinds = aggKinds;
             this.sortColumns = sortColumns;
             this.sortAsc = sortAsc;
             this.limit = limit;
+            this.offset = offset;
             this.isGroupKey = isGroupKey;
             this.having = having;
         }

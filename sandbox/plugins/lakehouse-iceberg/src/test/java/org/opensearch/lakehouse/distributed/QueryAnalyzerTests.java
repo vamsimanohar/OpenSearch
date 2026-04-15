@@ -382,6 +382,16 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(10, QueryAnalyzer.extractLimit(sort));
     }
 
+    public void testExtractOffsetFromRexLiteral() {
+        Sort sort = makeSortWithLimitAndOffset(10, 1000);
+        assertEquals(1000, QueryAnalyzer.extractOffset(sort));
+    }
+
+    public void testExtractOffsetFromSortWithoutOffsetReturnsZero() {
+        Sort sort = makeSortWithLimit(10);
+        assertEquals(0, QueryAnalyzer.extractOffset(sort));
+    }
+
     public void testExtractLimitFromNonLiteralReturnsZero() {
         Sort sort = makeSort(true, true);
         // makeSort uses mock(RexNode.class) which is not RexLiteral
@@ -511,9 +521,14 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
             super(cluster, traitSet, List.of(), input, collation, null, fetch);
         }
 
+        StubSort(RelOptCluster cluster, RelTraitSet traitSet, RelNode input, RelCollation collation,
+            RexNode offset, RexNode fetch) {
+            super(cluster, traitSet, List.of(), input, collation, offset, fetch);
+        }
+
         @Override
         public Sort copy(RelTraitSet traitSet, RelNode input, RelCollation collation, RexNode offset, RexNode fetch) {
-            return new StubSort(getCluster(), traitSet, input, collation, fetch);
+            return new StubSort(getCluster(), traitSet, input, collation, offset, fetch);
         }
     }
 
@@ -562,6 +577,27 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
 
         when(filter.getCondition()).thenReturn(call);
         return filter;
+    }
+
+    private Sort makeSortWithLimitAndOffset(int limitValue, int offsetValue) {
+        RelFieldCollation fieldCollation = new RelFieldCollation(0, RelFieldCollation.Direction.ASCENDING);
+        RelCollation collation = RelCollations.of(fieldCollation);
+
+        RelDataTypeFactory typeFactory = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
+        org.apache.calcite.rex.RexBuilder rexBuilder = new org.apache.calcite.rex.RexBuilder(typeFactory);
+        RexLiteral fetchLiteral = rexBuilder.makeExactLiteral(BigDecimal.valueOf(limitValue),
+            typeFactory.createSqlType(SqlTypeName.INTEGER));
+        RexLiteral offsetLiteral = rexBuilder.makeExactLiteral(BigDecimal.valueOf(offsetValue),
+            typeFactory.createSqlType(SqlTypeName.INTEGER));
+
+        RelOptCluster cluster = mock(RelOptCluster.class);
+        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
+        RelNode input = mockSimpleNode();
+        RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(2);
+        when(input.getRowType()).thenReturn(rowType);
+
+        return new StubSort(cluster, traitSet, input, collation, offsetLiteral, fetchLiteral);
     }
 
     private Sort makeSortWithLimit(int limitValue) {

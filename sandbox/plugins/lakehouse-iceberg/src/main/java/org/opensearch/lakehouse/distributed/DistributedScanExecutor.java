@@ -358,11 +358,11 @@ public class DistributedScanExecutor {
      * applies ORDER BY and LIMIT on the re-aggregated results.
      */
     static String stripOrderByAndLimit(String sql) {
-        // Strip ORDER BY ... (and everything after it, including LIMIT)
+        // Strip ORDER BY ... (and everything after it, including LIMIT and OFFSET)
         String stripped = sql.replaceAll("(?is)\\s+ORDER\\s+BY\\s+.+$", "");
         if (stripped.equals(sql)) {
-            // No ORDER BY found — strip standalone LIMIT
-            stripped = sql.replaceAll("(?is)\\s+LIMIT\\s+\\d+\\s*$", "");
+            // No ORDER BY found — strip standalone LIMIT [OFFSET]
+            stripped = sql.replaceAll("(?is)\\s+LIMIT\\s+\\d+(\\s+OFFSET\\s+\\d+)?\\s*$", "");
         }
         return stripped.trim();
     }
