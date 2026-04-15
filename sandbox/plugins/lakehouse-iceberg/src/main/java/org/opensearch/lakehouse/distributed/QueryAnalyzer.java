@@ -54,6 +54,9 @@ public final class QueryAnalyzer {
                     if (hasOnlyCountDistinct(classifier.aggregate)) {
                         return buildDistinctExpandResult(classifier, relNode);
                     }
+                    if (hasMixedCountDistinct(classifier.aggregate)) {
+                        return buildMixedDistinctResult(classifier, relNode);
+                    }
                     return new AnalysisResult(MergeStrategy.SINGLE_NODE);
                 }
                 // AVG is allowed — decomposed into SUM/COUNT on workers
@@ -63,6 +66,9 @@ public final class QueryAnalyzer {
             if (hasDistinct) {
                 if (hasOnlyCountDistinct(classifier.aggregate)) {
                     return buildDistinctExpandResult(classifier, relNode);
+                }
+                if (hasMixedCountDistinct(classifier.aggregate)) {
+                    return buildMixedDistinctResult(classifier, relNode);
                 }
                 return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
@@ -234,6 +240,29 @@ public final class QueryAnalyzer {
         return new AnalysisResult(MergeStrategy.DISTINCT_EXPAND, null, sortColumns, sortAsc, limit, null);
     }
 
+    /**
+     * Builds a MIXED_DISTINCT result for queries with COUNT(DISTINCT) mixed with other aggregates.
+     */
+    private static AnalysisResult buildMixedDistinctResult(PlanClassifier classifier, RelNode relNode) {
+        Sort sort = classifier.sort;
+
+        int[] sortColumns = null;
+        boolean[] sortAsc = null;
+        int limit = 0;
+
+        if (sort != null) {
+            if (!sort.getCollation().getFieldCollations().isEmpty()) {
+                sortColumns = extractSortColumns(sort);
+                sortAsc = extractSortDirections(sort);
+            }
+            if (sort.fetch != null) {
+                limit = extractLimit(sort);
+            }
+        }
+
+        return new AnalysisResult(MergeStrategy.MIXED_DISTINCT, null, sortColumns, sortAsc, limit, null);
+    }
+
     static class PlanClassifier extends RelVisitor {
         Aggregate aggregate;
         Sort sort;
@@ -277,6 +306,23 @@ public final class QueryAnalyzer {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns true if the Aggregate has at least one COUNT(DISTINCT) and at least one non-distinct aggregate.
+     * This identifies queries like: SELECT key, SUM(x), COUNT(*), COUNT(DISTINCT y) GROUP BY key.
+     */
+    static boolean hasMixedCountDistinct(Aggregate aggregate) {
+        boolean hasCountDistinct = false;
+        boolean hasNonDistinct = false;
+        for (AggregateCall call : aggregate.getAggCallList()) {
+            if (call.isDistinct() && call.getAggregation().getKind() == SqlKind.COUNT) {
+                hasCountDistinct = true;
+            } else {
+                hasNonDistinct = true;
+            }
+        }
+        return hasCountDistinct && hasNonDistinct;
     }
 
     /**

@@ -87,11 +87,18 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.DISTINCT_EXPAND, QueryAnalyzer.analyze(agg));
     }
 
-    public void testGroupByWithMixedDistinctAndNonDistinctReturnsSingleNode() {
+    public void testGroupByWithMixedCountDistinctReturnsMixedDistinct() {
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countCall, countDistinctCall));
-        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+        assertEquals(MergeStrategy.MIXED_DISTINCT, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testGlobalMixedCountDistinctReturnsMixedDistinct() {
+        AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(sumCall, countDistinctCall));
+        assertEquals(MergeStrategy.MIXED_DISTINCT, QueryAnalyzer.analyze(agg));
     }
 
     public void testGroupByWithDistinctSumReturnsSingleNode() {
@@ -155,11 +162,33 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertTrue(QueryAnalyzer.hasDistinctOrAvg(agg));
     }
 
-    public void testMultipleAggCallsMixedDistinct() {
+    public void testDistinctSumWithNonDistinctCountReturnsSingleNode() {
+        // SUM(DISTINCT x) + COUNT(*) → not COUNT(DISTINCT), so SINGLE_NODE
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         AggregateCall distinctSumCall = makeAggCall(SqlStdOperatorTable.SUM, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, distinctSumCall));
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testHasMixedCountDistinctReturnsTrueForCountAndCountDistinct() {
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, countDistinctCall));
+        assertTrue(QueryAnalyzer.hasMixedCountDistinct(agg));
+    }
+
+    public void testHasMixedCountDistinctReturnsFalseForOnlyCountDistinct() {
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countDistinctCall));
+        assertFalse(QueryAnalyzer.hasMixedCountDistinct(agg));
+    }
+
+    public void testHasMixedCountDistinctReturnsFalseForSumDistinct() {
+        // SUM(DISTINCT) is not COUNT(DISTINCT) — should return false
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall sumDistinctCall = makeAggCall(SqlStdOperatorTable.SUM, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, sumDistinctCall));
+        assertFalse(QueryAnalyzer.hasMixedCountDistinct(agg));
     }
 
     public void testEmptyAggCallListWithGroupByReturnsTwoPhaseGroupBy() {

@@ -272,6 +272,15 @@ public class MergeSqlGeneratorTests extends OpenSearchTestCase {
 
     // ---- DISTINCT_EXPAND ----
 
+    public void testMixedDistinctThrowsIllegalArgumentException() {
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.create(MergeStrategy.MIXED_DISTINCT);
+        List<String> columns = List.of("col");
+
+        IllegalArgumentException ex = expectThrows(IllegalArgumentException.class, () -> MergeSqlGenerator.generate(analysis, columns));
+
+        assertEquals("MIXED_DISTINCT uses MixedDistinctExpander.generateMergeSql()", ex.getMessage());
+    }
+
     public void testDistinctExpandThrowsIllegalArgumentException() {
         QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.create(MergeStrategy.DISTINCT_EXPAND);
         List<String> columns = List.of("col");

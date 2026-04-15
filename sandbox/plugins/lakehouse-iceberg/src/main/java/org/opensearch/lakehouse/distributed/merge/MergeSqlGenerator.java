@@ -43,6 +43,7 @@ public final class MergeSqlGenerator {
             case TWO_PHASE_GROUP_BY -> hasAvg
                 ? generateAvgMerge(analysis, columnNames)
                 : generateTwoPhaseGroupBy(analysis, columnNames);
+            case MIXED_DISTINCT -> throw new IllegalArgumentException("MIXED_DISTINCT uses MixedDistinctExpander.generateMergeSql()");
             case DISTINCT_EXPAND -> throw new IllegalArgumentException("DISTINCT_EXPAND uses DistinctExpander.generateMergeSql()");
             case SINGLE_NODE -> throw new IllegalArgumentException("SINGLE_NODE should not reach merge SQL generation");
         };
