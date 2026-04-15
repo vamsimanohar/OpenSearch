@@ -140,9 +140,22 @@ public class DistributedScanExecutor {
             return;
         }
 
+        // Exclude coordinator from workers to avoid memory contention:
+        // coordinator must hold Java heap for remote IPC + merge, so it should
+        // not also run a DataFusion worker (which needs pool + IPC buffer memory).
+        String localNodeId = clusterService.state().nodes().getLocalNodeId();
+        List<DiscoveryNode> remoteWorkers = workers.stream()
+            .filter(n -> !n.getId().equals(localNodeId))
+            .toList();
+        if (remoteWorkers.isEmpty()) {
+            // All workers are local — fall back to single-node
+            executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
+            return;
+        }
+
         logger.info(
-            "[ScanExecutor] Distributing query across {} workers, strategy={}, files={}",
-            workers.size(),
+            "[ScanExecutor] Distributing query across {} remote workers, strategy={}, files={}",
+            remoteWorkers.size(),
             analysis.strategy,
             filePaths.size()
         );
@@ -165,11 +178,11 @@ public class DistributedScanExecutor {
             }
         }
 
-        // Partition files across workers
-        List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());
+        // Partition files across remote workers only (coordinator handles merge)
+        List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, remoteWorkers.size());
 
         // Dispatch requests and collect responses asynchronously
-        dispatchAndCollect(workers, assignments, workerSql, storageConfig, tableName, ActionListener.wrap(
+        dispatchAndCollect(remoteWorkers, assignments, workerSql, storageConfig, tableName, ActionListener.wrap(
             responses -> {
                 try {
                     // Check if workers returned Arrow IPC data
