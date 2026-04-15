@@ -195,7 +195,7 @@ if [ "$SKIP_OS" = false ]; then
 
         # Read query, replace table name
         sql=$(cat "$query_file")
-        sql="${sql//hits/${TABLE}}"
+        sql=$(echo "$sql" | sed "s/\bFROM hits\b/FROM ${TABLE}/gI; s/\bJOIN hits\b/JOIN ${TABLE}/gI")
         # Remove trailing semicolons (OpenSearch doesn't want them)
         sql="${sql%;}"
 
