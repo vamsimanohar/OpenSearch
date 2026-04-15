@@ -1,1 +1,1 @@
-SELECT "SearchPhrase", COUNT(*) AS c FROM hits WHERE "SearchPhrase" <> '' GROUP BY "SearchPhrase" ORDER BY c DESC LIMIT 10;
+SELECT searchphrase, COUNT(*) AS c FROM hits WHERE searchphrase <> '' GROUP BY searchphrase ORDER BY c DESC LIMIT 10;

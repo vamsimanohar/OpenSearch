@@ -1,1 +1,1 @@
-SELECT "SearchPhrase", COUNT(DISTINCT "UserID") AS u FROM hits WHERE "SearchPhrase" <> '' GROUP BY "SearchPhrase" ORDER BY u DESC LIMIT 10;
+SELECT searchphrase, COUNT(DISTINCT userid) AS u FROM hits WHERE searchphrase <> '' GROUP BY searchphrase ORDER BY u DESC LIMIT 10;

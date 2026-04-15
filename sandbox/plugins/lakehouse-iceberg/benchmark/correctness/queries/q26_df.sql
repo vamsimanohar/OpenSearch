@@ -1,1 +1,1 @@
-SELECT "SearchPhrase" FROM hits WHERE "SearchPhrase" <> '' ORDER BY "SearchPhrase" LIMIT 10;
+SELECT searchphrase FROM hits WHERE searchphrase <> '' ORDER BY searchphrase LIMIT 10;
