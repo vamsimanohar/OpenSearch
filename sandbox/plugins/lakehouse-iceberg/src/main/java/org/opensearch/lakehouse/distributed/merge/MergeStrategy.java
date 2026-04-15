@@ -35,8 +35,16 @@ public enum MergeStrategy {
     TOPK_MERGE,
 
     /**
+     * Two-phase GROUP BY aggregation (star topology).
+     * Workers run partial GROUP BY (no ORDER BY/LIMIT), returning partial aggregates.
+     * Coordinator re-aggregates via DataFusion StreamingTable:
+     * GROUP BY keys pass through, COUNT→SUM, SUM→SUM, MIN→MIN, MAX→MAX.
+     */
+    TWO_PHASE_GROUP_BY,
+
+    /**
      * Route the entire query to a single node for execution.
-     * Used for queries that cannot be trivially distributed: GROUP BY, DISTINCT,
+     * Used for queries that cannot be trivially distributed: DISTINCT,
      * AVG aggregates, JOINs, or any pattern not covered by the other strategies.
      * This is deterministic routing, not an error fallback.
      */

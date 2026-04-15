@@ -121,6 +121,58 @@ public class MergeSqlGeneratorTests extends OpenSearchTestCase {
         assertEquals("SELECT * FROM input ORDER BY \"x\" ASC", sql);
     }
 
+    // ---- TWO_PHASE_GROUP_BY ----
+
+    public void testTwoPhaseGroupByWithCountOrderByLimit() {
+        boolean[] isGroupKey = new boolean[] { true, false };
+        SqlKind[] aggKinds = new SqlKind[] { null, SqlKind.COUNT };
+        int[] sortColumns = new int[] { 1 };
+        boolean[] sortAsc = new boolean[] { false };
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.create(
+            MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, 10, isGroupKey
+        );
+        List<String> columns = List.of("searchphrase", "c");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertEquals(
+            "SELECT \"searchphrase\", SUM(\"c\") AS \"c\" FROM input GROUP BY \"searchphrase\" ORDER BY \"c\" DESC LIMIT 10",
+            sql
+        );
+    }
+
+    public void testTwoPhaseGroupByWithMultipleKeysAndAggs() {
+        boolean[] isGroupKey = new boolean[] { true, true, false, false };
+        SqlKind[] aggKinds = new SqlKind[] { null, null, SqlKind.COUNT, SqlKind.MIN };
+        int[] sortColumns = new int[] { 2 };
+        boolean[] sortAsc = new boolean[] { false };
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.create(
+            MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, 10, isGroupKey
+        );
+        List<String> columns = List.of("searchengineid", "searchphrase", "c", "min_url");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertEquals(
+            "SELECT \"searchengineid\", \"searchphrase\", SUM(\"c\") AS \"c\", MIN(\"min_url\") AS \"min_url\" "
+                + "FROM input GROUP BY \"searchengineid\", \"searchphrase\" ORDER BY \"c\" DESC LIMIT 10",
+            sql
+        );
+    }
+
+    public void testTwoPhaseGroupByWithoutOrderByOrLimit() {
+        boolean[] isGroupKey = new boolean[] { true, false };
+        SqlKind[] aggKinds = new SqlKind[] { null, SqlKind.COUNT };
+        QueryAnalyzer.AnalysisResult analysis = AnalysisResultFactory.create(
+            MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, null, null, 0, isGroupKey
+        );
+        List<String> columns = List.of("userid", "c");
+
+        String sql = MergeSqlGenerator.generate(analysis, columns);
+
+        assertEquals("SELECT \"userid\", SUM(\"c\") AS \"c\" FROM input GROUP BY \"userid\"", sql);
+    }
+
     // ---- SINGLE_NODE ----
 
     public void testSingleNodeThrowsIllegalArgumentException() {

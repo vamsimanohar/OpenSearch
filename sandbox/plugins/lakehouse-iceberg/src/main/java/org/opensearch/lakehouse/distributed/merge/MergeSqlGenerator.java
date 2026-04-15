@@ -29,7 +29,7 @@ public final class MergeSqlGenerator {
      * Generates merge SQL based on the query analysis result and column names.
      *
      * @param analysis    the query analysis result from QueryAnalyzer
-     * @param columnNames the column names from the Calcite plan (relNode.getRowType().getFieldNames())
+     * @param columnNames the column names from the Arrow IPC schema
      * @return the merge SQL to execute against the "input" StreamingTable
      */
     public static String generate(QueryAnalyzer.AnalysisResult analysis, List<String> columnNames) {
@@ -37,6 +37,7 @@ public final class MergeSqlGenerator {
             case CONCAT -> generateConcat();
             case GLOBAL_MERGE -> generateGlobalMerge(analysis.aggKinds, columnNames);
             case TOPK_MERGE -> generateTopKMerge(analysis.sortColumns, analysis.sortAsc, analysis.limit, columnNames);
+            case TWO_PHASE_GROUP_BY -> generateTwoPhaseGroupBy(analysis, columnNames);
             case SINGLE_NODE -> throw new IllegalArgumentException("SINGLE_NODE should not reach merge SQL generation");
         };
     }
@@ -47,9 +48,6 @@ public final class MergeSqlGenerator {
     }
 
     // GLOBAL_MERGE: re-aggregate single-row partial results
-    // Each worker returned one row with partial aggregates. The merge re-aggregates.
-    // e.g., workers returned SUM(x), COUNT(y), MIN(z), MAX(w)
-    //        merge SQL: SELECT SUM(col0), SUM(col1), MIN(col2), MAX(col3) FROM input
     static String generateGlobalMerge(SqlKind[] aggKinds, List<String> columnNames) {
         StringJoiner cols = new StringJoiner(", ");
         for (int i = 0; i < columnNames.size(); i++) {
@@ -66,7 +64,6 @@ public final class MergeSqlGenerator {
     }
 
     // TOPK_MERGE: merge-sort worker results and apply limit
-    // Workers each returned their top-K, coordinator does final sort + limit
     static String generateTopKMerge(int[] sortColumns, boolean[] sortAsc, int limit, List<String> columnNames) {
         StringBuilder sb = new StringBuilder("SELECT * FROM input ORDER BY ");
         for (int i = 0; i < sortColumns.length; i++) {
@@ -78,6 +75,60 @@ public final class MergeSqlGenerator {
         if (limit > 0) {
             sb.append(" LIMIT ").append(limit);
         }
+        return sb.toString();
+    }
+
+    /**
+     * TWO_PHASE_GROUP_BY: re-aggregate partial GROUP BY results from workers.
+     * GROUP BY key columns pass through. Aggregate columns are re-aggregated:
+     * COUNT→SUM, SUM→SUM, MIN→MIN, MAX→MAX.
+     * Then apply ORDER BY + LIMIT from the original query.
+     */
+    static String generateTwoPhaseGroupBy(QueryAnalyzer.AnalysisResult analysis, List<String> columnNames) {
+        boolean[] isGroupKey = analysis.isGroupKey;
+        SqlKind[] aggKinds = analysis.aggKinds;
+
+        StringJoiner selectCols = new StringJoiner(", ");
+        StringJoiner groupByCols = new StringJoiner(", ");
+
+        for (int i = 0; i < columnNames.size(); i++) {
+            String col = quoteIdentifier(columnNames.get(i));
+            boolean isKey = (isGroupKey != null && i < isGroupKey.length) ? isGroupKey[i] : (i == 0);
+
+            if (isKey) {
+                selectCols.add(col);
+                groupByCols.add(col);
+            } else {
+                // Aggregate column — re-aggregate
+                SqlKind kind = (aggKinds != null && i < aggKinds.length) ? aggKinds[i] : SqlKind.SUM;
+                String aggFunc = switch (kind) {
+                    case MIN -> "MIN";
+                    case MAX -> "MAX";
+                    default -> "SUM"; // COUNT partial→SUM, SUM partial→SUM
+                };
+                selectCols.add(aggFunc + "(" + col + ") AS " + col);
+            }
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("SELECT ").append(selectCols).append(" FROM input");
+        sb.append(" GROUP BY ").append(groupByCols);
+
+        // Apply ORDER BY from original query
+        if (analysis.sortColumns != null && analysis.sortColumns.length > 0) {
+            sb.append(" ORDER BY ");
+            for (int i = 0; i < analysis.sortColumns.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(quoteIdentifier(columnNames.get(analysis.sortColumns[i])));
+                sb.append(analysis.sortAsc[i] ? " ASC" : " DESC");
+            }
+        }
+
+        // Apply LIMIT from original query
+        if (analysis.limit > 0) {
+            sb.append(" LIMIT ").append(analysis.limit);
+        }
+
         return sb.toString();
     }
 

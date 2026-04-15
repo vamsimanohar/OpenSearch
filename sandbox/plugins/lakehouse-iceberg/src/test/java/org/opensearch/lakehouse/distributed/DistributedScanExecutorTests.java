@@ -103,7 +103,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
     }
 
     public void testSingleNodeStrategyFallbackExecutesLocally() throws Exception {
-        // 2 eligible nodes but query requires SINGLE_NODE → executes locally
+        // 2 eligible nodes but query requires SINGLE_NODE (AVG) → executes locally
         DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{42});
         DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
@@ -112,11 +112,11 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
 
-        // Mock a GroupBy aggregate → SINGLE_NODE
-        RelNode relNode = mockGroupByRelNode();
+        // Mock a GroupBy + AVG aggregate → SINGLE_NODE (AVG blocks distribution)
+        RelNode relNode = mockGroupByAvgRelNode();
 
         List<Object[]> rows = executeAndWait(
-            executor, relNode, "SELECT col, COUNT(*) FROM t GROUP BY col",
+            executor, relNode, "SELECT col, AVG(val) FROM t GROUP BY col",
             List.of("f1", "f2"), new long[]{100, 200},
             Map.of("localMode", "true"), "t"
         );
@@ -141,6 +141,40 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         );
 
         assertEquals(1, rows.size());
+    }
+
+    // ---- stripOrderByAndLimit tests ----
+
+    public void testStripOrderByAndLimit() {
+        assertEquals(
+            "SELECT \"searchphrase\", COUNT(*) AS \"c\" FROM \"hits\" WHERE \"searchphrase\" <> '' GROUP BY \"searchphrase\"",
+            DistributedScanExecutor.stripOrderByAndLimit(
+                "SELECT \"searchphrase\", COUNT(*) AS \"c\" FROM \"hits\" WHERE \"searchphrase\" <> '' GROUP BY \"searchphrase\" ORDER BY \"c\" DESC LIMIT 10"
+            )
+        );
+    }
+
+    public void testStripOrderByWithoutLimit() {
+        assertEquals(
+            "SELECT \"advengineid\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"advengineid\"",
+            DistributedScanExecutor.stripOrderByAndLimit(
+                "SELECT \"advengineid\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"advengineid\" ORDER BY \"c\" DESC"
+            )
+        );
+    }
+
+    public void testStripLimitWithoutOrderBy() {
+        assertEquals(
+            "SELECT \"userid\", \"searchphrase\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"userid\", \"searchphrase\"",
+            DistributedScanExecutor.stripOrderByAndLimit(
+                "SELECT \"userid\", \"searchphrase\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"userid\", \"searchphrase\" LIMIT 10"
+            )
+        );
+    }
+
+    public void testStripNothingWhenNoOrderByOrLimit() {
+        String sql = "SELECT \"url\", COUNT(*) FROM \"hits\" GROUP BY \"url\"";
+        assertEquals(sql, DistributedScanExecutor.stripOrderByAndLimit(sql));
     }
 
     public void testConstructorWithNodeDiscovery() {
@@ -335,6 +369,23 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         org.apache.calcite.rel.core.Aggregate agg = mock(org.apache.calcite.rel.core.Aggregate.class);
         when(agg.getGroupSet()).thenReturn(org.apache.calcite.util.ImmutableBitSet.of(0));
         when(agg.getAggCallList()).thenReturn(List.of());
+        when(agg.getInputs()).thenReturn(List.of());
+        org.apache.calcite.rel.type.RelDataType rowType = mock(org.apache.calcite.rel.type.RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(1);
+        when(agg.getRowType()).thenReturn(rowType);
+        return agg;
+    }
+
+    @SuppressWarnings("deprecation")
+    private RelNode mockGroupByAvgRelNode() {
+        org.apache.calcite.rel.core.Aggregate agg = mock(org.apache.calcite.rel.core.Aggregate.class);
+        when(agg.getGroupSet()).thenReturn(org.apache.calcite.util.ImmutableBitSet.of(0));
+        org.apache.calcite.rel.core.AggregateCall avgCall = new org.apache.calcite.rel.core.AggregateCall(
+            org.apache.calcite.sql.fun.SqlStdOperatorTable.AVG, false, List.of(),
+            new org.apache.calcite.sql.type.BasicSqlType(org.apache.calcite.rel.type.RelDataTypeSystem.DEFAULT,
+                org.apache.calcite.sql.type.SqlTypeName.DOUBLE), null
+        );
+        when(agg.getAggCallList()).thenReturn(List.of(avgCall));
         when(agg.getInputs()).thenReturn(List.of());
         return agg;
     }

@@ -31,6 +31,17 @@ public final class AnalysisResultFactory {
         boolean[] sortAsc,
         int limit
     ) {
-        return new QueryAnalyzer.AnalysisResult(strategy, aggKinds, sortColumns, sortAsc, limit);
+        return new QueryAnalyzer.AnalysisResult(strategy, aggKinds, sortColumns, sortAsc, limit, null);
+    }
+
+    public static QueryAnalyzer.AnalysisResult create(
+        MergeStrategy strategy,
+        SqlKind[] aggKinds,
+        int[] sortColumns,
+        boolean[] sortAsc,
+        int limit,
+        boolean[] isGroupKey
+    ) {
+        return new QueryAnalyzer.AnalysisResult(strategy, aggKinds, sortColumns, sortAsc, limit, isGroupKey);
     }
 }

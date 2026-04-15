@@ -64,8 +64,18 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.GLOBAL_MERGE, QueryAnalyzer.analyze(agg));
     }
 
-    public void testGroupByAggregateReturnsSingleNode() {
+    public void testGroupByWithSimpleAggsReturnsTwoPhaseGroupBy() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0, 1), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testGroupByWithAvgReturnsSingleNode() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testGroupByWithDistinctReturnsSingleNode() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
     }
 
@@ -135,9 +145,9 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
     }
 
-    public void testEmptyAggCallListWithGroupByReturnsSingleNode() {
+    public void testEmptyAggCallListWithGroupByReturnsTwoPhaseGroupBy() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of());
-        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, QueryAnalyzer.analyze(agg));
     }
 
     public void testEmptyAggCallListWithNoGroupByReturnsGlobalMerge() {
@@ -184,8 +194,23 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertNull(result.sortColumns);
     }
 
-    public void testAnalyzeDetailedSingleNodeHasNoMetadata() {
+    public void testAnalyzeDetailedTwoPhaseGroupByHasMetadata() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNotNull(result.isGroupKey);
+        assertEquals(2, result.isGroupKey.length);
+        assertTrue(result.isGroupKey[0]);  // GROUP BY key
+        assertFalse(result.isGroupKey[1]); // COUNT aggregate
+        assertNotNull(result.aggKinds);
+        assertEquals(SqlKind.COUNT, result.aggKinds[1]);
+    }
+
+    public void testAnalyzeDetailedSingleNodeHasNoMetadata() {
+        // AVG forces SINGLE_NODE
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
 
         QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
 

@@ -140,11 +140,16 @@ public class DistributedScanExecutor {
             filePaths.size()
         );
 
+        // For TWO_PHASE_GROUP_BY, workers run partial GROUP BY (no ORDER BY/LIMIT)
+        String workerSql = (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY)
+            ? stripOrderByAndLimit(sqlQuery)
+            : sqlQuery;
+
         // Partition files across workers
         List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());
 
         // Dispatch requests and collect responses asynchronously
-        dispatchAndCollect(workers, assignments, sqlQuery, storageConfig, tableName, ActionListener.wrap(
+        dispatchAndCollect(workers, assignments, workerSql, storageConfig, tableName, ActionListener.wrap(
             responses -> {
                 try {
                     // Check if workers returned Arrow IPC data
@@ -313,6 +318,21 @@ public class DistributedScanExecutor {
                 }
             }
         );
+    }
+
+    /**
+     * Strips ORDER BY and LIMIT clauses from the SQL for two-phase GROUP BY workers.
+     * Workers run partial GROUP BY without ordering or limiting — the coordinator
+     * applies ORDER BY and LIMIT on the re-aggregated results.
+     */
+    static String stripOrderByAndLimit(String sql) {
+        // Strip ORDER BY ... (and everything after it, including LIMIT)
+        String stripped = sql.replaceAll("(?is)\\s+ORDER\\s+BY\\s+.+$", "");
+        if (stripped.equals(sql)) {
+            // No ORDER BY found — strip standalone LIMIT
+            stripped = sql.replaceAll("(?is)\\s+LIMIT\\s+\\d+\\s*$", "");
+        }
+        return stripped.trim();
     }
 
     /**
