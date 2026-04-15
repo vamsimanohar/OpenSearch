@@ -43,9 +43,17 @@ public enum MergeStrategy {
     TWO_PHASE_GROUP_BY,
 
     /**
+     * COUNT DISTINCT expansion (star topology).
+     * Workers return distinct raw values: SELECT DISTINCT group_keys, distinct_col FROM table.
+     * Coordinator runs COUNT(DISTINCT ...) on concatenated results.
+     * Used for queries with only COUNT(DISTINCT) aggregates (no mixed SUM/AVG).
+     */
+    DISTINCT_EXPAND,
+
+    /**
      * Route the entire query to a single node for execution.
-     * Used for queries that cannot be trivially distributed: DISTINCT,
-     * AVG aggregates, JOINs, or any pattern not covered by the other strategies.
+     * Used for queries that cannot be trivially distributed: mixed DISTINCT
+     * with other aggregates, JOINs, or any pattern not covered by the other strategies.
      * This is deterministic routing, not an error fallback.
      */
     SINGLE_NODE

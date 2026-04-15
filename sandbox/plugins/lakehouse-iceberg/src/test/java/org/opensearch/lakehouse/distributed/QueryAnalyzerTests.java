@@ -74,13 +74,27 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, QueryAnalyzer.analyze(agg));
     }
 
-    public void testGroupByWithDistinctReturnsSingleNode() {
+    public void testGroupByWithCountDistinctReturnsDistinctExpand() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        assertEquals(MergeStrategy.DISTINCT_EXPAND, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testCountDistinctReturnsDistinctExpand() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        assertEquals(MergeStrategy.DISTINCT_EXPAND, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testGroupByWithMixedDistinctAndNonDistinctReturnsSingleNode() {
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countCall, countDistinctCall));
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
     }
 
-    public void testCountDistinctReturnsSingleNode() {
-        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+    public void testGroupByWithDistinctSumReturnsSingleNode() {
+        // SUM(DISTINCT x) is not COUNT(DISTINCT), so not supported
+        AggregateCall distinctSum = makeAggCall(SqlStdOperatorTable.SUM, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(distinctSum));
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
     }
 
@@ -209,13 +223,21 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
     }
 
     public void testAnalyzeDetailedSingleNodeHasNoMetadata() {
-        // DISTINCT forces SINGLE_NODE
-        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        // SUM(DISTINCT) forces SINGLE_NODE (not COUNT DISTINCT, so can't use DISTINCT_EXPAND)
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.SUM, true)));
 
         QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
 
         assertEquals(MergeStrategy.SINGLE_NODE, result.strategy);
         assertNull(result.aggKinds);
+    }
+
+    public void testAnalyzeDetailedCountDistinctReturnsDistinctExpand() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.DISTINCT_EXPAND, result.strategy);
     }
 
     public void testGroupByWithAvgHasAvgInAggKinds() {
@@ -264,6 +286,35 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
     public void testHasAvgReturnsFalseForCount() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
         assertFalse(QueryAnalyzer.hasAvg(agg));
+    }
+
+    // --- hasOnlyCountDistinct tests ---
+
+    public void testHasOnlyCountDistinctReturnsTrueForSingleCountDistinct() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        assertTrue(QueryAnalyzer.hasOnlyCountDistinct(agg));
+    }
+
+    public void testHasOnlyCountDistinctReturnsFalseForNonDistinctCount() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        assertFalse(QueryAnalyzer.hasOnlyCountDistinct(agg));
+    }
+
+    public void testHasOnlyCountDistinctReturnsFalseForDistinctSum() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.SUM, true)));
+        assertFalse(QueryAnalyzer.hasOnlyCountDistinct(agg));
+    }
+
+    public void testHasOnlyCountDistinctReturnsFalseForMixed() {
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, countDistinctCall));
+        assertFalse(QueryAnalyzer.hasOnlyCountDistinct(agg));
+    }
+
+    public void testHasOnlyCountDistinctReturnsFalseForEmptyAggList() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of());
+        assertFalse(QueryAnalyzer.hasOnlyCountDistinct(agg));
     }
 
     public void testExtractAggKinds() {

@@ -19,6 +19,7 @@ import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.lakehouse.LakehousePlugin;
 import org.opensearch.lakehouse.distributed.merge.AvgDecomposer;
+import org.opensearch.lakehouse.distributed.merge.DistinctExpander;
 import org.opensearch.lakehouse.distributed.merge.MergeStrategy;
 import org.opensearch.lakehouse.distributed.merge.MergeSqlGenerator;
 import org.opensearch.lakehouse.distributed.merge.ResultMerger;
@@ -141,15 +142,19 @@ public class DistributedScanExecutor {
             filePaths.size()
         );
 
-        // Build worker SQL: strip ORDER BY/LIMIT for GROUP BY, decompose AVG into SUM+COUNT
+        // Build worker SQL based on strategy
         String workerSql = sqlQuery;
-        if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY || analysis.strategy == MergeStrategy.GLOBAL_MERGE) {
-            if (AvgDecomposer.hasAvg(analysis)) {
-                workerSql = AvgDecomposer.decomposeWorkerSql(workerSql);
+        if (analysis.strategy == MergeStrategy.DISTINCT_EXPAND) {
+            workerSql = DistinctExpander.rewriteWorkerSql(workerSql);
+        } else {
+            if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY || analysis.strategy == MergeStrategy.GLOBAL_MERGE) {
+                if (AvgDecomposer.hasAvg(analysis)) {
+                    workerSql = AvgDecomposer.decomposeWorkerSql(workerSql);
+                }
             }
-        }
-        if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY) {
-            workerSql = stripOrderByAndLimit(workerSql);
+            if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY) {
+                workerSql = stripOrderByAndLimit(workerSql);
+            }
         }
 
         // Partition files across workers
@@ -179,7 +184,9 @@ public class DistributedScanExecutor {
                         // Read actual column names from the Arrow IPC data (not Calcite field names)
                         List<String> columnNames = queryEngine.readArrowIpcColumnNames(workerIpcData.get(0));
 
-                        String mergeSql = MergeSqlGenerator.generate(analysis, columnNames);
+                        String mergeSql = (analysis.strategy == MergeStrategy.DISTINCT_EXPAND)
+                            ? DistinctExpander.generateMergeSql(columnNames, sqlQuery)
+                            : MergeSqlGenerator.generate(analysis, columnNames);
                         logger.info(
                             "[ScanExecutor] Arrow IPC merge: {} workers, strategy={}, sql={}",
                             workerIpcData.size(), analysis.strategy, mergeSql

@@ -103,7 +103,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
     }
 
     public void testSingleNodeStrategyFallbackExecutesLocally() throws Exception {
-        // 2 eligible nodes but query requires SINGLE_NODE (DISTINCT) → executes locally
+        // 2 eligible nodes but query requires SINGLE_NODE (SUM DISTINCT) → executes locally
         DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{42});
         DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
@@ -112,11 +112,11 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
 
-        // Mock a GroupBy + COUNT(DISTINCT) → SINGLE_NODE (DISTINCT blocks distribution)
-        RelNode relNode = mockGroupByDistinctRelNode();
+        // Mock a GroupBy + SUM(DISTINCT) → SINGLE_NODE (SUM DISTINCT not supported)
+        RelNode relNode = mockGroupBySumDistinctRelNode();
 
         List<Object[]> rows = executeAndWait(
-            executor, relNode, "SELECT col, COUNT(DISTINCT val) FROM t GROUP BY col",
+            executor, relNode, "SELECT col, SUM(DISTINCT val) FROM t GROUP BY col",
             List.of("f1", "f2"), new long[]{100, 200},
             Map.of("localMode", "true"), "t"
         );
@@ -400,6 +400,20 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
                 org.apache.calcite.sql.type.SqlTypeName.BIGINT), null
         );
         when(agg.getAggCallList()).thenReturn(List.of(distinctCall));
+        when(agg.getInputs()).thenReturn(List.of());
+        return agg;
+    }
+
+    @SuppressWarnings("deprecation")
+    private RelNode mockGroupBySumDistinctRelNode() {
+        org.apache.calcite.rel.core.Aggregate agg = mock(org.apache.calcite.rel.core.Aggregate.class);
+        when(agg.getGroupSet()).thenReturn(org.apache.calcite.util.ImmutableBitSet.of(0));
+        org.apache.calcite.rel.core.AggregateCall distinctSumCall = new org.apache.calcite.rel.core.AggregateCall(
+            org.apache.calcite.sql.fun.SqlStdOperatorTable.SUM, true, List.of(),
+            new org.apache.calcite.sql.type.BasicSqlType(org.apache.calcite.rel.type.RelDataTypeSystem.DEFAULT,
+                org.apache.calcite.sql.type.SqlTypeName.BIGINT), null
+        );
+        when(agg.getAggCallList()).thenReturn(List.of(distinctSumCall));
         when(agg.getInputs()).thenReturn(List.of());
         return agg;
     }

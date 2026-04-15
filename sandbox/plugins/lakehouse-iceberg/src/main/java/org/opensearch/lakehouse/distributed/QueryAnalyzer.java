@@ -49,6 +49,9 @@ public final class QueryAnalyzer {
 
             if (hasGroupBy) {
                 if (hasDistinct) {
+                    if (hasOnlyCountDistinct(classifier.aggregate)) {
+                        return buildDistinctExpandResult(classifier, relNode);
+                    }
                     return new AnalysisResult(MergeStrategy.SINGLE_NODE);
                 }
                 // AVG is allowed — decomposed into SUM/COUNT on workers
@@ -56,6 +59,9 @@ public final class QueryAnalyzer {
             }
 
             if (hasDistinct) {
+                if (hasOnlyCountDistinct(classifier.aggregate)) {
+                    return buildDistinctExpandResult(classifier, relNode);
+                }
                 return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
             // Global aggregates (including AVG) — AVG decomposed into SUM/COUNT on workers
@@ -164,6 +170,31 @@ public final class QueryAnalyzer {
         return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, outputAggKinds, sortColumns, sortAsc, limit, isGroupKey);
     }
 
+    /**
+     * Builds a DISTINCT_EXPAND result for pure COUNT(DISTINCT) queries.
+     * The analysis captures sort/limit info so the coordinator can apply ORDER BY + LIMIT.
+     */
+    private static AnalysisResult buildDistinctExpandResult(PlanClassifier classifier, RelNode relNode) {
+        Sort sort = classifier.sort;
+
+        // Extract sort/limit from the plan
+        int[] sortColumns = null;
+        boolean[] sortAsc = null;
+        int limit = 0;
+
+        if (sort != null) {
+            if (!sort.getCollation().getFieldCollations().isEmpty()) {
+                sortColumns = extractSortColumns(sort);
+                sortAsc = extractSortDirections(sort);
+            }
+            if (sort.fetch != null) {
+                limit = extractLimit(sort);
+            }
+        }
+
+        return new AnalysisResult(MergeStrategy.DISTINCT_EXPAND, null, sortColumns, sortAsc, limit, null);
+    }
+
     static class PlanClassifier extends RelVisitor {
         Aggregate aggregate;
         Sort sort;
@@ -207,6 +238,21 @@ public final class QueryAnalyzer {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns true if ALL aggregate calls are COUNT(DISTINCT ...) and nothing else.
+     * Mixed queries (e.g., COUNT(*) + COUNT(DISTINCT x)) return false.
+     */
+    static boolean hasOnlyCountDistinct(Aggregate aggregate) {
+        List<AggregateCall> calls = aggregate.getAggCallList();
+        if (calls.isEmpty()) return false;
+        for (AggregateCall call : calls) {
+            if (!call.isDistinct() || call.getAggregation().getKind() != SqlKind.COUNT) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static SqlKind[] extractAggKinds(Aggregate aggregate) {
