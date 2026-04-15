@@ -483,7 +483,7 @@ pub async fn execute_iceberg_query(
     // Build session — limit partitions to file count to avoid empty partition tasks
     let num_files = object_metas.len();
     let mut config = SessionConfig::new();
-    config.options_mut().execution.target_partitions = num_files.min(4).max(1);
+    config.options_mut().execution.target_partitions = num_files.min(16).max(1);
     config.options_mut().execution.batch_size = 8192;
 
     let state = SessionStateBuilder::new()
