@@ -13,6 +13,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.GroupedActionListener;
 import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
+import org.opensearch.analytics.exec.DataWarehouseScanContext;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
@@ -25,6 +26,7 @@ import org.opensearch.lakehouse.distributed.merge.MergeSqlGenerator;
 import org.opensearch.lakehouse.distributed.merge.MixedDistinctExpander;
 import org.opensearch.lakehouse.distributed.merge.ResultMerger;
 import org.opensearch.lakehouse.distributed.merge.ResultSerializer;
+import org.opensearch.lakehouse.distributed.worker.WorkerCredentialResolver;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryAction;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryExecutor;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryRequest;
@@ -35,6 +37,8 @@ import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -227,9 +231,12 @@ public class DistributedScanExecutor {
     }
 
     /**
-     * Executes the query on the local node asynchronously via {@link WorkerQueryExecutor}
-     * on the {@code lakehouse_worker} thread pool.
+     * Executes the query on the local node asynchronously using the streaming query engine.
+     * Uses {@link DataWarehouseQueryEngine#executeQuery} directly instead of the IPC path
+     * to avoid materializing the entire result as a single byte[] — critical for high-cardinality
+     * GROUP BY queries where the IPC buffer can exceed Java heap capacity.
      */
+    @SuppressWarnings("removal")
     private void executeSingleNodeAsync(
         String sqlQuery,
         List<String> filePaths,
@@ -238,15 +245,16 @@ public class DistributedScanExecutor {
         String tableName,
         ActionListener<Iterable<Object[]>> listener
     ) {
-        WorkerQueryRequest request = new WorkerQueryRequest(sqlQuery, filePaths, fileSizes, storageConfig, tableName);
+        Map<String, String> resolvedConfig = WorkerCredentialResolver.resolve(storageConfig, clusterService);
+        DataWarehouseScanContext scanContext = new DataWarehouseScanContext(
+            tableName, filePaths, fileSizes, sqlQuery, resolvedConfig
+        );
         transportService.getThreadPool().executor(LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL).execute(() -> {
             try {
-                WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
-                if (response.isArrowIpc()) {
-                    listener.onResponse(queryEngine.readArrowIpc(response.getArrowIpcData()));
-                } else {
-                    listener.onResponse(ResultSerializer.toRows(response));
-                }
+                Iterable<Object[]> rows = AccessController.doPrivileged(
+                    (PrivilegedAction<Iterable<Object[]>>) () -> queryEngine.executeQuery(scanContext)
+                );
+                listener.onResponse(rows);
             } catch (Exception e) {
                 listener.onFailure(e);
             }
