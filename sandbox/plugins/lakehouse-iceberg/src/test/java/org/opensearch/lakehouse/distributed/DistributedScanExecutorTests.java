@@ -411,6 +411,50 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         );
     }
 
+    @SuppressWarnings("unchecked")
+    public void testDispatchLocalBatchesReturnsBatchHandle() throws Exception {
+        DiscoveryNode localNode = newNode("local", Map.of());
+        ClusterService clusterService = mockClusterService(List.of(localNode), "local");
+        TransportService transportService = mockTransportServiceWithThreadPool();
+
+        DataWarehouseQueryEngine mockBackend = mock(DataWarehouseQueryEngine.class);
+        when(mockBackend.executeQueryToBatches(any(DataWarehouseScanContext.class))).thenReturn(12345L);
+
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
+
+        FilePartitioner.FileAssignment assignment = new FilePartitioner.FileAssignment(
+            List.of("f1", "f2"), new long[]{100, 200}, 300
+        );
+
+        java.util.concurrent.CompletableFuture<Long> future = executor.dispatchLocalBatches(
+            assignment, "SELECT * FROM t", Map.of("localMode", "true"), "t"
+        );
+
+        long handle = future.get(5, TimeUnit.SECONDS);
+        assertEquals(12345L, handle);
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testDispatchLocalBatchesEmptyAssignment() throws Exception {
+        DiscoveryNode localNode = newNode("local", Map.of());
+        ClusterService clusterService = mockClusterService(List.of(localNode), "local");
+        TransportService transportService = mockTransportServiceWithThreadPool();
+
+        DistributedScanExecutor executor = new DistributedScanExecutor(
+            transportService, clusterService, mock(DataWarehouseQueryEngine.class)
+        );
+
+        FilePartitioner.FileAssignment emptyAssignment = new FilePartitioner.FileAssignment(
+            List.of(), new long[]{}, 0
+        );
+
+        java.util.concurrent.CompletableFuture<Long> future = executor.dispatchLocalBatches(
+            emptyAssignment, "SELECT * FROM t", Map.of(), "t"
+        );
+
+        assertEquals(0L, (long) future.get(5, TimeUnit.SECONDS));
+    }
+
     // --- Helper methods ---
 
     private static DiscoveryNode newNode(String nodeId, Map<String, String> attributes) {

@@ -922,6 +922,203 @@ pub async fn execute_iceberg_query_to_ipc(
     Ok(ipc_bytes)
 }
 
+/// Executes a SQL query against Parquet files and returns results as a batch handle.
+///
+/// Same setup as `execute_iceberg_query_to_ipc` but skips IPC serialization.
+/// Returns a heap-allocated pointer to `(SchemaRef, Vec<RecordBatch>)` as i64.
+/// The caller must eventually pass this handle to `execute_merge_streaming` or
+/// `batch_handle_free` to avoid leaking memory.
+///
+/// This is used by the coordinator when it also acts as a worker — the local
+/// batches are merged with remote IPC results without serialization overhead.
+pub async fn execute_query_to_batches(
+    s3_region: &str,
+    s3_bucket: Option<&str>,
+    s3_access_key_id: Option<&str>,
+    s3_secret_access_key: Option<&str>,
+    s3_session_token: Option<&str>,
+    s3_endpoint: Option<&str>,
+    file_paths: Vec<String>,
+    file_sizes: Vec<i64>,
+    table_name: &str,
+    sql_query: &str,
+    runtime: &DataFusionRuntime,
+    cpu_executor: crate::executor::DedicatedExecutor,
+    io_handle: tokio::runtime::Handle,
+) -> Result<i64, DataFusionError> {
+    use datafusion::datasource::file_format::parquet::ParquetFormat;
+    use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
+    use datafusion::execution::cache::cache_manager::CacheManagerConfig;
+    use datafusion::prelude::SessionContext;
+
+    use std::time::Instant;
+    let t_start = Instant::now();
+
+    let is_local = file_paths.first().map_or(false, |p| p.starts_with("file://"));
+
+    info!(
+        "execute_query_to_batches: region={}, bucket={:?}, files={}, local={}, table={}, sql={}",
+        s3_region, s3_bucket, file_paths.len(), is_local, table_name, sql_query
+    );
+
+    let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+        .with_cache_manager(
+            CacheManagerConfig::default()
+                .with_file_metadata_cache(Some(
+                    runtime.runtime_env.cache_manager.get_file_metadata_cache(),
+                ))
+                .with_files_statistics_cache(
+                    runtime.runtime_env.cache_manager.get_file_statistic_cache(),
+                ),
+        )
+        .build()
+        .map_err(|e| {
+            error!("Failed to build runtime env: {}", e);
+            e
+        })?;
+
+    let store: Arc<dyn ObjectStore>;
+    let file_urls: Vec<String>;
+
+    if is_local {
+        let local_store = Arc::new(object_store::local::LocalFileSystem::new());
+        store = local_store;
+        file_urls = file_paths.clone();
+        let local_url = url::Url::parse("file:///").map_err(|e| {
+            DataFusionError::Execution(format!("Invalid file URL: {}", e))
+        })?;
+        runtime_env.register_object_store(&local_url, store.clone());
+    } else {
+        let bucket = s3_bucket.unwrap_or("unknown");
+        let mut builder = AmazonS3Builder::new()
+            .with_region(s3_region)
+            .with_bucket_name(bucket);
+
+        if let Some(key) = s3_access_key_id {
+            builder = builder.with_access_key_id(key);
+        }
+        if let Some(secret) = s3_secret_access_key {
+            builder = builder.with_secret_access_key(secret);
+        }
+        if let Some(token) = s3_session_token {
+            builder = builder.with_token(token);
+        }
+        if let Some(endpoint) = s3_endpoint {
+            builder = builder.with_endpoint(endpoint);
+        }
+
+        let s3_store = Arc::new(builder.build().map_err(|e| {
+            DataFusionError::Execution(format!("Failed to build S3 object store: {}", e))
+        })?);
+        store = s3_store.clone();
+
+        let store_url = url::Url::parse(&format!("s3://{}/", bucket)).map_err(|e| {
+            DataFusionError::Execution(format!("Invalid S3 URL: {}", e))
+        })?;
+        let cross_rt_store = Arc::new(
+            crate::cross_rt_object_store::CrossRuntimeObjectStore::new(s3_store.clone(), io_handle)
+        );
+        runtime_env.register_object_store(&store_url, cross_rt_store);
+
+        let bucket_prefix = format!("s3://{}/", bucket);
+        file_urls = file_paths.iter().map(|path| {
+            if path.starts_with("s3://") {
+                path.clone()
+            } else {
+                format!("{}{}", bucket_prefix, path)
+            }
+        }).collect();
+    }
+
+    let object_metas: Vec<object_store::ObjectMeta> = file_paths.iter().zip(file_sizes.iter()).map(|(path, &size)| {
+        let key = if let Some(stripped) = path.strip_prefix("file://") {
+            stripped.to_string()
+        } else if let Some(bucket) = s3_bucket {
+            let bucket_prefix = format!("s3://{}/", bucket);
+            if let Some(stripped) = path.strip_prefix(&bucket_prefix) {
+                stripped.to_string()
+            } else if let Some(stripped) = path.strip_prefix("s3://") {
+                if let Some(after_bucket) = stripped.find('/') {
+                    stripped[after_bucket + 1..].to_string()
+                } else {
+                    path.clone()
+                }
+            } else {
+                path.clone()
+            }
+        } else {
+            path.clone()
+        };
+        object_store::ObjectMeta {
+            location: object_store::path::Path::from(key.as_str()),
+            size: size as u64,
+            last_modified: Default::default(),
+            e_tag: None,
+            version: None,
+        }
+    }).collect();
+
+    let num_files = object_metas.len();
+    let mut config = SessionConfig::new();
+    let half_cpus = (num_cpus::get() / 2).max(1);
+    config.options_mut().execution.target_partitions = num_files.min(half_cpus).max(1);
+    config.options_mut().execution.batch_size = 8192;
+
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(Arc::from(runtime_env))
+        .with_default_features()
+        .build();
+
+    let ctx = SessionContext::new_with_state(state);
+
+    let file_format = Arc::new(ParquetFormat::new());
+    use datafusion::datasource::file_format::FileFormat;
+    let resolved_schema = file_format.infer_schema(
+        &ctx.state(),
+        &store,
+        &[object_metas[0].clone()],
+    ).await?;
+
+    let listing_options = ListingOptions::new(file_format)
+        .with_file_extension(".parquet")
+        .with_collect_stat(true);
+
+    let table_config = ListingTableConfig::new_with_multi_paths(
+        file_urls.iter()
+            .map(|u| ListingTableUrl::parse(u))
+            .collect::<Result<Vec<_>, _>>()?
+    )
+        .with_listing_options(listing_options)
+        .with_schema(resolved_schema);
+
+    let provider = Arc::new(ListingTable::try_new(table_config)?);
+    ctx.register_table(table_name, provider)?;
+
+    crate::cross_rt_object_store::reset_s3_counters();
+
+    let dataframe = ctx.sql(sql_query).await?;
+    let plan = dataframe.create_physical_plan().await?;
+
+    let stream = datafusion::physical_plan::execute_stream(plan, ctx.task_ctx())?;
+    let schema = stream.schema();
+
+    // Collect all batches via CrossRtStream (CPU executor pulls batches)
+    let cross_rt_stream = CrossRtStream::new_with_df_error_stream(stream, cpu_executor);
+    let batches: Vec<RecordBatch> = cross_rt_stream.try_collect().await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    eprintln!(
+        "[PERF] execute_query_to_batches: {}ms, {} batches, {} rows",
+        t_start.elapsed().as_millis(), batches.len(), total_rows
+    );
+
+    crate::cross_rt_object_store::dump_s3_counters();
+
+    // Return batch handle — batches stay alive until batch_handle_free or execute_merge_streaming
+    Ok(Box::into_raw(Box::new((schema, batches))) as i64)
+}
+
 /// A PartitionStream backed by in-memory RecordBatches.
 /// Used to create StreamingTable from deserialized Arrow IPC data.
 #[derive(Debug)]
@@ -1042,6 +1239,144 @@ pub async fn execute_from_ipc(
     mimalloc_purge();
 
     Ok(ipc)
+}
+
+/// Executes SQL against a mix of local batches and remote Arrow IPC data, returning
+/// a streaming result (MemoryTrackingStream pointer).
+///
+/// If `local_batch_handle` is non-zero, it is consumed (zero-copy move) — the handle
+/// becomes invalid after this call. Remote IPC bytes are deserialized as usual.
+/// All batches are registered as a single StreamingTable named "input", the merge SQL
+/// runs against it, and the result is returned as a stream pointer for stream_next/
+/// stream_close.
+///
+/// This is used by the coordinator-as-worker path: the coordinator runs its own
+/// partition locally (producing a batch handle), then merges with remote worker
+/// IPC results via this function — avoiding a round-trip through IPC serialization
+/// for local data.
+///
+/// # Safety
+/// `local_batch_handle` must be 0 or a valid pointer from `execute_query_to_batches`.
+pub async fn execute_merge_streaming(
+    local_batch_handle: i64,
+    ipc_batches: Vec<&[u8]>,
+    sql: &str,
+    runtime: &DataFusionRuntime,
+    cpu_executor: crate::executor::DedicatedExecutor,
+) -> Result<i64, DataFusionError> {
+    use datafusion::catalog::streaming::StreamingTable;
+    use datafusion::prelude::SessionContext;
+
+    use std::time::Instant;
+    let t_start = Instant::now();
+
+    let mut all_batches = Vec::new();
+    let mut schema: Option<SchemaRef> = None;
+
+    // Consume local batch handle (zero-copy move) if present
+    if local_batch_handle != 0 {
+        let (local_schema, local_batches) = unsafe {
+            *Box::from_raw(local_batch_handle as *mut (SchemaRef, Vec<RecordBatch>))
+        };
+        eprintln!(
+            "[PERF] execute_merge_streaming: local → {} batches",
+            local_batches.len()
+        );
+        schema = Some(local_schema);
+        all_batches.extend(local_batches);
+    }
+
+    // Deserialize remote IPC bytes into RecordBatches
+    for (i, ipc_bytes) in ipc_batches.iter().enumerate() {
+        let (batch_schema, batches) = ipc_to_batches(ipc_bytes)?;
+        if schema.is_none() {
+            schema = Some(batch_schema);
+        }
+        eprintln!(
+            "[PERF] execute_merge_streaming: worker {} → {} batches",
+            i, batches.len()
+        );
+        all_batches.extend(batches);
+    }
+
+    let schema = schema.ok_or_else(|| {
+        DataFusionError::Execution("No data from local batches or remote workers".to_string())
+    })?;
+
+    info!(
+        "execute_merge_streaming: local={}, remote={}, total batches={}, sql={}",
+        local_batch_handle != 0, ipc_batches.len(), all_batches.len(), sql
+    );
+
+    // Create a StreamingTable from the collected batches via PartitionStream
+    let partition = Arc::new(MemoryPartitionStream {
+        schema: schema.clone(),
+        batches: all_batches,
+    }) as Arc<dyn datafusion::physical_plan::streaming::PartitionStream>;
+
+    let streaming_table = StreamingTable::try_new(
+        schema.clone(),
+        vec![partition],
+    )?;
+
+    // Build session and register the streaming table as "input"
+    let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+        .build()
+        .map_err(|e| {
+            error!("Failed to build runtime env for merge: {}", e);
+            e
+        })?;
+
+    let config = SessionConfig::new();
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(Arc::from(runtime_env))
+        .with_default_features()
+        .build();
+
+    let ctx = SessionContext::new_with_state(state);
+    ctx.register_table("input", Arc::new(streaming_table))?;
+
+    // Execute the merge SQL
+    let dataframe = ctx.sql(sql).await?;
+    let plan = dataframe.create_physical_plan().await?;
+
+    let memory_pool = runtime.runtime_env.memory_pool.clone();
+    let pool_reserved = memory_pool.reserved();
+    eprintln!(
+        "[PERF] execute_merge_streaming: memory pool {} MB reserved before execution",
+        pool_reserved / (1024 * 1024)
+    );
+
+    let stream = datafusion::physical_plan::execute_stream(plan, ctx.task_ctx())?;
+    eprintln!(
+        "[PERF] execute_merge_streaming setup: {}ms",
+        t_start.elapsed().as_millis()
+    );
+
+    // CrossRtStream + MemoryTrackingStream (same pattern as execute_iceberg_query)
+    let cross_rt_stream = CrossRtStream::new_with_df_error_stream(stream, cpu_executor);
+    let wrapped = MemoryTrackingStream {
+        inner: RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream),
+        memory_pool,
+        peak_memory: std::sync::atomic::AtomicUsize::new(pool_reserved),
+    };
+
+    Ok(Box::into_raw(Box::new(wrapped)) as i64)
+}
+
+/// Frees a batch handle returned by `execute_query_to_batches`.
+///
+/// Safe to call with 0 (no-op). Used for error cleanup when
+/// `execute_merge_streaming` is never called after obtaining a batch handle.
+///
+/// # Safety
+/// `handle` must be 0 or a valid pointer from `execute_query_to_batches`.
+pub unsafe fn batch_handle_free(handle: i64) {
+    if handle != 0 {
+        let _ = Box::from_raw(handle as *mut (SchemaRef, Vec<RecordBatch>));
+    }
+    mimalloc_purge();
 }
 
 /// Converts SQL to Substrait plan bytes (test only).

@@ -359,4 +359,188 @@ public class DatafusionWarehouseQueryEngine implements DataWarehouseQueryEngine 
         logger.info("[PERF] executeMerge total: {}ms", t2 - t0);
         return result;
     }
+
+    @Override
+    public long executeQueryToBatches(DataWarehouseScanContext scanContext) {
+        long t0 = System.currentTimeMillis();
+        DataFusionService dfService = DataFusionPlugin.ensureSharedService();
+
+        Map<String, String> config = scanContext.getStorageConfig();
+        boolean localMode = "true".equals(config.get("localMode"));
+        String s3Region = localMode ? "" : config.getOrDefault("s3Region", "us-east-1");
+        String s3Bucket = config.get("s3Bucket");
+        String s3AccessKeyId = config.get("s3AccessKeyId");
+        String s3SecretAccessKey = config.get("s3SecretAccessKey");
+        String s3SessionToken = config.get("s3SessionToken");
+        String s3Endpoint = config.get("s3Endpoint");
+
+        String[] filePaths = scanContext.getDataFilePaths().toArray(new String[0]);
+        long[] fileSizes = scanContext.getFileSizes();
+        String tableName = scanContext.getTableName();
+        String sqlQuery = scanContext.getSqlQuery();
+
+        if (filePaths.length == 0) {
+            logger.info("[DatafusionQueryEngine] No data files for table [{}] — returning 0 batch handle", tableName);
+            return 0;
+        }
+
+        logger.info(
+            "[DatafusionQueryEngine] executeQueryToBatches: table={}, files={}, sql={}",
+            tableName, filePaths.length, sqlQuery
+        );
+
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        long runtimePtr = runtimeHandle.get();
+        CompletableFuture<Long> future = new CompletableFuture<>();
+        try {
+            NativeBridge.executeQueryToBatchesAsync(
+                s3Region,
+                s3Bucket,
+                s3AccessKeyId,
+                s3SecretAccessKey,
+                s3SessionToken,
+                s3Endpoint,
+                filePaths,
+                fileSizes,
+                tableName,
+                sqlQuery,
+                runtimePtr,
+                new ActionListener<>() {
+                    @Override
+                    public void onResponse(Long batchHandle) {
+                        future.complete(batchHandle);
+                    }
+
+                    @Override
+                    public void onFailure(Exception e) {
+                        future.completeExceptionally(e);
+                    }
+                }
+            );
+        } catch (UnsatisfiedLinkError e) {
+            logger.warn(
+                "[DatafusionQueryEngine] executeQueryToBatchesAsync not available in native library: {}", e.getMessage()
+            );
+            throw new UnsupportedOperationException(
+                "Batch handle execution not available — native library missing executeQueryToBatchesAsync. "
+                    + "Table: " + tableName + ", files: " + filePaths.length + ", sql: " + sqlQuery,
+                e
+            );
+        }
+
+        long batchHandle;
+        try {
+            batchHandle = future.get(15, TimeUnit.MINUTES);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new RuntimeException(
+                "Batch handle execution timed out after 15 minutes — table: " + tableName + ", files: " + filePaths.length, e
+            );
+        } catch (ExecutionException e) {
+            logger.error("[DatafusionQueryEngine] Batch handle execution failed: {}", e.getCause().getMessage(), e.getCause());
+            throw new RuntimeException("Batch handle execution failed via DataFusion", e.getCause());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Batch handle execution interrupted", e);
+        }
+
+        long t1 = System.currentTimeMillis();
+        logger.info("[PERF] JNI execute_query_to_batches: {}ms (handle=0x{})", t1 - t0, Long.toHexString(batchHandle));
+        return batchHandle;
+    }
+
+    @Override
+    public Iterable<Object[]> executeMergeStreaming(long localBatchHandle, List<byte[]> remoteArrowIpcData, String mergeSql) {
+        long t0 = System.currentTimeMillis();
+        DataFusionService dfService = DataFusionPlugin.ensureSharedService();
+
+        logger.info(
+            "[DatafusionQueryEngine] executeMergeStreaming: localHandle=0x{}, remoteWorkers={}, sql={}",
+            Long.toHexString(localBatchHandle), remoteArrowIpcData.size(), mergeSql
+        );
+
+        NativeRuntimeHandle runtimeHandle = dfService.getNativeRuntime();
+        long runtimePtr = runtimeHandle.get();
+        CompletableFuture<Long> future = new CompletableFuture<>();
+        try {
+            NativeBridge.executeMergeStreamingAsync(
+                localBatchHandle,
+                remoteArrowIpcData,
+                mergeSql,
+                runtimePtr,
+                new ActionListener<>() {
+                    @Override
+                    public void onResponse(Long streamPtr) {
+                        future.complete(streamPtr);
+                    }
+
+                    @Override
+                    public void onFailure(Exception e) {
+                        future.completeExceptionally(e);
+                    }
+                }
+            );
+        } catch (UnsatisfiedLinkError e) {
+            // If batch handle was allocated, free it on error
+            if (localBatchHandle != 0) {
+                try {
+                    NativeBridge.batchHandleFree(localBatchHandle);
+                } catch (Exception ignored) {}
+            }
+            throw new UnsupportedOperationException("Streaming merge not available", e);
+        }
+
+        long streamPtr;
+        try {
+            streamPtr = future.get(15, TimeUnit.MINUTES);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new RuntimeException("Streaming merge timed out after 15 minutes", e);
+        } catch (ExecutionException e) {
+            throw new RuntimeException("Streaming merge failed", e.getCause());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Streaming merge interrupted", e);
+        }
+
+        long t1 = System.currentTimeMillis();
+        logger.info("[PERF] executeMergeStreaming native: {}ms", t1 - t0);
+
+        // Stream results back using the same pattern as executeQuery
+        StreamHandle streamHandle = new StreamHandle(streamPtr, runtimeHandle);
+        BufferAllocator allocator = dfService.newChildAllocator();
+        DatafusionResultStream resultStream = new DatafusionResultStream(streamHandle, allocator);
+
+        List<Object[]> rows = new ArrayList<>();
+        try {
+            Iterator<EngineResultBatch> batchIterator = resultStream.iterator();
+            while (batchIterator.hasNext()) {
+                EngineResultBatch batch = batchIterator.next();
+                List<String> fieldNames = batch.getFieldNames();
+                for (int row = 0; row < batch.getRowCount(); row++) {
+                    Object[] rowValues = new Object[fieldNames.size()];
+                    for (int col = 0; col < fieldNames.size(); col++) {
+                        Object val = batch.getFieldValue(fieldNames.get(col), row);
+                        if (val instanceof org.apache.arrow.vector.util.Text) {
+                            val = val.toString();
+                        }
+                        rowValues[col] = val;
+                    }
+                    rows.add(rowValues);
+                }
+            }
+        } finally {
+            resultStream.close();
+        }
+        long t2 = System.currentTimeMillis();
+        logger.info("[PERF] executeMergeStreaming total: {}ms ({} rows)", t2 - t0, rows.size());
+        return rows;
+    }
+
+    @Override
+    public void freeBatchHandle(long batchHandle) {
+        if (batchHandle != 0) {
+            NativeBridge.batchHandleFree(batchHandle);
+        }
+    }
 }

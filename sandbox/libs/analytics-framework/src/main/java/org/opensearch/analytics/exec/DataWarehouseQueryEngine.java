@@ -75,4 +75,41 @@ public interface DataWarehouseQueryEngine {
     default List<String> readArrowIpcColumnNames(byte[] arrowIpcData) {
         throw new UnsupportedOperationException("Arrow IPC column name reading not supported by this backend");
     }
+
+    /**
+     * Executes a SQL query and returns an opaque batch handle (Rust pointer)
+     * instead of Arrow IPC bytes. Used by the coordinator's local worker
+     * to keep RecordBatches in native memory without IPC serialization.
+     *
+     * @param scanContext the scan context containing SQL, file paths, and storage config
+     * @return opaque batch handle (native pointer) — caller must call freeBatchHandle or pass to executeMergeStreaming
+     * @throws UnsupportedOperationException if the backend does not support batch handles
+     */
+    default long executeQueryToBatches(DataWarehouseScanContext scanContext) {
+        throw new UnsupportedOperationException("Batch handle execution not supported by this backend");
+    }
+
+    /**
+     * Executes a merge SQL query using a local batch handle and remote Arrow IPC data,
+     * returning results via streaming (no IPC round-trip for the merge result).
+     *
+     * @param localBatchHandle opaque batch handle from executeQueryToBatches (0 if no local data)
+     * @param remoteArrowIpcData list of Arrow IPC bytes from remote workers
+     * @param mergeSql the SQL query to execute over the combined data
+     * @return merged result rows streamed from native memory
+     * @throws UnsupportedOperationException if the backend does not support streaming merge
+     */
+    default Iterable<Object[]> executeMergeStreaming(long localBatchHandle, List<byte[]> remoteArrowIpcData, String mergeSql) {
+        throw new UnsupportedOperationException("Streaming merge execution not supported by this backend");
+    }
+
+    /**
+     * Frees a batch handle returned by executeQueryToBatches.
+     * Must be called if the handle is not consumed by executeMergeStreaming.
+     *
+     * @param batchHandle the opaque batch handle to free (0 is a no-op)
+     */
+    default void freeBatchHandle(long batchHandle) {
+        // no-op by default
+    }
 }
