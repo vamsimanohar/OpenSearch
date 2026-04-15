@@ -469,13 +469,20 @@ public final class NativeBridge {
                 runtimePtr
             );
 
-            // Extract IPC bytes from the result — these are simple accessors, not #[ffm_safe]
-            long dataPtr = (long) IPC_RESULT_DATA_PTR.invokeExact(resultPtr);
-            long dataLen = (long) IPC_RESULT_DATA_LEN.invokeExact(resultPtr);
-            byte[] ipcBytes = MemorySegment.ofAddress(dataPtr).reinterpret(dataLen).toArray(ValueLayout.JAVA_BYTE);
-
-            // Free the native IpcResult
-            NativeCall.invokeVoid(FREE_IPC_RESULT, resultPtr);
+            byte[] ipcBytes;
+            try {
+                long dataPtr = (long) IPC_RESULT_DATA_PTR.invokeExact(resultPtr);
+                long dataLen = (long) IPC_RESULT_DATA_LEN.invokeExact(resultPtr);
+                if (dataLen > Integer.MAX_VALUE) {
+                    throw new IllegalStateException(
+                        "Arrow IPC result too large for byte[] transport (" + dataLen + " bytes). "
+                            + "Query produces too much data for distributed execution."
+                    );
+                }
+                ipcBytes = MemorySegment.ofAddress(dataPtr).reinterpret(dataLen).toArray(ValueLayout.JAVA_BYTE);
+            } finally {
+                NativeCall.invokeVoid(FREE_IPC_RESULT, resultPtr);
+            }
 
             listener.onResponse(ipcBytes);
         } catch (Throwable t) {
@@ -534,13 +541,19 @@ public final class NativeBridge {
                 runtimePtr
             );
 
-            // Extract IPC bytes from the result — these are simple accessors, not #[ffm_safe]
-            long dataPtr = (long) IPC_RESULT_DATA_PTR.invokeExact(resultPtr);
-            long dataLen = (long) IPC_RESULT_DATA_LEN.invokeExact(resultPtr);
-            byte[] ipcBytes = MemorySegment.ofAddress(dataPtr).reinterpret(dataLen).toArray(ValueLayout.JAVA_BYTE);
-
-            // Free the native IpcResult
-            NativeCall.invokeVoid(FREE_IPC_RESULT, resultPtr);
+            byte[] ipcBytes;
+            try {
+                long dataPtr = (long) IPC_RESULT_DATA_PTR.invokeExact(resultPtr);
+                long dataLen = (long) IPC_RESULT_DATA_LEN.invokeExact(resultPtr);
+                if (dataLen > Integer.MAX_VALUE) {
+                    throw new IllegalStateException(
+                        "Arrow IPC merge result too large for byte[] (" + dataLen + " bytes)."
+                    );
+                }
+                ipcBytes = MemorySegment.ofAddress(dataPtr).reinterpret(dataLen).toArray(ValueLayout.JAVA_BYTE);
+            } finally {
+                NativeCall.invokeVoid(FREE_IPC_RESULT, resultPtr);
+            }
 
             listener.onResponse(ipcBytes);
         } catch (Throwable t) {

@@ -214,7 +214,15 @@ public class DistributedScanExecutor {
                     listener.onFailure(e);
                 }
             },
-            listener::onFailure
+            distributedFailure -> {
+                // Fall back to single-node when distributed execution fails
+                // (e.g., Arrow IPC data too large for byte[] transport on high-cardinality queries)
+                logger.warn(
+                    "[ScanExecutor] Distributed execution failed (strategy={}), falling back to single-node: {}",
+                    analysis.strategy, distributedFailure.getMessage()
+                );
+                executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
+            }
         ));
     }
 

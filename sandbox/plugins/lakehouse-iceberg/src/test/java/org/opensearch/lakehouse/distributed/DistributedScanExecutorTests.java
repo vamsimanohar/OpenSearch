@@ -188,6 +188,15 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         );
     }
 
+    public void testStripLimitWithOffsetPattern() {
+        assertEquals(
+            "SELECT * FROM \"hits\" GROUP BY \"a\"",
+            DistributedScanExecutor.stripOrderByAndLimit(
+                "SELECT * FROM \"hits\" GROUP BY \"a\" LIMIT 10 OFFSET 5"
+            )
+        );
+    }
+
     public void testStripLimitWithoutOrderBy() {
         assertEquals(
             "SELECT \"userid\", \"searchphrase\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"userid\", \"searchphrase\"",
@@ -328,6 +337,46 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             any(org.opensearch.transport.TransportRequest.class),
             any(org.opensearch.transport.TransportResponseHandler.class)
         );
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testDistributedFailureFallsBackToSingleNode() throws Exception {
+        // When distributed dispatch fails, the executor should retry on single node
+        DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{99});
+        DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
+        DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
+        ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
+        TransportService transportService = mockTransportServiceWithThreadPool();
+
+        // Make remote dispatch fail with an error simulating oversized IPC
+        org.mockito.Mockito.doAnswer(invocation -> {
+            org.opensearch.transport.TransportResponseHandler<WorkerQueryResponse> handler =
+                (org.opensearch.transport.TransportResponseHandler<WorkerQueryResponse>) invocation.getArguments()[3];
+            handler.handleException(new org.opensearch.transport.RemoteTransportException(
+                "test", new IllegalStateException("Arrow IPC result too large for byte[] transport")
+            ));
+            return null;
+        }).when(transportService).sendRequest(
+            any(DiscoveryNode.class),
+            any(String.class),
+            any(org.opensearch.transport.TransportRequest.class),
+            any(org.opensearch.transport.TransportResponseHandler.class)
+        );
+
+        // Use a simple CONCAT RelNode (requires 2+ workers for distributed path)
+        RelNode relNode = mockSimpleRelNode();
+
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
+
+        List<Object[]> rows = executeAndWait(
+            executor, relNode, "SELECT COUNT(*) FROM t",
+            List.of("f1", "f2"), new long[]{100, 200},
+            Map.of("localMode", "true"), "t"
+        );
+
+        // Should have gotten results from single-node fallback
+        assertEquals(1, rows.size());
+        assertEquals(99, rows.get(0)[0]);
     }
 
     // --- Helper methods ---
