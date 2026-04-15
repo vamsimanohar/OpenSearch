@@ -143,12 +143,15 @@ public class DistributedScanExecutor {
         // Exclude coordinator from workers to avoid memory contention:
         // coordinator must hold Java heap for remote IPC + merge, so it should
         // not also run a DataFusion worker (which needs pool + IPC buffer memory).
+        // Also exclude disconnected workers (e.g., crashed from previous heavy queries)
+        // to avoid wasting time on doomed transport attempts.
         String localNodeId = clusterService.state().nodes().getLocalNodeId();
         List<DiscoveryNode> remoteWorkers = workers.stream()
             .filter(n -> !n.getId().equals(localNodeId))
+            .filter(n -> transportService.nodeConnected(n))
             .toList();
         if (remoteWorkers.isEmpty()) {
-            // All workers are local — fall back to single-node
+            logger.debug("[ScanExecutor] No connected remote workers, executing locally");
             executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
             return;
         }

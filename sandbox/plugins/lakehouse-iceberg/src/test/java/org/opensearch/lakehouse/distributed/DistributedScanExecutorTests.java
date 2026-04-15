@@ -379,6 +379,38 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         assertEquals(99, rows.get(0)[0]);
     }
 
+    @SuppressWarnings("unchecked")
+    public void testDisconnectedWorkersFallBackToSingleNode() throws Exception {
+        // When all remote workers are disconnected, should fall back to single-node immediately
+        DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{42});
+        DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
+        DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
+        ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
+        TransportService transportService = mockTransportServiceWithThreadPool();
+
+        // Mark remote node as disconnected
+        when(transportService.nodeConnected(node2)).thenReturn(false);
+
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
+        RelNode relNode = mockSimpleRelNode();
+
+        List<Object[]> rows = executeAndWait(
+            executor, relNode, "SELECT COUNT(*) FROM t",
+            List.of("f1", "f2"), new long[]{100, 200},
+            Map.of("localMode", "true"), "t"
+        );
+
+        // Should have gotten results from single-node fallback (no transport dispatch attempted)
+        assertEquals(1, rows.size());
+        assertEquals(42, rows.get(0)[0]);
+        org.mockito.Mockito.verify(transportService, org.mockito.Mockito.never()).sendRequest(
+            any(DiscoveryNode.class),
+            any(String.class),
+            any(org.opensearch.transport.TransportRequest.class),
+            any(org.opensearch.transport.TransportResponseHandler.class)
+        );
+    }
+
     // --- Helper methods ---
 
     private static DiscoveryNode newNode(String nodeId, Map<String, String> attributes) {
@@ -430,6 +462,8 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         };
         when(transportService.getThreadPool()).thenReturn(threadPool);
         when(threadPool.executor(org.opensearch.lakehouse.LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL)).thenReturn(directExecutor);
+        // All nodes are considered connected by default (tests can override)
+        when(transportService.nodeConnected(any(DiscoveryNode.class))).thenReturn(true);
         return transportService;
     }
 
