@@ -132,9 +132,9 @@ load_queries() {
     QUERIES+=("SELECT watchid, clientip, COUNT(*) AS c, SUM(isrefresh), AVG(resolutionwidth) FROM __TABLE__ WHERE searchphrase <> '' GROUP BY watchid, clientip ORDER BY c DESC LIMIT 10")
     # Q33
     QUERIES+=("SELECT watchid, clientip, COUNT(*) AS c, SUM(isrefresh), AVG(resolutionwidth) FROM __TABLE__ GROUP BY watchid, clientip ORDER BY c DESC LIMIT 10")
-    # Q34  (expected: TIMEOUT on 32GB nodes -- GROUP BY url has ~100M unique values)
+    # Q34  (GROUP BY url ~100M unique values — needs unlimited DF pool + 4GB JVM on 32GB nodes)
     QUERIES+=("SELECT url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
-    # Q35  (expected: TIMEOUT on 32GB nodes -- same as Q34)
+    # Q35  (same as Q34)
     QUERIES+=("SELECT 1 AS \"one\", url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
     # Q36
     QUERIES+=("SELECT clientip, clientip - 1, clientip - 2, clientip - 3, COUNT(*) AS c FROM __TABLE__ GROUP BY clientip, clientip - 1, clientip - 2, clientip - 3 ORDER BY c DESC LIMIT 10")

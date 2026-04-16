@@ -23,6 +23,9 @@ import org.opensearch.analytics.backend.SearchExecEngine;
  */
 public interface SearchExecEngineProvider {
 
+    /** Unique backend name (e.g., "datafusion"). */
+    String name();
+
     /**
      * Creates a search execution engine bound to the given execution context.
      * The context carries the reader snapshot and task metadata.

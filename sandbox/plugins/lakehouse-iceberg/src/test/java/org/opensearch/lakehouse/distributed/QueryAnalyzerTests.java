@@ -225,6 +225,33 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(0, QueryAnalyzer.extractLimit(sort));
     }
 
+    public void testExtractSortColumnNames() {
+        Sort sort = makeSort(true, true);
+        String[] names = QueryAnalyzer.extractSortColumnNames(sort);
+        assertEquals(1, names.length);
+        assertEquals("col0", names[0]);
+    }
+
+    public void testExtractSortColumnNamesWithMultipleFields() {
+        Sort sort = makeSortWithFieldNames(List.of("searchphrase", "eventtime"), 1, true);
+        String[] names = QueryAnalyzer.extractSortColumnNames(sort);
+        assertEquals(1, names.length);
+        assertEquals("eventtime", names[0]);
+    }
+
+    public void testAnalyzeDetailedTopKMergeIncludesSortColumnNames() {
+        Sort sort = makeSortWithFieldNames(List.of("searchphrase", "eventtime"), 1, true);
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(sort);
+
+        assertEquals(MergeStrategy.TOPK_MERGE, result.strategy);
+        assertNotNull(result.sortColumnNames);
+        assertEquals(1, result.sortColumnNames.length);
+        assertEquals("eventtime", result.sortColumnNames[0]);
+        // outputColumnCount comes from relNode (Sort) row type = input row type = 2 fields
+        assertEquals(2, result.outputColumnCount);
+    }
+
     // --- Helper methods ---
 
     private Aggregate mockAggregate(ImmutableBitSet groupSet, List<AggregateCall> aggCalls) {
@@ -259,6 +286,8 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
         RelNode input = mockSimpleNode();
         RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldNames()).thenReturn(List.of("col0"));
+        when(rowType.getFieldCount()).thenReturn(1);
         when(input.getRowType()).thenReturn(rowType);
 
         return new StubSort(cluster, traitSet, input, collation, fetchNode);
@@ -288,6 +317,11 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
     private RelNode mockNodeWithInput(RelNode input) {
         RelNode node = mock(RelNode.class);
         when(node.getInputs()).thenReturn(List.of(input));
+        // Set up a default row type so analyzeDetailed can call getRowType().getFieldCount()
+        RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldNames()).thenReturn(List.of("col0"));
+        when(rowType.getFieldCount()).thenReturn(1);
+        when(node.getRowType()).thenReturn(rowType);
         // RelVisitor uses childrenAccept(), not getInputs(), for traversal
         doAnswer(invocation -> {
             org.apache.calcite.rel.RelVisitor visitor = invocation.getArgument(0);
@@ -310,8 +344,31 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
         RelNode input = mockSimpleNode();
         RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldNames()).thenReturn(List.of("col0"));
+        when(rowType.getFieldCount()).thenReturn(1);
         when(input.getRowType()).thenReturn(rowType);
 
         return new StubSort(cluster, traitSet, input, collation, fetchLiteral);
+    }
+
+    /**
+     * Creates a Sort with two fields where the collation references a field
+     * that may not be in the output (simulates ORDER BY on non-SELECT column).
+     */
+    private Sort makeSortWithFieldNames(List<String> fieldNames, int sortFieldIndex, boolean hasFetch) {
+        RelFieldCollation fieldCollation = new RelFieldCollation(sortFieldIndex, RelFieldCollation.Direction.ASCENDING);
+        RelCollation collation = RelCollations.of(fieldCollation);
+
+        RexNode fetchNode = hasFetch ? mock(RexNode.class) : null;
+
+        RelOptCluster cluster = mock(RelOptCluster.class);
+        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
+        RelNode input = mockSimpleNode();
+        RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldNames()).thenReturn(fieldNames);
+        when(rowType.getFieldCount()).thenReturn(fieldNames.size());
+        when(input.getRowType()).thenReturn(rowType);
+
+        return new StubSort(cluster, traitSet, input, collation, fetchNode);
     }
 }

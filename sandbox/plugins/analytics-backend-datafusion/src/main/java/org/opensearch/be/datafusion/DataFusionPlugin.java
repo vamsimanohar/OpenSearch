@@ -38,6 +38,7 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -246,26 +247,24 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
     }
 
     @Override
-    public SearchExecEngineProvider getSearchExecEngineProvider() {
-        return ctx -> {
-            DatafusionReader dfReader = null;
-            List<DataFormat> formats = getSupportedFormats();
-            if (formats != null) {
-                for (DataFormat format : formats) {
-                    dfReader = ctx.getReader().getReader(format, DatafusionReader.class);
-                    if (dfReader != null) {
-                        break;
-                    }
+    public SearchExecEngine<ExecutionContext, EngineResultStream> createSearchExecEngine(ExecutionContext ctx) {
+        DatafusionReader dfReader = null;
+        List<DataFormat> formats = getSupportedFormats();
+        if (formats != null) {
+            for (DataFormat format : formats) {
+                dfReader = ctx.getReader().getReader(format, DatafusionReader.class);
+                if (dfReader != null) {
+                    break;
                 }
             }
-            if (dfReader == null) {
-                throw new IllegalStateException("No DatafusionReader available in the acquired reader");
-            }
-            DatafusionContext context = new DatafusionContext(ctx.getTask(), dfReader, sharedDataFusionService.getNativeRuntime());
-            DatafusionSearchExecEngine engine = new DatafusionSearchExecEngine(context, sharedDataFusionService::newChildAllocator);
-            engine.prepare(ctx);
-            return engine;
-        };
+        }
+        if (dfReader == null) {
+            throw new IllegalStateException("No DatafusionReader available in the acquired reader");
+        }
+        DatafusionContext context = new DatafusionContext(ctx.getTask(), dfReader, sharedDataFusionService.getNativeRuntime());
+        DatafusionSearchExecEngine engine = new DatafusionSearchExecEngine(context, sharedDataFusionService::newChildAllocator);
+        engine.prepare(ctx);
+        return engine;
     }
 
     @Override

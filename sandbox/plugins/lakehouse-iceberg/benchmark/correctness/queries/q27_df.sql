@@ -1,1 +1,1 @@
-SELECT "SearchPhrase" FROM hits WHERE "SearchPhrase" <> '' ORDER BY "EventTime", "SearchPhrase" LIMIT 10;
+SELECT searchphrase FROM hits WHERE searchphrase <> '' ORDER BY eventtime, searchphrase LIMIT 10;

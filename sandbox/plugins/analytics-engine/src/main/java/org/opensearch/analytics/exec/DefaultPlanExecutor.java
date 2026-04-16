@@ -82,10 +82,10 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
         try (var dataFormatAwareReader = indexReaderProvider.acquireReader()) {
             ExecutionContext ctx = new ExecutionContext(tableName, task, dataFormatAwareReader.get());
             try (
-                SearchExecEngine<ExecutionContext, EngineResultStream> engine = backendPlugin.getSearchExecEngineProvider()
+                SearchExecEngine<ExecutionContext, EngineResultStream> engine = provider
                     .createSearchExecEngine(ctx)
             ) {
-                logger.info("[DefaultPlanExecutor] Executing via [{}]", backendPlugin.name());
+                logger.info("[DefaultPlanExecutor] Executing via [{}]", provider.name());
                 try (EngineResultStream resultStream = engine.execute(ctx)) {
                     Iterator<EngineResultBatch> batchIterator = resultStream.iterator();
                     while (batchIterator.hasNext()) {
@@ -102,7 +102,7 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
                 }
             }
         } catch (Exception e) {
-            throw new RuntimeException("Execution failed for [" + backendPlugin.name() + "]", e);
+            throw new RuntimeException("Execution failed for [" + provider.name() + "]", e);
         }
         return rows;
     }

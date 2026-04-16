@@ -8,8 +8,6 @@
 
 package org.opensearch.analytics.spi;
 
-import org.opensearch.analytics.exec.ExternalScanContext;
-
 /**
  * SPI extension point for backend query engine plugins.
  *
@@ -60,15 +58,4 @@ public interface AnalyticsSearchBackendPlugin {
         throw new UnsupportedOperationException("getFragmentConvertor not implemented for [" + name() + "]");
     }
 
-    /**
-     * Executes a query against remote data files using the native engine.
-     * The scan context contains the SQL query, file paths, and storage config.
-     *
-     * @param scanContext the resolved scan context from an external table plugin
-     * @return result rows
-     * @throws UnsupportedOperationException if this backend does not support remote execution
-     */
-    default Iterable<Object[]> executeRemoteQuery(ExternalScanContext scanContext) {
-        throw new UnsupportedOperationException(name() + " does not support remote query execution");
-    }
 }

@@ -449,15 +449,10 @@ public class DefaultPlanExecutorTests extends OpenSearchTestCase {
         }
 
         @Override
-        public SearchExecEngineProvider getSearchExecEngineProvider() {
-            return new SearchExecEngineProvider() {
-                @Override
-                public SearchExecEngine<ExecutionContext, EngineResultStream> createSearchExecEngine(ExecutionContext ctx) {
-                    Object reader = ctx.getReader().reader(format);
-                    long rows = reader instanceof Long ? (Long) reader : 0L;
-                    return new MockSearchExecEngine(rows);
-                }
-            };
+        public SearchExecEngine<ExecutionContext, EngineResultStream> createSearchExecEngine(ExecutionContext ctx) {
+            Object reader = ctx.getReader().reader(format);
+            long rows = reader instanceof Long ? (Long) reader : 0L;
+            return new MockSearchExecEngine(rows);
         }
     }
 }

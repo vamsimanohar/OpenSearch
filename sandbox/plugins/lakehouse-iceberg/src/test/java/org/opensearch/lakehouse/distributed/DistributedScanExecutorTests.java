@@ -271,6 +271,60 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         );
     }
 
+    // --- TOPK_MERGE SQL rewriting tests ---
+
+    public void testAddColumnsToSelectSingleColumn() {
+        String sql = "SELECT \"searchphrase\" FROM \"hits\" WHERE \"searchphrase\" <> '' ORDER BY \"eventtime\" LIMIT 10";
+        String result = DistributedScanExecutor.addColumnsToSelect(sql, List.of("eventtime"));
+        assertEquals(
+            "SELECT \"searchphrase\", \"eventtime\" FROM \"hits\" WHERE \"searchphrase\" <> '' ORDER BY \"eventtime\" LIMIT 10",
+            result
+        );
+    }
+
+    public void testAddColumnsToSelectMultiLineFromOnNewLine() {
+        // Calcite generates multi-line SQL with FROM on a new line
+        String sql = "SELECT \"searchphrase\"\nFROM \"hits_s3\"\nWHERE \"searchphrase\" <> ''\nORDER BY \"eventtime\"\nLIMIT 10";
+        String result = DistributedScanExecutor.addColumnsToSelect(sql, List.of("eventtime"));
+        assertEquals(
+            "SELECT \"searchphrase\", \"eventtime\"\nFROM \"hits_s3\"\nWHERE \"searchphrase\" <> ''\nORDER BY \"eventtime\"\nLIMIT 10",
+            result
+        );
+    }
+
+    public void testAddColumnsToSelectMultipleColumns() {
+        String sql = "SELECT \"a\" FROM \"t\" ORDER BY \"b\", \"c\" LIMIT 5";
+        String result = DistributedScanExecutor.addColumnsToSelect(sql, List.of("b", "c"));
+        assertEquals("SELECT \"a\", \"b\", \"c\" FROM \"t\" ORDER BY \"b\", \"c\" LIMIT 5", result);
+    }
+
+    public void testAddColumnsToSelectNoFromReturnsOriginal() {
+        String sql = "INVALID SQL WITHOUT FROM";
+        String result = DistributedScanExecutor.addColumnsToSelect(sql, List.of("col"));
+        assertEquals(sql, result);
+    }
+
+    public void testStripExtraColumnsRemovesAppendedColumns() {
+        WorkerQueryResponse response = new WorkerQueryResponse(
+            List.of("searchphrase", "eventtime"),
+            List.of("Utf8", "Timestamp"),
+            2,
+            new Object[][]{{"a", "b"}, {100L, 200L}}
+        );
+        WorkerQueryResponse stripped = DistributedScanExecutor.stripExtraColumns(response, 1);
+        assertEquals(1, stripped.getColumnNames().size());
+        assertEquals("searchphrase", stripped.getColumnNames().get(0));
+        assertEquals(2, stripped.getRowCount());
+    }
+
+    public void testStripExtraColumnsNoOpWhenNoExtraColumns() {
+        WorkerQueryResponse response = new WorkerQueryResponse(
+            List.of("col1"), List.of("Integer"), 1, new Object[][]{{42}}
+        );
+        WorkerQueryResponse result = DistributedScanExecutor.stripExtraColumns(response, 1);
+        assertSame(response, result);
+    }
+
     // --- Helper methods ---
 
     private static DiscoveryNode newNode(String nodeId, Map<String, String> attributes) {

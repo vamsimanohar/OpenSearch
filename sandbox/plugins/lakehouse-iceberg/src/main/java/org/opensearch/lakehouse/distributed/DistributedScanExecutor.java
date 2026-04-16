@@ -31,6 +31,7 @@ import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -138,17 +139,61 @@ public class DistributedScanExecutor {
             filePaths.size()
         );
 
+        // For TOPK_MERGE, sort columns may not be in the SELECT output.
+        // Detect missing sort columns, add them to worker SQL, and strip after merge.
+        String workerSql = sqlQuery;
+        int[] mergeSortColumns = analysis.sortColumns;
+        int outputColumnCount = analysis.outputColumnCount;
+        boolean needsColumnStripping = false;
+
+        if (analysis.strategy == MergeStrategy.TOPK_MERGE && analysis.sortColumnNames != null) {
+            List<String> outputNames = relNode.getRowType().getFieldNames();
+
+            List<String> missingColumns = new ArrayList<>();
+            for (String sortColName : analysis.sortColumnNames) {
+                if (sortColName != null && !outputNames.contains(sortColName)) {
+                    missingColumns.add(sortColName);
+                }
+            }
+
+            List<String> workerOutputNames = new ArrayList<>(outputNames);
+            if (!missingColumns.isEmpty()) {
+                workerSql = addColumnsToSelect(sqlQuery, missingColumns);
+                workerOutputNames.addAll(missingColumns);
+                needsColumnStripping = true;
+                logger.info(
+                    "[ScanExecutor] TOPK_MERGE: added {} sort columns to worker SQL: {}",
+                    missingColumns.size(),
+                    missingColumns
+                );
+            }
+
+            // Remap sort indices to worker output column positions (name-based)
+            mergeSortColumns = new int[analysis.sortColumnNames.length];
+            for (int i = 0; i < analysis.sortColumnNames.length; i++) {
+                mergeSortColumns[i] = workerOutputNames.indexOf(analysis.sortColumnNames[i]);
+            }
+        }
+
+        // Capture effectively-final locals for lambda
+        final String finalWorkerSql = workerSql;
+        final int[] finalMergeSortColumns = mergeSortColumns;
+        final boolean finalNeedsStripping = needsColumnStripping;
+        final int finalOutputColumnCount = outputColumnCount;
+
         // Partition files across workers
         List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());
 
         // Dispatch requests and collect responses asynchronously
-        dispatchAndCollect(workers, assignments, sqlQuery, storageConfig, tableName, ActionListener.wrap(
+        dispatchAndCollect(workers, assignments, finalWorkerSql, storageConfig, tableName, ActionListener.wrap(
             responses -> {
                 try {
-                    // Merge results using analysis metadata
                     WorkerQueryResponse merged = ResultMerger.merge(
-                        responses, analysis.strategy, analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
+                        responses, analysis.strategy, finalMergeSortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
                     );
+                    if (finalNeedsStripping) {
+                        merged = stripExtraColumns(merged, finalOutputColumnCount);
+                    }
                     listener.onResponse(ResultSerializer.toRows(merged));
                 } catch (Exception e) {
                     listener.onFailure(e);
@@ -296,5 +341,65 @@ public class DistributedScanExecutor {
                 listener.onFailure(e);
             }
         });
+    }
+
+    /**
+     * Inserts additional columns into the SELECT clause of a SQL query.
+     * Finds the first {@code FROM} keyword and inserts the quoted column names before it.
+     * Used for TOPK_MERGE when ORDER BY columns are not in the original SELECT.
+     *
+     * @param sql     the original SQL query
+     * @param columns column names to add to the SELECT clause
+     * @return the rewritten SQL with additional columns
+     */
+    static String addColumnsToSelect(String sql, List<String> columns) {
+        // Find the first FROM keyword preceded by whitespace (space or newline).
+        // Calcite generates multi-line SQL where FROM starts on a new line.
+        int fromKeywordIdx = -1;
+        String upper = sql.toUpperCase();
+        int searchFrom = 0;
+        while (searchFrom < upper.length()) {
+            int idx = upper.indexOf("FROM ", searchFrom);
+            if (idx < 0) break;
+            if (idx > 0 && Character.isWhitespace(sql.charAt(idx - 1))) {
+                fromKeywordIdx = idx;
+                break;
+            }
+            searchFrom = idx + 4;
+        }
+        if (fromKeywordIdx < 0) {
+            return sql;
+        }
+        // Insert columns right before the whitespace that precedes FROM
+        int insertPos = fromKeywordIdx;
+        while (insertPos > 0 && Character.isWhitespace(sql.charAt(insertPos - 1))) {
+            insertPos--;
+        }
+        StringBuilder sb = new StringBuilder(sql.substring(0, insertPos));
+        for (String col : columns) {
+            sb.append(", \"").append(col).append("\"");
+        }
+        sb.append(sql.substring(insertPos));
+        return sb.toString();
+    }
+
+    /**
+     * Removes columns beyond the original output count from a worker response.
+     * Used after TOPK_MERGE to strip sort-only columns that were added to the worker SQL.
+     *
+     * @param response          the merged response with extra columns
+     * @param outputColumnCount the number of columns in the original query output
+     * @return a response with only the original output columns
+     */
+    static WorkerQueryResponse stripExtraColumns(WorkerQueryResponse response, int outputColumnCount) {
+        if (outputColumnCount >= response.getColumnNames().size()) {
+            return response;
+        }
+        List<String> names = new ArrayList<>(response.getColumnNames().subList(0, outputColumnCount));
+        List<String> types = new ArrayList<>(response.getColumnTypes().subList(0, outputColumnCount));
+        Object[][] data = response.getColumnData();
+        Object[][] trimmed = new Object[outputColumnCount][];
+        System.arraycopy(data, 0, trimmed, 0, outputColumnCount);
+        return new WorkerQueryResponse(names, types, response.getRowCount(), trimmed);
     }
 }

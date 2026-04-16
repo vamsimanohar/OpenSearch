@@ -153,9 +153,8 @@ echo "============================================================"
 echo ""
 
 # ── Known problematic queries ────────────────────────────────────────────────
-# Q34, Q35: timeout on high-cardinality GROUP BY (URL ~100M unique values)
-# Q36: TopK OOM on high-cardinality clientip GROUP BY
-EXPECTED_FAILURES="34 35 36"
+# (None — Q34/Q35 fixed with unlimited DataFusion pool + 4GB JVM)
+EXPECTED_FAILURES=""
 
 is_expected_failure() {
     local q="$1"
@@ -195,7 +194,7 @@ if [ "$SKIP_OS" = false ]; then
 
         # Read query, replace table name
         sql=$(cat "$query_file")
-        sql="${sql//hits/${TABLE}}"
+        sql=$(echo "$sql" | sed "s/\bFROM hits\b/FROM ${TABLE}/g; s/\bJOIN hits\b/JOIN ${TABLE}/g")
         # Remove trailing semicolons (OpenSearch doesn't want them)
         sql="${sql%;}"
 

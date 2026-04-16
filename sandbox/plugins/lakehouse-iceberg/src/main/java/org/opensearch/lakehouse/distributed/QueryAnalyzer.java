@@ -79,7 +79,9 @@ public final class QueryAnalyzer {
                 int[] sortColumns = extractSortColumns(classifier.sort);
                 boolean[] sortAsc = extractSortDirections(classifier.sort);
                 int limit = extractLimit(classifier.sort);
-                return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit);
+                String[] sortColumnNames = extractSortColumnNames(classifier.sort);
+                int outputColumnCount = relNode.getRowType().getFieldCount();
+                return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit, sortColumnNames, outputColumnCount);
             }
             // ORDER BY without LIMIT cannot be distributed via CONCAT (results would be unsorted)
             return new AnalysisResult(MergeStrategy.SINGLE_NODE);
@@ -175,6 +177,22 @@ public final class QueryAnalyzer {
     }
 
     /**
+     * Extracts sort column names from the Sort node's input row type.
+     * These names are used to detect sort columns missing from the SELECT output
+     * and to remap sort indices for TopKMerger.
+     */
+    static String[] extractSortColumnNames(Sort sort) {
+        List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
+        List<String> fieldNames = sort.getInput().getRowType().getFieldNames();
+        String[] names = new String[collations.size()];
+        for (int i = 0; i < collations.size(); i++) {
+            int fieldIndex = collations.get(i).getFieldIndex();
+            names[i] = fieldIndex < fieldNames.size() ? fieldNames.get(fieldIndex) : null;
+        }
+        return names;
+    }
+
+    /**
      * Result of plan analysis containing the merge strategy and associated metadata.
      */
     static final class AnalysisResult {
@@ -183,17 +201,33 @@ public final class QueryAnalyzer {
         final int[] sortColumns;
         final boolean[] sortAsc;
         final int limit;
+        final String[] sortColumnNames;
+        final int outputColumnCount;
 
         AnalysisResult(MergeStrategy strategy) {
-            this(strategy, null, null, null, 0);
+            this(strategy, null, null, null, 0, null, 0);
         }
 
         AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit) {
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, null, 0);
+        }
+
+        AnalysisResult(
+            MergeStrategy strategy,
+            SqlKind[] aggKinds,
+            int[] sortColumns,
+            boolean[] sortAsc,
+            int limit,
+            String[] sortColumnNames,
+            int outputColumnCount
+        ) {
             this.strategy = strategy;
             this.aggKinds = aggKinds;
             this.sortColumns = sortColumns;
             this.sortAsc = sortAsc;
             this.limit = limit;
+            this.sortColumnNames = sortColumnNames;
+            this.outputColumnCount = outputColumnCount;
         }
     }
 }
