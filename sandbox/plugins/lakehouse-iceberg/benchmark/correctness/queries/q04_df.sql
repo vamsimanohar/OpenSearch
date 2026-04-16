@@ -1,1 +1,1 @@
-SELECT AVG("UserID") FROM hits;
+SELECT AVG(userid) FROM hits;

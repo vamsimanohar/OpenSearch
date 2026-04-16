@@ -32,6 +32,7 @@ public class WorkerQueryResponse extends ActionResponse implements ToXContentObj
     private final List<String> columnTypes;
     private final int rowCount;
     private final Object[][] columnData;
+    private final byte[] arrowIpcData;
 
     /**
      * Creates a new worker query response.
@@ -46,6 +47,23 @@ public class WorkerQueryResponse extends ActionResponse implements ToXContentObj
         this.columnTypes = columnTypes;
         this.rowCount = rowCount;
         this.columnData = columnData;
+        this.arrowIpcData = null;
+    }
+
+    /**
+     * Creates a new Arrow IPC worker query response.
+     * <p>
+     * In this mode the response carries raw Arrow IPC bytes. Column metadata and
+     * row count are unknown until the coordinator deserializes the Arrow data.
+     *
+     * @param arrowIpcData Arrow IPC serialized record batches
+     */
+    public WorkerQueryResponse(byte[] arrowIpcData) {
+        this.arrowIpcData = arrowIpcData;
+        this.columnNames = List.of();
+        this.columnTypes = List.of();
+        this.rowCount = -1;
+        this.columnData = null;
     }
 
     /**
@@ -55,28 +73,43 @@ public class WorkerQueryResponse extends ActionResponse implements ToXContentObj
      * @throws IOException if reading fails
      */
     public WorkerQueryResponse(StreamInput in) throws IOException {
-        this.columnNames = in.readStringList();
-        this.columnTypes = in.readStringList();
-        this.rowCount = in.readVInt();
-        int numCols = in.readVInt();
-        this.columnData = new Object[numCols][];
-        for (int col = 0; col < numCols; col++) {
-            this.columnData[col] = new Object[rowCount];
-            for (int row = 0; row < rowCount; row++) {
-                this.columnData[col][row] = in.readGenericValue();
+        byte format = in.readByte();
+        if (format == 1) {
+            this.arrowIpcData = in.readByteArray();
+            this.columnNames = List.of();
+            this.columnTypes = List.of();
+            this.rowCount = -1;
+            this.columnData = null;
+        } else {
+            this.arrowIpcData = null;
+            this.columnNames = in.readStringList();
+            this.columnTypes = in.readStringList();
+            this.rowCount = in.readVInt();
+            int numCols = in.readVInt();
+            this.columnData = new Object[numCols][];
+            for (int col = 0; col < numCols; col++) {
+                this.columnData[col] = new Object[rowCount];
+                for (int row = 0; row < rowCount; row++) {
+                    this.columnData[col][row] = in.readGenericValue();
+                }
             }
         }
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeStringCollection(columnNames);
-        out.writeStringCollection(columnTypes);
-        out.writeVInt(rowCount);
-        out.writeVInt(columnData.length);
-        for (Object[] column : columnData) {
-            for (int row = 0; row < rowCount; row++) {
-                out.writeGenericValue(column[row]);
+        out.writeByte((byte) (arrowIpcData != null ? 1 : 0));
+        if (arrowIpcData != null) {
+            out.writeByteArray(arrowIpcData);
+        } else {
+            out.writeStringCollection(columnNames);
+            out.writeStringCollection(columnTypes);
+            out.writeVInt(rowCount);
+            out.writeVInt(columnData.length);
+            for (Object[] column : columnData) {
+                for (int row = 0; row < rowCount; row++) {
+                    out.writeGenericValue(column[row]);
+                }
             }
         }
     }
@@ -84,15 +117,20 @@ public class WorkerQueryResponse extends ActionResponse implements ToXContentObj
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
-        builder.field("rowCount", rowCount);
-        builder.startArray("columns");
-        for (int i = 0; i < columnNames.size(); i++) {
-            builder.startObject();
-            builder.field("name", columnNames.get(i));
-            builder.field("type", columnTypes.get(i));
-            builder.endObject();
+        if (arrowIpcData != null) {
+            builder.field("format", "arrow_ipc");
+            builder.field("arrowIpcBytes", arrowIpcData.length);
+        } else {
+            builder.field("rowCount", rowCount);
+            builder.startArray("columns");
+            for (int i = 0; i < columnNames.size(); i++) {
+                builder.startObject();
+                builder.field("name", columnNames.get(i));
+                builder.field("type", columnTypes.get(i));
+                builder.endObject();
+            }
+            builder.endArray();
         }
-        builder.endArray();
         builder.endObject();
         return builder;
     }
@@ -115,5 +153,15 @@ public class WorkerQueryResponse extends ActionResponse implements ToXContentObj
     /** Returns the column-major result data. */
     public Object[][] getColumnData() {
         return columnData;
+    }
+
+    /** Returns the raw Arrow IPC bytes, or {@code null} if this is a legacy response. */
+    public byte[] getArrowIpcData() {
+        return arrowIpcData;
+    }
+
+    /** Returns {@code true} if this response carries Arrow IPC data. */
+    public boolean isArrowIpc() {
+        return arrowIpcData != null;
     }
 }

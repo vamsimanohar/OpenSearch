@@ -13,14 +13,20 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.GroupedActionListener;
 import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
+import org.opensearch.analytics.exec.DataWarehouseScanContext;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.lakehouse.LakehousePlugin;
+import org.opensearch.lakehouse.distributed.merge.AvgDecomposer;
+import org.opensearch.lakehouse.distributed.merge.DistinctExpander;
 import org.opensearch.lakehouse.distributed.merge.MergeStrategy;
+import org.opensearch.lakehouse.distributed.merge.MergeSqlGenerator;
+import org.opensearch.lakehouse.distributed.merge.MixedDistinctExpander;
 import org.opensearch.lakehouse.distributed.merge.ResultMerger;
 import org.opensearch.lakehouse.distributed.merge.ResultSerializer;
+import org.opensearch.lakehouse.distributed.worker.WorkerCredentialResolver;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryAction;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryExecutor;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryRequest;
@@ -31,9 +37,14 @@ import org.opensearch.transport.TransportResponseHandler;
 import org.opensearch.transport.TransportService;
 
 import java.io.IOException;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Unified scan executor that handles both single-node and distributed query execution.
@@ -131,37 +142,138 @@ public class DistributedScanExecutor {
             return;
         }
 
+        // Filter to connected remote workers (exclude coordinator and disconnected nodes)
+        String localNodeId = clusterService.state().nodes().getLocalNodeId();
+        List<DiscoveryNode> remoteWorkers = workers.stream()
+            .filter(n -> !n.getId().equals(localNodeId))
+            .filter(n -> transportService.nodeConnected(n))
+            .toList();
+        if (remoteWorkers.isEmpty()) {
+            logger.debug("[ScanExecutor] No connected remote workers, executing locally");
+            executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
+            return;
+        }
+
+        // Build worker SQL based on strategy
+        String workerSql = sqlQuery;
+        if (analysis.strategy == MergeStrategy.DISTINCT_EXPAND) {
+            workerSql = DistinctExpander.rewriteWorkerSql(workerSql);
+        } else if (analysis.strategy == MergeStrategy.MIXED_DISTINCT) {
+            workerSql = MixedDistinctExpander.rewriteWorkerSql(workerSql);
+        } else {
+            if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY || analysis.strategy == MergeStrategy.GLOBAL_MERGE) {
+                if (AvgDecomposer.hasAvg(analysis)) {
+                    workerSql = AvgDecomposer.decomposeWorkerSql(workerSql);
+                }
+            }
+            if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY) {
+                workerSql = stripHavingClause(workerSql);
+                workerSql = stripOrderByAndLimit(workerSql);
+            }
+        }
+
+        // Phase 2.5: partition files across coordinator + remote workers (N+1 total)
+        int totalWorkers = remoteWorkers.size() + 1;
+        List<FilePartitioner.FileAssignment> allAssignments = FilePartitioner.partition(filePaths, fileSizes, totalWorkers);
+
+        // First assignment → coordinator (local batch handle, no IPC serialization)
+        FilePartitioner.FileAssignment localAssignment = allAssignments.get(0);
+        List<FilePartitioner.FileAssignment> remoteAssignments = allAssignments.subList(1, allAssignments.size());
+
         logger.info(
-            "[ScanExecutor] Distributing query across {} workers, strategy={}, files={}",
-            workers.size(),
+            "[ScanExecutor] Distributing query: coordinator={} files + {} remote workers, strategy={}, totalFiles={}",
+            localAssignment.getFilePaths().size(),
+            remoteWorkers.size(),
             analysis.strategy,
             filePaths.size()
         );
 
-        // Partition files across workers
-        List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());
+        // Start local worker: returns batch handle (RecordBatches stay in Rust memory)
+        CompletableFuture<Long> localBatchFuture = dispatchLocalBatches(
+            localAssignment, workerSql, storageConfig, tableName
+        );
 
-        // Dispatch requests and collect responses asynchronously
-        dispatchAndCollect(workers, assignments, sqlQuery, storageConfig, tableName, ActionListener.wrap(
+        // Dispatch remote workers and merge when all complete
+        final String finalWorkerSql = workerSql;
+        dispatchAndCollect(remoteWorkers, remoteAssignments, workerSql, storageConfig, tableName, ActionListener.wrap(
             responses -> {
+                long localBatchHandle = 0;
                 try {
-                    // Merge results using analysis metadata
-                    WorkerQueryResponse merged = ResultMerger.merge(
-                        responses, analysis.strategy, analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
-                    );
-                    listener.onResponse(ResultSerializer.toRows(merged));
+                    localBatchHandle = localBatchFuture.get(15, TimeUnit.MINUTES);
                 } catch (Exception e) {
+                    logger.warn("[ScanExecutor] Local worker failed, merging with remote data only: {}", e.getMessage());
+                }
+
+                try {
+                    // Collect Arrow IPC bytes from remote workers
+                    List<byte[]> remoteIpcData = new ArrayList<>();
+                    for (WorkerQueryResponse r : responses) {
+                        if (r.isArrowIpc() && r.getArrowIpcData().length > 0) {
+                            remoteIpcData.add(r.getArrowIpcData());
+                        }
+                    }
+
+                    if (remoteIpcData.isEmpty() && localBatchHandle == 0) {
+                        listener.onResponse(List.of());
+                        return;
+                    }
+
+                    // Generate merge SQL from remote IPC column names
+                    String mergeSql;
+                    if (!remoteIpcData.isEmpty()) {
+                        List<String> columnNames = queryEngine.readArrowIpcColumnNames(remoteIpcData.get(0));
+                        if (analysis.strategy == MergeStrategy.DISTINCT_EXPAND) {
+                            mergeSql = DistinctExpander.generateMergeSql(columnNames, sqlQuery);
+                        } else if (analysis.strategy == MergeStrategy.MIXED_DISTINCT) {
+                            mergeSql = MixedDistinctExpander.generateMergeSql(columnNames, sqlQuery);
+                        } else {
+                            mergeSql = MergeSqlGenerator.generate(analysis, columnNames);
+                        }
+                    } else {
+                        // Only local data — pass through without re-aggregation
+                        mergeSql = "SELECT * FROM input";
+                    }
+
+                    logger.info(
+                        "[ScanExecutor] Streaming merge: local={}, remote={}, strategy={}, sql={}",
+                        localBatchHandle != 0, remoteIpcData.size(), analysis.strategy, mergeSql
+                    );
+
+                    // Phase 2.5: streaming merge (local batch handle + remote IPC, no IPC round-trip)
+                    Iterable<Object[]> rows = queryEngine.executeMergeStreaming(
+                        localBatchHandle, remoteIpcData, mergeSql
+                    );
+                    listener.onResponse(rows);
+                } catch (Exception e) {
+                    if (localBatchHandle != 0) {
+                        try { queryEngine.freeBatchHandle(localBatchHandle); } catch (Exception ignored) { }
+                    }
                     listener.onFailure(e);
                 }
             },
-            listener::onFailure
+            distributedFailure -> {
+                // Free local batch handle on failure, then fall back to single-node
+                localBatchFuture.thenAccept(handle -> {
+                    if (handle != 0) {
+                        try { queryEngine.freeBatchHandle(handle); } catch (Exception ignored) { }
+                    }
+                });
+                logger.warn(
+                    "[ScanExecutor] Distributed execution failed (strategy={}), falling back to single-node: {}",
+                    analysis.strategy, distributedFailure.getMessage()
+                );
+                executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
+            }
         ));
     }
 
     /**
-     * Executes the query on the local node asynchronously via {@link WorkerQueryExecutor}
-     * on the {@code lakehouse_worker} thread pool.
+     * Executes the query on the local node asynchronously using the streaming query engine.
+     * Uses {@link DataWarehouseQueryEngine#executeQuery} directly instead of the IPC path
+     * to avoid materializing the entire result as a single byte[] — critical for high-cardinality
+     * GROUP BY queries where the IPC buffer can exceed Java heap capacity.
      */
+    @SuppressWarnings("removal")
     private void executeSingleNodeAsync(
         String sqlQuery,
         List<String> filePaths,
@@ -170,11 +282,16 @@ public class DistributedScanExecutor {
         String tableName,
         ActionListener<Iterable<Object[]>> listener
     ) {
-        WorkerQueryRequest request = new WorkerQueryRequest(sqlQuery, filePaths, fileSizes, storageConfig, tableName);
+        Map<String, String> resolvedConfig = WorkerCredentialResolver.resolve(storageConfig, clusterService);
+        DataWarehouseScanContext scanContext = new DataWarehouseScanContext(
+            tableName, filePaths, fileSizes, sqlQuery, resolvedConfig
+        );
         transportService.getThreadPool().executor(LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL).execute(() -> {
             try {
-                WorkerQueryResponse response = WorkerQueryExecutor.execute(request, clusterService, queryEngine);
-                listener.onResponse(ResultSerializer.toRows(response));
+                Iterable<Object[]> rows = AccessController.doPrivileged(
+                    (PrivilegedAction<Iterable<Object[]>>) () -> queryEngine.executeQuery(scanContext)
+                );
+                listener.onResponse(rows);
             } catch (Exception e) {
                 listener.onFailure(e);
             }
@@ -280,6 +397,30 @@ public class DistributedScanExecutor {
     }
 
     /**
+     * Strips the HAVING clause from SQL for two-phase GROUP BY workers.
+     * Workers produce partial aggregates — HAVING must be applied on the coordinator
+     * after re-aggregation, not on individual workers with partial data.
+     */
+    static String stripHavingClause(String sql) {
+        return sql.replaceAll("(?is)\\s+HAVING\\s+.*?(?=\\s+ORDER\\s+BY|\\s+LIMIT\\s+|$)", "");
+    }
+
+    /**
+     * Strips ORDER BY and LIMIT clauses from the SQL for two-phase GROUP BY workers.
+     * Workers run partial GROUP BY without ordering or limiting — the coordinator
+     * applies ORDER BY and LIMIT on the re-aggregated results.
+     */
+    static String stripOrderByAndLimit(String sql) {
+        // Strip ORDER BY ... (and everything after it, including LIMIT and OFFSET)
+        String stripped = sql.replaceAll("(?is)\\s+ORDER\\s+BY\\s+.+$", "");
+        if (stripped.equals(sql)) {
+            // No ORDER BY found — strip standalone LIMIT [OFFSET]
+            stripped = sql.replaceAll("(?is)\\s+LIMIT\\s+\\d+(\\s+OFFSET\\s+\\d+)?\\s*$", "");
+        }
+        return stripped.trim();
+    }
+
+    /**
      * Dispatches a request to the local node by executing the worker query directly
      * on a {@code lakehouse_worker} thread pool thread, bypassing transport serialization.
      * This is the coordinator-as-worker optimization: avoids the serialize → send to
@@ -296,5 +437,43 @@ public class DistributedScanExecutor {
                 listener.onFailure(e);
             }
         });
+    }
+
+    /**
+     * Dispatches the coordinator's local file assignment using batch handles instead of IPC.
+     * RecordBatches stay in Rust native memory — no serialization overhead.
+     * The returned batch handle is passed to {@code executeMergeStreaming} for zero-copy merge.
+     */
+    @SuppressWarnings("removal")
+    CompletableFuture<Long> dispatchLocalBatches(
+        FilePartitioner.FileAssignment assignment,
+        String workerSql,
+        Map<String, String> storageConfig,
+        String tableName
+    ) {
+        CompletableFuture<Long> future = new CompletableFuture<>();
+        if (assignment.getFilePaths().isEmpty()) {
+            future.complete(0L);
+            return future;
+        }
+
+        Map<String, String> resolvedConfig = WorkerCredentialResolver.resolve(storageConfig, clusterService);
+        DataWarehouseScanContext scanContext = new DataWarehouseScanContext(
+            tableName, assignment.getFilePaths(), assignment.getFileSizes(), workerSql, resolvedConfig
+        );
+
+        logger.debug("[ScanExecutor] Local batch execution: {} files", assignment.getFilePaths().size());
+        transportService.getThreadPool().executor(LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL).execute(() -> {
+            try {
+                long batchHandle = AccessController.doPrivileged(
+                    (PrivilegedAction<Long>) () -> queryEngine.executeQueryToBatches(scanContext)
+                );
+                future.complete(batchHandle);
+            } catch (Exception e) {
+                logger.error("[ScanExecutor] Local batch execution failed", e);
+                future.completeExceptionally(e);
+            }
+        });
+        return future;
     }
 }

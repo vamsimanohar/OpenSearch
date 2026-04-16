@@ -13,8 +13,13 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelVisitor;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.core.Filter;
+import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.core.Sort;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
+import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlKind;
 import org.opensearch.lakehouse.distributed.merge.MergeStrategy;
 
@@ -25,16 +30,6 @@ import java.util.List;
  * for distributed query execution.
  * <p>
  * Uses Calcite's {@link RelVisitor} pattern for idiomatic tree traversal.
- * <p>
- * Phase 1 classification rules:
- * <ul>
- *   <li>{@link MergeStrategy#GLOBAL_MERGE} — global aggregation (no GROUP BY), with only
- *       SUM/COUNT/MIN/MAX aggregate functions (no AVG, no DISTINCT)</li>
- *   <li>{@link MergeStrategy#TOPK_MERGE} — ORDER BY with LIMIT, no aggregation</li>
- *   <li>{@link MergeStrategy#SINGLE_NODE} — GROUP BY, COUNT DISTINCT, AVG, or any other
- *       non-trivially distributable pattern</li>
- *   <li>{@link MergeStrategy#CONCAT} — simple scan/filter/project with no agg and no sort</li>
- * </ul>
  *
  * @opensearch.internal
  */
@@ -42,46 +37,60 @@ public final class QueryAnalyzer {
 
     private QueryAnalyzer() {}
 
-    /**
-     * Analyzes the RelNode tree and returns the appropriate merge strategy.
-     *
-     * @param relNode the root of the Calcite logical plan
-     * @return the merge strategy to use for distributed execution
-     */
     public static MergeStrategy analyze(RelNode relNode) {
         return analyzeDetailed(relNode).strategy;
     }
 
-    /**
-     * Analyzes the RelNode tree and returns a detailed result including merge strategy,
-     * aggregate function kinds (for GLOBAL_MERGE), and sort/limit info (for TOPK_MERGE).
-     *
-     * @param relNode the root of the Calcite logical plan
-     * @return the detailed analysis result
-     */
     public static AnalysisResult analyzeDetailed(RelNode relNode) {
         PlanClassifier classifier = new PlanClassifier();
         classifier.go(relNode);
 
         if (classifier.aggregate != null) {
-            if (!classifier.aggregate.getGroupSet().isEmpty()) {
+            boolean hasGroupBy = !classifier.aggregate.getGroupSet().isEmpty();
+            boolean hasDistinct = hasDistinct(classifier.aggregate);
+
+            if (hasGroupBy) {
+                if (hasDistinct) {
+                    if (hasOnlyCountDistinct(classifier.aggregate)) {
+                        return buildDistinctExpandResult(classifier, relNode);
+                    }
+                    if (hasMixedCountDistinct(classifier.aggregate)) {
+                        return buildMixedDistinctResult(classifier, relNode);
+                    }
+                    return new AnalysisResult(MergeStrategy.SINGLE_NODE);
+                }
+                // AVG is allowed — decomposed into SUM/COUNT on workers
+                return buildTwoPhaseResult(classifier, relNode);
+            }
+
+            if (hasDistinct) {
+                if (hasOnlyCountDistinct(classifier.aggregate)) {
+                    return buildDistinctExpandResult(classifier, relNode);
+                }
+                if (hasMixedCountDistinct(classifier.aggregate)) {
+                    return buildMixedDistinctResult(classifier, relNode);
+                }
                 return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
-            if (hasDistinctOrAvg(classifier.aggregate)) {
-                return new AnalysisResult(MergeStrategy.SINGLE_NODE);
-            }
+            // Global aggregates (including AVG) — AVG decomposed into SUM/COUNT on workers
             SqlKind[] aggKinds = extractAggKinds(classifier.aggregate);
-            return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0);
+            return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0, null);
         }
 
         if (classifier.sort != null) {
-            if (classifier.sort.fetch != null) {
+            if (!classifier.sort.getCollation().getFieldCollations().isEmpty() && classifier.sort.fetch != null) {
                 int[] sortColumns = extractSortColumns(classifier.sort);
+                int outputFieldCount = relNode.getRowType().getFieldCount();
+                for (int col : sortColumns) {
+                    if (col >= outputFieldCount) {
+                        return new AnalysisResult(MergeStrategy.SINGLE_NODE);
+                    }
+                }
                 boolean[] sortAsc = extractSortDirections(classifier.sort);
                 int limit = extractLimit(classifier.sort);
-                return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit);
+                int offset = extractOffset(classifier.sort);
+                return new AnalysisResult(MergeStrategy.TOPK_MERGE, null, sortColumns, sortAsc, limit, offset, null, null);
             }
-            // ORDER BY without LIMIT cannot be distributed via CONCAT (results would be unsorted)
             return new AnalysisResult(MergeStrategy.SINGLE_NODE);
         }
 
@@ -89,8 +98,177 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Visitor that walks the RelNode tree to find Aggregate and Sort nodes.
+     * Builds a TWO_PHASE_GROUP_BY result. Computes output column count from
+     * Aggregate/Project structure — never calls relNode.getRowType().
      */
+    private static AnalysisResult buildTwoPhaseResult(PlanClassifier classifier, RelNode relNode) {
+        Aggregate aggregate = classifier.aggregate;
+        Sort sort = classifier.sort;
+
+        int groupKeyCount = aggregate.getGroupSet().cardinality();
+        SqlKind[] rawAggKinds = extractAggKinds(aggregate);
+
+        // Find the node directly above the Aggregate (skip Sort)
+        RelNode nodeAboveAggregate = (sort != null) ? sort.getInput() : relNode;
+
+        // Look through Filter (HAVING clause) to find the Aggregate or Project
+        HavingCondition having = null;
+        if (nodeAboveAggregate instanceof Filter) {
+            Filter havingFilter = (Filter) nodeAboveAggregate;
+            having = extractHavingCondition(havingFilter, groupKeyCount);
+            nodeAboveAggregate = havingFilter.getInput();
+        }
+
+        // Determine column roles from plan structure
+        boolean[] isGroupKey;
+        SqlKind[] outputAggKinds;
+        int outputColCount;
+
+        if (nodeAboveAggregate instanceof Aggregate) {
+            // Simple: Sort → Aggregate (most common for GROUP BY queries)
+            outputColCount = groupKeyCount + rawAggKinds.length;
+            isGroupKey = new boolean[outputColCount];
+            outputAggKinds = new SqlKind[outputColCount];
+            for (int i = 0; i < outputColCount; i++) {
+                if (i < groupKeyCount) {
+                    isGroupKey[i] = true;
+                } else {
+                    int aggIdx = i - groupKeyCount;
+                    outputAggKinds[i] = (aggIdx < rawAggKinds.length) ? rawAggKinds[aggIdx] : SqlKind.SUM;
+                }
+            }
+        } else if (nodeAboveAggregate instanceof Project) {
+            // Sort → Project → Aggregate (e.g., SELECT 1 AS "one", url, COUNT(*))
+            Project project = (Project) nodeAboveAggregate;
+            List<RexNode> projects = project.getProjects();
+            outputColCount = projects.size();
+            isGroupKey = new boolean[outputColCount];
+            outputAggKinds = new SqlKind[outputColCount];
+            for (int i = 0; i < outputColCount; i++) {
+                RexNode expr = projects.get(i);
+                if (expr instanceof RexInputRef) {
+                    int inputIdx = ((RexInputRef) expr).getIndex();
+                    if (inputIdx < groupKeyCount) {
+                        isGroupKey[i] = true;
+                    } else {
+                        int aggIdx = inputIdx - groupKeyCount;
+                        outputAggKinds[i] = (aggIdx < rawAggKinds.length) ? rawAggKinds[aggIdx] : SqlKind.SUM;
+                    }
+                } else {
+                    // Literal or complex expression — treat as GROUP BY key in merge
+                    isGroupKey[i] = true;
+                }
+            }
+        } else {
+            // Unknown structure (e.g., Filter for HAVING) — fall back to SINGLE_NODE
+            return new AnalysisResult(MergeStrategy.SINGLE_NODE);
+        }
+
+        // Extract sort/limit/offset info
+        int[] sortColumns = null;
+        boolean[] sortAsc = null;
+        int limit = 0;
+        int offset = 0;
+
+        if (sort != null) {
+            if (!sort.getCollation().getFieldCollations().isEmpty()) {
+                sortColumns = extractSortColumns(sort);
+                sortAsc = extractSortDirections(sort);
+                for (int col : sortColumns) {
+                    if (col >= outputColCount) {
+                        return new AnalysisResult(MergeStrategy.SINGLE_NODE);
+                    }
+                }
+            }
+            if (sort.fetch != null) {
+                limit = extractLimit(sort);
+            }
+            offset = extractOffset(sort);
+        }
+
+        return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, outputAggKinds, sortColumns, sortAsc, limit, offset, isGroupKey, having);
+    }
+
+    /**
+     * Extracts a HAVING condition from a Filter node above an Aggregate.
+     * Handles simple comparison conditions like {@code column > value}.
+     *
+     * @param filter the Filter node representing the HAVING clause
+     * @param groupKeyCount number of GROUP BY keys in the Aggregate output
+     * @return the extracted HavingCondition, or null if the condition is too complex
+     */
+    static HavingCondition extractHavingCondition(Filter filter, int groupKeyCount) {
+        RexNode condition = filter.getCondition();
+        if (!(condition instanceof RexCall)) return null;
+
+        RexCall call = (RexCall) condition;
+        SqlKind op = call.getKind();
+        if (call.getOperands().size() != 2) return null;
+
+        RexNode left = call.getOperands().get(0);
+        RexNode right = call.getOperands().get(1);
+
+        if (left instanceof RexInputRef && right instanceof RexLiteral) {
+            int colIndex = ((RexInputRef) left).getIndex();
+            Number value = ((RexLiteral) right).getValueAs(Number.class);
+            if (value != null) {
+                return new HavingCondition(colIndex, op, value.longValue());
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Builds a DISTINCT_EXPAND result for pure COUNT(DISTINCT) queries.
+     * The analysis captures sort/limit info so the coordinator can apply ORDER BY + LIMIT.
+     */
+    private static AnalysisResult buildDistinctExpandResult(PlanClassifier classifier, RelNode relNode) {
+        Sort sort = classifier.sort;
+
+        int[] sortColumns = null;
+        boolean[] sortAsc = null;
+        int limit = 0;
+        int offset = 0;
+
+        if (sort != null) {
+            if (!sort.getCollation().getFieldCollations().isEmpty()) {
+                sortColumns = extractSortColumns(sort);
+                sortAsc = extractSortDirections(sort);
+            }
+            if (sort.fetch != null) {
+                limit = extractLimit(sort);
+            }
+            offset = extractOffset(sort);
+        }
+
+        return new AnalysisResult(MergeStrategy.DISTINCT_EXPAND, null, sortColumns, sortAsc, limit, offset, null, null);
+    }
+
+    /**
+     * Builds a MIXED_DISTINCT result for queries with COUNT(DISTINCT) mixed with other aggregates.
+     */
+    private static AnalysisResult buildMixedDistinctResult(PlanClassifier classifier, RelNode relNode) {
+        Sort sort = classifier.sort;
+
+        int[] sortColumns = null;
+        boolean[] sortAsc = null;
+        int limit = 0;
+        int offset = 0;
+
+        if (sort != null) {
+            if (!sort.getCollation().getFieldCollations().isEmpty()) {
+                sortColumns = extractSortColumns(sort);
+                sortAsc = extractSortDirections(sort);
+            }
+            if (sort.fetch != null) {
+                limit = extractLimit(sort);
+            }
+            offset = extractOffset(sort);
+        }
+
+        return new AnalysisResult(MergeStrategy.MIXED_DISTINCT, null, sortColumns, sortAsc, limit, offset, null, null);
+    }
+
     static class PlanClassifier extends RelVisitor {
         Aggregate aggregate;
         Sort sort;
@@ -100,21 +278,12 @@ public final class QueryAnalyzer {
             if (node instanceof Aggregate && aggregate == null) {
                 aggregate = (Aggregate) node;
             } else if (node instanceof Sort && sort == null) {
-                Sort s = (Sort) node;
-                if (!s.getCollation().getFieldCollations().isEmpty()) {
-                    sort = s;
-                }
+                sort = (Sort) node;
             }
             super.visit(node, ordinal, parent);
         }
     }
 
-    /**
-     * Checks if the aggregate has any DISTINCT aggregate calls or AVG functions.
-     *
-     * @param aggregate the aggregate node
-     * @return true if any call is DISTINCT or AVG
-     */
     static boolean hasDistinctOrAvg(Aggregate aggregate) {
         for (AggregateCall call : aggregate.getAggCallList()) {
             if (call.isDistinct()) {
@@ -127,9 +296,56 @@ public final class QueryAnalyzer {
         return false;
     }
 
+    static boolean hasDistinct(Aggregate aggregate) {
+        for (AggregateCall call : aggregate.getAggCallList()) {
+            if (call.isDistinct()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean hasAvg(Aggregate aggregate) {
+        for (AggregateCall call : aggregate.getAggCallList()) {
+            if (call.getAggregation().getKind() == SqlKind.AVG) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
-     * Extracts aggregate function kinds from the Aggregate node.
+     * Returns true if the Aggregate has at least one COUNT(DISTINCT) and at least one non-distinct aggregate.
+     * This identifies queries like: SELECT key, SUM(x), COUNT(*), COUNT(DISTINCT y) GROUP BY key.
      */
+    static boolean hasMixedCountDistinct(Aggregate aggregate) {
+        boolean hasCountDistinct = false;
+        boolean hasNonDistinct = false;
+        for (AggregateCall call : aggregate.getAggCallList()) {
+            if (call.isDistinct() && call.getAggregation().getKind() == SqlKind.COUNT) {
+                hasCountDistinct = true;
+            } else {
+                hasNonDistinct = true;
+            }
+        }
+        return hasCountDistinct && hasNonDistinct;
+    }
+
+    /**
+     * Returns true if ALL aggregate calls are COUNT(DISTINCT ...) and nothing else.
+     * Mixed queries (e.g., COUNT(*) + COUNT(DISTINCT x)) return false.
+     */
+    static boolean hasOnlyCountDistinct(Aggregate aggregate) {
+        List<AggregateCall> calls = aggregate.getAggCallList();
+        if (calls.isEmpty()) return false;
+        for (AggregateCall call : calls) {
+            if (!call.isDistinct() || call.getAggregation().getKind() != SqlKind.COUNT) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static SqlKind[] extractAggKinds(Aggregate aggregate) {
         List<AggregateCall> calls = aggregate.getAggCallList();
         SqlKind[] kinds = new SqlKind[calls.size()];
@@ -139,9 +355,6 @@ public final class QueryAnalyzer {
         return kinds;
     }
 
-    /**
-     * Extracts sort column indices from the Sort node's collation.
-     */
     static int[] extractSortColumns(Sort sort) {
         List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
         int[] cols = new int[collations.size()];
@@ -151,9 +364,6 @@ public final class QueryAnalyzer {
         return cols;
     }
 
-    /**
-     * Extracts sort directions (true=ascending) from the Sort node's collation.
-     */
     static boolean[] extractSortDirections(Sort sort) {
         List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
         boolean[] asc = new boolean[collations.size()];
@@ -163,10 +373,6 @@ public final class QueryAnalyzer {
         return asc;
     }
 
-    /**
-     * Extracts the LIMIT value from the Sort node's fetch expression.
-     * Returns 0 if fetch is null or not a literal.
-     */
     static int extractLimit(Sort sort) {
         if (sort.fetch instanceof RexLiteral) {
             return ((RexLiteral) sort.fetch).getValueAs(Integer.class);
@@ -174,26 +380,78 @@ public final class QueryAnalyzer {
         return 0;
     }
 
-    /**
-     * Result of plan analysis containing the merge strategy and associated metadata.
-     */
-    static final class AnalysisResult {
-        final MergeStrategy strategy;
-        final SqlKind[] aggKinds;
-        final int[] sortColumns;
-        final boolean[] sortAsc;
-        final int limit;
+    static int extractOffset(Sort sort) {
+        if (sort.offset instanceof RexLiteral) {
+            return ((RexLiteral) sort.offset).getValueAs(Integer.class);
+        }
+        return 0;
+    }
 
-        AnalysisResult(MergeStrategy strategy) {
-            this(strategy, null, null, null, 0);
+    /**
+     * Represents a simple HAVING condition: column op value (e.g., COUNT(*) > 100000).
+     */
+    public static final class HavingCondition {
+        public final int columnIndex;
+        public final SqlKind operator;
+        public final long value;
+
+        HavingCondition(int columnIndex, SqlKind operator, long value) {
+            this.columnIndex = columnIndex;
+            this.operator = operator;
+            this.value = value;
         }
 
-        AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit) {
+        public String operatorSql() {
+            return switch (operator) {
+                case GREATER_THAN -> ">";
+                case GREATER_THAN_OR_EQUAL -> ">=";
+                case LESS_THAN -> "<";
+                case LESS_THAN_OR_EQUAL -> "<=";
+                case EQUALS -> "=";
+                case NOT_EQUALS -> "!=";
+                default -> ">";
+            };
+        }
+    }
+
+    /**
+     * Result of query plan analysis, containing the merge strategy and metadata for distributed execution.
+     */
+    public static final class AnalysisResult {
+        public final MergeStrategy strategy;
+        public final SqlKind[] aggKinds;
+        public final int[] sortColumns;
+        public final boolean[] sortAsc;
+        public final int limit;
+        public final int offset;
+        /** Per-output-column: true = GROUP BY key/literal, false = aggregate. */
+        public final boolean[] isGroupKey;
+        /** HAVING condition extracted from Filter above Aggregate, or null. */
+        public final HavingCondition having;
+
+        AnalysisResult(MergeStrategy strategy) {
+            this(strategy, null, null, null, 0, 0, null, null);
+        }
+
+        AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit, boolean[] isGroupKey) {
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, 0, isGroupKey, null);
+        }
+
+        AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit, boolean[] isGroupKey,
+            HavingCondition having) {
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, 0, isGroupKey, having);
+        }
+
+        AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit, int offset,
+            boolean[] isGroupKey, HavingCondition having) {
             this.strategy = strategy;
             this.aggKinds = aggKinds;
             this.sortColumns = sortColumns;
             this.sortAsc = sortAsc;
             this.limit = limit;
+            this.offset = offset;
+            this.isGroupKey = isGroupKey;
+            this.having = having;
         }
     }
 }

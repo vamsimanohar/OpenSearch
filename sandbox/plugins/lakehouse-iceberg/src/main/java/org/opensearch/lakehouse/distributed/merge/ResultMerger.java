@@ -81,6 +81,9 @@ public final class ResultMerger {
             case CONCAT -> mergeConcat(nonEmpty);
             case GLOBAL_MERGE -> mergeGlobal(nonEmpty, aggKinds);
             case TOPK_MERGE -> TopKMerger.merge(nonEmpty, sortColumns, sortAsc, limit);
+            case TWO_PHASE_GROUP_BY -> mergeConcat(nonEmpty); // Legacy fallback: concat for Java merge
+            case DISTINCT_EXPAND -> mergeConcat(nonEmpty); // Legacy fallback: concat for Java merge
+            case MIXED_DISTINCT -> mergeConcat(nonEmpty); // Legacy fallback: concat for Java merge
             case SINGLE_NODE -> nonEmpty.get(0);
         };
     }

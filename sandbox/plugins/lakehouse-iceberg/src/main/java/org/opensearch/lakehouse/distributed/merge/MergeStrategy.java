@@ -35,9 +35,33 @@ public enum MergeStrategy {
     TOPK_MERGE,
 
     /**
+     * Two-phase GROUP BY aggregation (star topology).
+     * Workers run partial GROUP BY (no ORDER BY/LIMIT), returning partial aggregates.
+     * Coordinator re-aggregates via DataFusion StreamingTable:
+     * GROUP BY keys pass through, COUNT→SUM, SUM→SUM, MIN→MIN, MAX→MAX.
+     */
+    TWO_PHASE_GROUP_BY,
+
+    /**
+     * COUNT DISTINCT expansion (star topology).
+     * Workers return distinct raw values: SELECT DISTINCT group_keys, distinct_col FROM table.
+     * Coordinator runs COUNT(DISTINCT ...) on concatenated results.
+     * Used for queries with only COUNT(DISTINCT) aggregates (no mixed SUM/AVG).
+     */
+    DISTINCT_EXPAND,
+
+    /**
+     * Mixed COUNT(DISTINCT) with other aggregates (star topology).
+     * Workers GROUP BY (original_keys + distinct_cols) with partial aggregates for non-distinct columns.
+     * Coordinator re-aggregates regular aggregates and computes COUNT(DISTINCT) on concatenated results.
+     * Used for queries like: SELECT key, SUM(x), COUNT(*), COUNT(DISTINCT y) GROUP BY key.
+     */
+    MIXED_DISTINCT,
+
+    /**
      * Route the entire query to a single node for execution.
-     * Used for queries that cannot be trivially distributed: GROUP BY, DISTINCT,
-     * AVG aggregates, JOINs, or any pattern not covered by the other strategies.
+     * Used for queries that cannot be trivially distributed: SUM(DISTINCT),
+     * JOINs, or any pattern not covered by the other strategies.
      * This is deterministic routing, not an error fallback.
      */
     SINGLE_NODE

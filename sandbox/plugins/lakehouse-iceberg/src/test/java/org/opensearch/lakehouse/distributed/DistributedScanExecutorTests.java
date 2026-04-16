@@ -103,7 +103,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
     }
 
     public void testSingleNodeStrategyFallbackExecutesLocally() throws Exception {
-        // 2 eligible nodes but query requires SINGLE_NODE → executes locally
+        // 2 eligible nodes but query requires SINGLE_NODE (SUM DISTINCT) → executes locally
         DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{42});
         DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
@@ -112,11 +112,11 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
 
-        // Mock a GroupBy aggregate → SINGLE_NODE
-        RelNode relNode = mockGroupByRelNode();
+        // Mock a GroupBy + SUM(DISTINCT) → SINGLE_NODE (SUM DISTINCT not supported)
+        RelNode relNode = mockGroupBySumDistinctRelNode();
 
         List<Object[]> rows = executeAndWait(
-            executor, relNode, "SELECT col, COUNT(*) FROM t GROUP BY col",
+            executor, relNode, "SELECT col, SUM(DISTINCT val) FROM t GROUP BY col",
             List.of("f1", "f2"), new long[]{100, 200},
             Map.of("localMode", "true"), "t"
         );
@@ -141,6 +141,74 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         );
 
         assertEquals(1, rows.size());
+    }
+
+    // ---- stripHavingClause tests ----
+
+    public void testStripHavingClauseBeforeOrderBy() {
+        assertEquals(
+            "SELECT \"counterid\", AVG(LENGTH(\"url\")) AS \"l\", COUNT(*) AS \"c\" FROM \"hits\" WHERE \"url\" <> '' GROUP BY \"counterid\" ORDER BY \"l\" DESC LIMIT 25",
+            DistributedScanExecutor.stripHavingClause(
+                "SELECT \"counterid\", AVG(LENGTH(\"url\")) AS \"l\", COUNT(*) AS \"c\" FROM \"hits\" WHERE \"url\" <> '' GROUP BY \"counterid\" HAVING COUNT(*) > 100000 ORDER BY \"l\" DESC LIMIT 25"
+            )
+        );
+    }
+
+    public void testStripHavingClauseAtEnd() {
+        assertEquals(
+            "SELECT \"counterid\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"counterid\"",
+            DistributedScanExecutor.stripHavingClause(
+                "SELECT \"counterid\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"counterid\" HAVING COUNT(*) > 100000"
+            )
+        );
+    }
+
+    public void testStripHavingClauseNoHaving() {
+        String sql = "SELECT \"counterid\", COUNT(*) FROM \"hits\" GROUP BY \"counterid\" ORDER BY \"counterid\" DESC";
+        assertEquals(sql, DistributedScanExecutor.stripHavingClause(sql));
+    }
+
+    // ---- stripOrderByAndLimit tests ----
+
+    public void testStripOrderByAndLimit() {
+        assertEquals(
+            "SELECT \"searchphrase\", COUNT(*) AS \"c\" FROM \"hits\" WHERE \"searchphrase\" <> '' GROUP BY \"searchphrase\"",
+            DistributedScanExecutor.stripOrderByAndLimit(
+                "SELECT \"searchphrase\", COUNT(*) AS \"c\" FROM \"hits\" WHERE \"searchphrase\" <> '' GROUP BY \"searchphrase\" ORDER BY \"c\" DESC LIMIT 10"
+            )
+        );
+    }
+
+    public void testStripOrderByWithoutLimit() {
+        assertEquals(
+            "SELECT \"advengineid\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"advengineid\"",
+            DistributedScanExecutor.stripOrderByAndLimit(
+                "SELECT \"advengineid\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"advengineid\" ORDER BY \"c\" DESC"
+            )
+        );
+    }
+
+    public void testStripLimitWithOffsetPattern() {
+        assertEquals(
+            "SELECT * FROM \"hits\" GROUP BY \"a\"",
+            DistributedScanExecutor.stripOrderByAndLimit(
+                "SELECT * FROM \"hits\" GROUP BY \"a\" LIMIT 10 OFFSET 5"
+            )
+        );
+    }
+
+    public void testStripLimitWithoutOrderBy() {
+        assertEquals(
+            "SELECT \"userid\", \"searchphrase\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"userid\", \"searchphrase\"",
+            DistributedScanExecutor.stripOrderByAndLimit(
+                "SELECT \"userid\", \"searchphrase\", COUNT(*) AS \"c\" FROM \"hits\" GROUP BY \"userid\", \"searchphrase\" LIMIT 10"
+            )
+        );
+    }
+
+    public void testStripNothingWhenNoOrderByOrLimit() {
+        String sql = "SELECT \"url\", COUNT(*) FROM \"hits\" GROUP BY \"url\"";
+        assertEquals(sql, DistributedScanExecutor.stripOrderByAndLimit(sql));
     }
 
     public void testConstructorWithNodeDiscovery() {
@@ -271,6 +339,122 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         );
     }
 
+    @SuppressWarnings("unchecked")
+    public void testDistributedFailureFallsBackToSingleNode() throws Exception {
+        // When distributed dispatch fails, the executor should retry on single node
+        DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{99});
+        DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
+        DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
+        ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
+        TransportService transportService = mockTransportServiceWithThreadPool();
+
+        // Make remote dispatch fail with an error simulating oversized IPC
+        org.mockito.Mockito.doAnswer(invocation -> {
+            org.opensearch.transport.TransportResponseHandler<WorkerQueryResponse> handler =
+                (org.opensearch.transport.TransportResponseHandler<WorkerQueryResponse>) invocation.getArguments()[3];
+            handler.handleException(new org.opensearch.transport.RemoteTransportException(
+                "test", new IllegalStateException("Arrow IPC result too large for byte[] transport")
+            ));
+            return null;
+        }).when(transportService).sendRequest(
+            any(DiscoveryNode.class),
+            any(String.class),
+            any(org.opensearch.transport.TransportRequest.class),
+            any(org.opensearch.transport.TransportResponseHandler.class)
+        );
+
+        // Use a simple CONCAT RelNode (requires 2+ workers for distributed path)
+        RelNode relNode = mockSimpleRelNode();
+
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
+
+        List<Object[]> rows = executeAndWait(
+            executor, relNode, "SELECT COUNT(*) FROM t",
+            List.of("f1", "f2"), new long[]{100, 200},
+            Map.of("localMode", "true"), "t"
+        );
+
+        // Should have gotten results from single-node fallback
+        assertEquals(1, rows.size());
+        assertEquals(99, rows.get(0)[0]);
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testDisconnectedWorkersFallBackToSingleNode() throws Exception {
+        // When all remote workers are disconnected, should fall back to single-node immediately
+        DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{42});
+        DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
+        DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
+        ClusterService clusterService = mockClusterService(List.of(node1, node2), "n1");
+        TransportService transportService = mockTransportServiceWithThreadPool();
+
+        // Mark remote node as disconnected
+        when(transportService.nodeConnected(node2)).thenReturn(false);
+
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
+        RelNode relNode = mockSimpleRelNode();
+
+        List<Object[]> rows = executeAndWait(
+            executor, relNode, "SELECT COUNT(*) FROM t",
+            List.of("f1", "f2"), new long[]{100, 200},
+            Map.of("localMode", "true"), "t"
+        );
+
+        // Should have gotten results from single-node fallback (no transport dispatch attempted)
+        assertEquals(1, rows.size());
+        assertEquals(42, rows.get(0)[0]);
+        org.mockito.Mockito.verify(transportService, org.mockito.Mockito.never()).sendRequest(
+            any(DiscoveryNode.class),
+            any(String.class),
+            any(org.opensearch.transport.TransportRequest.class),
+            any(org.opensearch.transport.TransportResponseHandler.class)
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testDispatchLocalBatchesReturnsBatchHandle() throws Exception {
+        DiscoveryNode localNode = newNode("local", Map.of());
+        ClusterService clusterService = mockClusterService(List.of(localNode), "local");
+        TransportService transportService = mockTransportServiceWithThreadPool();
+
+        DataWarehouseQueryEngine mockBackend = mock(DataWarehouseQueryEngine.class);
+        when(mockBackend.executeQueryToBatches(any(DataWarehouseScanContext.class))).thenReturn(12345L);
+
+        DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
+
+        FilePartitioner.FileAssignment assignment = new FilePartitioner.FileAssignment(
+            List.of("f1", "f2"), new long[]{100, 200}, 300
+        );
+
+        java.util.concurrent.CompletableFuture<Long> future = executor.dispatchLocalBatches(
+            assignment, "SELECT * FROM t", Map.of("localMode", "true"), "t"
+        );
+
+        long handle = future.get(5, TimeUnit.SECONDS);
+        assertEquals(12345L, handle);
+    }
+
+    @SuppressWarnings("unchecked")
+    public void testDispatchLocalBatchesEmptyAssignment() throws Exception {
+        DiscoveryNode localNode = newNode("local", Map.of());
+        ClusterService clusterService = mockClusterService(List.of(localNode), "local");
+        TransportService transportService = mockTransportServiceWithThreadPool();
+
+        DistributedScanExecutor executor = new DistributedScanExecutor(
+            transportService, clusterService, mock(DataWarehouseQueryEngine.class)
+        );
+
+        FilePartitioner.FileAssignment emptyAssignment = new FilePartitioner.FileAssignment(
+            List.of(), new long[]{}, 0
+        );
+
+        java.util.concurrent.CompletableFuture<Long> future = executor.dispatchLocalBatches(
+            emptyAssignment, "SELECT * FROM t", Map.of(), "t"
+        );
+
+        assertEquals(0L, (long) future.get(5, TimeUnit.SECONDS));
+    }
+
     // --- Helper methods ---
 
     private static DiscoveryNode newNode(String nodeId, Map<String, String> attributes) {
@@ -322,6 +506,8 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         };
         when(transportService.getThreadPool()).thenReturn(threadPool);
         when(threadPool.executor(org.opensearch.lakehouse.LakehousePlugin.LAKEHOUSE_WORKER_THREAD_POOL)).thenReturn(directExecutor);
+        // All nodes are considered connected by default (tests can override)
+        when(transportService.nodeConnected(any(DiscoveryNode.class))).thenReturn(true);
         return transportService;
     }
 
@@ -335,6 +521,51 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         org.apache.calcite.rel.core.Aggregate agg = mock(org.apache.calcite.rel.core.Aggregate.class);
         when(agg.getGroupSet()).thenReturn(org.apache.calcite.util.ImmutableBitSet.of(0));
         when(agg.getAggCallList()).thenReturn(List.of());
+        when(agg.getInputs()).thenReturn(List.of());
+        org.apache.calcite.rel.type.RelDataType rowType = mock(org.apache.calcite.rel.type.RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(1);
+        when(agg.getRowType()).thenReturn(rowType);
+        return agg;
+    }
+
+    @SuppressWarnings("deprecation")
+    private RelNode mockGroupByAvgRelNode() {
+        org.apache.calcite.rel.core.Aggregate agg = mock(org.apache.calcite.rel.core.Aggregate.class);
+        when(agg.getGroupSet()).thenReturn(org.apache.calcite.util.ImmutableBitSet.of(0));
+        org.apache.calcite.rel.core.AggregateCall avgCall = new org.apache.calcite.rel.core.AggregateCall(
+            org.apache.calcite.sql.fun.SqlStdOperatorTable.AVG, false, List.of(),
+            new org.apache.calcite.sql.type.BasicSqlType(org.apache.calcite.rel.type.RelDataTypeSystem.DEFAULT,
+                org.apache.calcite.sql.type.SqlTypeName.DOUBLE), null
+        );
+        when(agg.getAggCallList()).thenReturn(List.of(avgCall));
+        when(agg.getInputs()).thenReturn(List.of());
+        return agg;
+    }
+
+    @SuppressWarnings("deprecation")
+    private RelNode mockGroupByDistinctRelNode() {
+        org.apache.calcite.rel.core.Aggregate agg = mock(org.apache.calcite.rel.core.Aggregate.class);
+        when(agg.getGroupSet()).thenReturn(org.apache.calcite.util.ImmutableBitSet.of(0));
+        org.apache.calcite.rel.core.AggregateCall distinctCall = new org.apache.calcite.rel.core.AggregateCall(
+            org.apache.calcite.sql.fun.SqlStdOperatorTable.COUNT, true, List.of(),
+            new org.apache.calcite.sql.type.BasicSqlType(org.apache.calcite.rel.type.RelDataTypeSystem.DEFAULT,
+                org.apache.calcite.sql.type.SqlTypeName.BIGINT), null
+        );
+        when(agg.getAggCallList()).thenReturn(List.of(distinctCall));
+        when(agg.getInputs()).thenReturn(List.of());
+        return agg;
+    }
+
+    @SuppressWarnings("deprecation")
+    private RelNode mockGroupBySumDistinctRelNode() {
+        org.apache.calcite.rel.core.Aggregate agg = mock(org.apache.calcite.rel.core.Aggregate.class);
+        when(agg.getGroupSet()).thenReturn(org.apache.calcite.util.ImmutableBitSet.of(0));
+        org.apache.calcite.rel.core.AggregateCall distinctSumCall = new org.apache.calcite.rel.core.AggregateCall(
+            org.apache.calcite.sql.fun.SqlStdOperatorTable.SUM, true, List.of(),
+            new org.apache.calcite.sql.type.BasicSqlType(org.apache.calcite.rel.type.RelDataTypeSystem.DEFAULT,
+                org.apache.calcite.sql.type.SqlTypeName.BIGINT), null
+        );
+        when(agg.getAggCallList()).thenReturn(List.of(distinctSumCall));
         when(agg.getInputs()).thenReturn(List.of());
         return agg;
     }

@@ -16,10 +16,13 @@ import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Aggregate;
 import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.core.Filter;
 import org.apache.calcite.rel.core.Sort;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rel.type.RelDataTypeSystem;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlAggFunction;
@@ -64,19 +67,50 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.GLOBAL_MERGE, QueryAnalyzer.analyze(agg));
     }
 
-    public void testGroupByAggregateReturnsSingleNode() {
+    public void testGroupByWithSimpleAggsReturnsTwoPhaseGroupBy() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0, 1), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
-        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, QueryAnalyzer.analyze(agg));
     }
 
-    public void testCountDistinctReturnsSingleNode() {
+    public void testGroupByWithAvgReturnsTwoPhaseGroupBy() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testGroupByWithCountDistinctReturnsDistinctExpand() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        assertEquals(MergeStrategy.DISTINCT_EXPAND, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testCountDistinctReturnsDistinctExpand() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        assertEquals(MergeStrategy.DISTINCT_EXPAND, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testGroupByWithMixedCountDistinctReturnsMixedDistinct() {
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countCall, countDistinctCall));
+        assertEquals(MergeStrategy.MIXED_DISTINCT, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testGlobalMixedCountDistinctReturnsMixedDistinct() {
+        AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(sumCall, countDistinctCall));
+        assertEquals(MergeStrategy.MIXED_DISTINCT, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testGroupByWithDistinctSumReturnsSingleNode() {
+        // SUM(DISTINCT x) is not COUNT(DISTINCT), so not supported
+        AggregateCall distinctSum = makeAggCall(SqlStdOperatorTable.SUM, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(distinctSum));
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
     }
 
-    public void testAvgReturnsSingleNode() {
+    public void testAvgReturnsGlobalMerge() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
-        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+        assertEquals(MergeStrategy.GLOBAL_MERGE, QueryAnalyzer.analyze(agg));
     }
 
     public void testSortWithLimitReturnsTopKMerge() {
@@ -86,6 +120,13 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
 
     public void testSortWithoutLimitReturnsSingleNode() {
         Sort sort = makeSort(true, false);
+        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(sort));
+    }
+
+    public void testSortWithLimitButSortColumnProjectedAwayReturnsSingleNode() {
+        // Simulates: SELECT SearchPhrase FROM hits ORDER BY EventTime LIMIT 10
+        // Sort on field index 1 (EventTime) but output only has 1 field (SearchPhrase)
+        Sort sort = makeSort(true, true, 1, 1);
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(sort));
     }
 
@@ -121,16 +162,38 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertTrue(QueryAnalyzer.hasDistinctOrAvg(agg));
     }
 
-    public void testMultipleAggCallsMixedDistinct() {
+    public void testDistinctSumWithNonDistinctCountReturnsSingleNode() {
+        // SUM(DISTINCT x) + COUNT(*) → not COUNT(DISTINCT), so SINGLE_NODE
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         AggregateCall distinctSumCall = makeAggCall(SqlStdOperatorTable.SUM, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, distinctSumCall));
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
     }
 
-    public void testEmptyAggCallListWithGroupByReturnsSingleNode() {
+    public void testHasMixedCountDistinctReturnsTrueForCountAndCountDistinct() {
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, countDistinctCall));
+        assertTrue(QueryAnalyzer.hasMixedCountDistinct(agg));
+    }
+
+    public void testHasMixedCountDistinctReturnsFalseForOnlyCountDistinct() {
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countDistinctCall));
+        assertFalse(QueryAnalyzer.hasMixedCountDistinct(agg));
+    }
+
+    public void testHasMixedCountDistinctReturnsFalseForSumDistinct() {
+        // SUM(DISTINCT) is not COUNT(DISTINCT) — should return false
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall sumDistinctCall = makeAggCall(SqlStdOperatorTable.SUM, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, sumDistinctCall));
+        assertFalse(QueryAnalyzer.hasMixedCountDistinct(agg));
+    }
+
+    public void testEmptyAggCallListWithGroupByReturnsTwoPhaseGroupBy() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of());
-        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, QueryAnalyzer.analyze(agg));
     }
 
     public void testEmptyAggCallListWithNoGroupByReturnsGlobalMerge() {
@@ -177,13 +240,113 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertNull(result.sortColumns);
     }
 
-    public void testAnalyzeDetailedSingleNodeHasNoMetadata() {
+    public void testAnalyzeDetailedTwoPhaseGroupByHasMetadata() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNotNull(result.isGroupKey);
+        assertEquals(2, result.isGroupKey.length);
+        assertTrue(result.isGroupKey[0]);  // GROUP BY key
+        assertFalse(result.isGroupKey[1]); // COUNT aggregate
+        assertNotNull(result.aggKinds);
+        assertEquals(SqlKind.COUNT, result.aggKinds[1]);
+    }
+
+    public void testAnalyzeDetailedSingleNodeHasNoMetadata() {
+        // SUM(DISTINCT) forces SINGLE_NODE (not COUNT DISTINCT, so can't use DISTINCT_EXPAND)
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.SUM, true)));
 
         QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
 
         assertEquals(MergeStrategy.SINGLE_NODE, result.strategy);
         assertNull(result.aggKinds);
+    }
+
+    public void testAnalyzeDetailedCountDistinctReturnsDistinctExpand() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.DISTINCT_EXPAND, result.strategy);
+    }
+
+    public void testGroupByWithAvgHasAvgInAggKinds() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNotNull(result.aggKinds);
+        assertEquals(SqlKind.AVG, result.aggKinds[1]); // index 0 is group key (null), index 1 is AVG
+    }
+
+    public void testGlobalAvgHasAvgInAggKinds() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.GLOBAL_MERGE, result.strategy);
+        assertNotNull(result.aggKinds);
+        assertEquals(1, result.aggKinds.length);
+        assertEquals(SqlKind.AVG, result.aggKinds[0]);
+    }
+
+    // --- hasDistinct / hasAvg tests ---
+
+    public void testHasDistinctReturnsFalseForCount() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        assertFalse(QueryAnalyzer.hasDistinct(agg));
+    }
+
+    public void testHasDistinctReturnsTrueForDistinctCount() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        assertTrue(QueryAnalyzer.hasDistinct(agg));
+    }
+
+    public void testHasDistinctReturnsFalseForAvg() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+        assertFalse(QueryAnalyzer.hasDistinct(agg));
+    }
+
+    public void testHasAvgReturnsTrueForAvg() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
+        assertTrue(QueryAnalyzer.hasAvg(agg));
+    }
+
+    public void testHasAvgReturnsFalseForCount() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        assertFalse(QueryAnalyzer.hasAvg(agg));
+    }
+
+    // --- hasOnlyCountDistinct tests ---
+
+    public void testHasOnlyCountDistinctReturnsTrueForSingleCountDistinct() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        assertTrue(QueryAnalyzer.hasOnlyCountDistinct(agg));
+    }
+
+    public void testHasOnlyCountDistinctReturnsFalseForNonDistinctCount() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        assertFalse(QueryAnalyzer.hasOnlyCountDistinct(agg));
+    }
+
+    public void testHasOnlyCountDistinctReturnsFalseForDistinctSum() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.SUM, true)));
+        assertFalse(QueryAnalyzer.hasOnlyCountDistinct(agg));
+    }
+
+    public void testHasOnlyCountDistinctReturnsFalseForMixed() {
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(countCall, countDistinctCall));
+        assertFalse(QueryAnalyzer.hasOnlyCountDistinct(agg));
+    }
+
+    public void testHasOnlyCountDistinctReturnsFalseForEmptyAggList() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of());
+        assertFalse(QueryAnalyzer.hasOnlyCountDistinct(agg));
     }
 
     public void testExtractAggKinds() {
@@ -219,10 +382,90 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(10, QueryAnalyzer.extractLimit(sort));
     }
 
+    public void testExtractOffsetFromRexLiteral() {
+        Sort sort = makeSortWithLimitAndOffset(10, 1000);
+        assertEquals(1000, QueryAnalyzer.extractOffset(sort));
+    }
+
+    public void testExtractOffsetFromSortWithoutOffsetReturnsZero() {
+        Sort sort = makeSortWithLimit(10);
+        assertEquals(0, QueryAnalyzer.extractOffset(sort));
+    }
+
     public void testExtractLimitFromNonLiteralReturnsZero() {
         Sort sort = makeSort(true, true);
         // makeSort uses mock(RexNode.class) which is not RexLiteral
         assertEquals(0, QueryAnalyzer.extractLimit(sort));
+    }
+
+    // --- HAVING clause tests ---
+
+    public void testFilterAboveAggregateReturnsTwoPhaseGroupBy() {
+        // Plan: Filter(HAVING) → Aggregate(GROUP BY + COUNT) — no Sort
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        Filter havingFilter = mockHavingFilter(agg, 1, SqlKind.GREATER_THAN, 100000);
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(havingFilter);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNotNull(result.having);
+        assertEquals(1, result.having.columnIndex);
+        assertEquals(SqlKind.GREATER_THAN, result.having.operator);
+        assertEquals(100000, result.having.value);
+    }
+
+    public void testFilterAboveAggregateWithAvgReturnsTwoPhaseGroupBy() {
+        // Plan: Filter(HAVING) → Aggregate(GROUP BY + AVG + COUNT) — no Sort
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(
+            makeAggCall(SqlStdOperatorTable.AVG, false),
+            makeAggCall(SqlStdOperatorTable.COUNT, false)
+        ));
+        Filter havingFilter = mockHavingFilter(agg, 2, SqlKind.GREATER_THAN, 100000);
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(havingFilter);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNotNull(result.having);
+        assertEquals(2, result.having.columnIndex);
+        assertEquals(100000, result.having.value);
+    }
+
+    public void testHavingConditionOperatorSql() {
+        assertEquals(">", new QueryAnalyzer.HavingCondition(0, SqlKind.GREATER_THAN, 0).operatorSql());
+        assertEquals(">=", new QueryAnalyzer.HavingCondition(0, SqlKind.GREATER_THAN_OR_EQUAL, 0).operatorSql());
+        assertEquals("<", new QueryAnalyzer.HavingCondition(0, SqlKind.LESS_THAN, 0).operatorSql());
+        assertEquals("<=", new QueryAnalyzer.HavingCondition(0, SqlKind.LESS_THAN_OR_EQUAL, 0).operatorSql());
+        assertEquals("=", new QueryAnalyzer.HavingCondition(0, SqlKind.EQUALS, 0).operatorSql());
+        assertEquals("!=", new QueryAnalyzer.HavingCondition(0, SqlKind.NOT_EQUALS, 0).operatorSql());
+    }
+
+    public void testExtractHavingConditionWithComparison() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        Filter filter = mockHavingFilter(agg, 1, SqlKind.GREATER_THAN, 100000);
+
+        QueryAnalyzer.HavingCondition having = QueryAnalyzer.extractHavingCondition(filter, 1);
+
+        assertNotNull(having);
+        assertEquals(1, having.columnIndex);
+        assertEquals(SqlKind.GREATER_THAN, having.operator);
+        assertEquals(100000, having.value);
+    }
+
+    public void testExtractHavingConditionWithNonCallReturnsNull() {
+        Filter filter = mock(Filter.class);
+        RexNode nonCall = mock(RexNode.class);
+        when(filter.getCondition()).thenReturn(nonCall);
+
+        assertNull(QueryAnalyzer.extractHavingCondition(filter, 1));
+    }
+
+    public void testGroupByWithoutHavingHasNullHaving() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, result.strategy);
+        assertNull(result.having);
     }
 
     // --- Helper methods ---
@@ -245,9 +488,13 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
     }
 
     private Sort makeSort(boolean hasCollation, boolean hasFetch) {
+        return makeSort(hasCollation, hasFetch, 0, 2);
+    }
+
+    private Sort makeSort(boolean hasCollation, boolean hasFetch, int sortFieldIndex, int outputFieldCount) {
         RelCollation collation;
         if (hasCollation) {
-            RelFieldCollation fieldCollation = new RelFieldCollation(0, RelFieldCollation.Direction.ASCENDING);
+            RelFieldCollation fieldCollation = new RelFieldCollation(sortFieldIndex, RelFieldCollation.Direction.ASCENDING);
             collation = RelCollations.of(fieldCollation);
         } else {
             collation = RelCollations.EMPTY;
@@ -259,6 +506,7 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
         RelNode input = mockSimpleNode();
         RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(outputFieldCount);
         when(input.getRowType()).thenReturn(rowType);
 
         return new StubSort(cluster, traitSet, input, collation, fetchNode);
@@ -273,9 +521,14 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
             super(cluster, traitSet, List.of(), input, collation, null, fetch);
         }
 
+        StubSort(RelOptCluster cluster, RelTraitSet traitSet, RelNode input, RelCollation collation,
+            RexNode offset, RexNode fetch) {
+            super(cluster, traitSet, List.of(), input, collation, offset, fetch);
+        }
+
         @Override
         public Sort copy(RelTraitSet traitSet, RelNode input, RelCollation collation, RexNode offset, RexNode fetch) {
-            return new StubSort(getCluster(), traitSet, input, collation, fetch);
+            return new StubSort(getCluster(), traitSet, input, collation, offset, fetch);
         }
     }
 
@@ -288,6 +541,9 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
     private RelNode mockNodeWithInput(RelNode input) {
         RelNode node = mock(RelNode.class);
         when(node.getInputs()).thenReturn(List.of(input));
+        RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(2);
+        when(node.getRowType()).thenReturn(rowType);
         // RelVisitor uses childrenAccept(), not getInputs(), for traversal
         doAnswer(invocation -> {
             org.apache.calcite.rel.RelVisitor visitor = invocation.getArgument(0);
@@ -295,6 +551,53 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
             return null;
         }).when(node).childrenAccept(any(org.apache.calcite.rel.RelVisitor.class));
         return node;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Filter mockHavingFilter(Aggregate input, int columnIndex, SqlKind operator, long value) {
+        Filter filter = mock(Filter.class);
+        when(filter.getInput()).thenReturn(input);
+        when(filter.getInputs()).thenReturn(List.of(input));
+        doAnswer(invocation -> {
+            org.apache.calcite.rel.RelVisitor visitor = invocation.getArgument(0);
+            visitor.visit(input, 0, filter);
+            return null;
+        }).when(filter).childrenAccept(any(org.apache.calcite.rel.RelVisitor.class));
+
+        // Build RexCall: column op value
+        RexInputRef colRef = mock(RexInputRef.class);
+        when(colRef.getIndex()).thenReturn(columnIndex);
+
+        RexLiteral valueLiteral = mock(RexLiteral.class);
+        when(valueLiteral.getValueAs(Number.class)).thenReturn(value);
+
+        RexCall call = mock(RexCall.class);
+        when(call.getKind()).thenReturn(operator);
+        when(call.getOperands()).thenReturn(List.of(colRef, valueLiteral));
+
+        when(filter.getCondition()).thenReturn(call);
+        return filter;
+    }
+
+    private Sort makeSortWithLimitAndOffset(int limitValue, int offsetValue) {
+        RelFieldCollation fieldCollation = new RelFieldCollation(0, RelFieldCollation.Direction.ASCENDING);
+        RelCollation collation = RelCollations.of(fieldCollation);
+
+        RelDataTypeFactory typeFactory = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
+        org.apache.calcite.rex.RexBuilder rexBuilder = new org.apache.calcite.rex.RexBuilder(typeFactory);
+        RexLiteral fetchLiteral = rexBuilder.makeExactLiteral(BigDecimal.valueOf(limitValue),
+            typeFactory.createSqlType(SqlTypeName.INTEGER));
+        RexLiteral offsetLiteral = rexBuilder.makeExactLiteral(BigDecimal.valueOf(offsetValue),
+            typeFactory.createSqlType(SqlTypeName.INTEGER));
+
+        RelOptCluster cluster = mock(RelOptCluster.class);
+        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
+        RelNode input = mockSimpleNode();
+        RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(2);
+        when(input.getRowType()).thenReturn(rowType);
+
+        return new StubSort(cluster, traitSet, input, collation, offsetLiteral, fetchLiteral);
     }
 
     private Sort makeSortWithLimit(int limitValue) {
@@ -310,6 +613,7 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
         RelNode input = mockSimpleNode();
         RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldCount()).thenReturn(2);
         when(input.getRowType()).thenReturn(rowType);
 
         return new StubSort(cluster, traitSet, input, collation, fetchLiteral);

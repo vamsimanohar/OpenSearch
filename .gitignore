@@ -76,3 +76,6 @@ doc-tools/missing-doclet/bin/
 /sandbox/plugins/analytics-backend-datafusion/target/
 /sandbox/libs/dataformat-native/rust/target
 /sandbox/plugins/analytics-backend-datafusion/src/main/resources/native/
+
+# git worktrees
+.worktrees/

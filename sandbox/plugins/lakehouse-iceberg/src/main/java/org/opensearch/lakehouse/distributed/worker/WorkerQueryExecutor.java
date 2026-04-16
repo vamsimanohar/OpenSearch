@@ -76,6 +76,23 @@ public final class WorkerQueryExecutor {
         );
 
         long t0 = System.currentTimeMillis();
+
+        // Try Arrow IPC path first (efficient binary transport)
+        try {
+            byte[] arrowIpcData = AccessController.doPrivileged(
+                (PrivilegedAction<byte[]>) () -> queryEngine.executeQueryArrowIpc(scanContext)
+            );
+            if (arrowIpcData != null && arrowIpcData.length > 0) {
+                long t1 = System.currentTimeMillis();
+                logger.info("[PERF] Worker query (Arrow IPC): {}ms ({} bytes)", t1 - t0, arrowIpcData.length);
+                return new WorkerQueryResponse(arrowIpcData);
+            }
+        } catch (UnsupportedOperationException e) {
+            // Fall through to legacy path
+            logger.debug("[WorkerQuery] Arrow IPC not supported, using legacy path");
+        }
+
+        // Legacy row-based path
         Iterable<Object[]> rows = AccessController.doPrivileged(
             (PrivilegedAction<Iterable<Object[]>>) () -> queryEngine.executeQuery(scanContext)
         );

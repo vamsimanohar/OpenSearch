@@ -137,8 +137,10 @@ jacocoTestCoverageVerification {
                 // LakehouseQueryTransportAction requires Guice-injected EngineContext
                 'org.opensearch.lakehouse.action.LakehouseQueryTransportAction',
                 // WorkerQueryTransportAction.doExecute requires Guice-injected TransportService and doPrivileged
-                'org.opensearch.lakehouse.distributed.WorkerQueryTransportAction',
-                // Anonymous TransportResponseHandler classes in DistributedScanExecutor — tested via transport mocks
+                'org.opensearch.lakehouse.distributed.worker.WorkerQueryTransportAction',
+                // DistributedScanExecutor orchestrates async distributed flow — main class tested via unit tests,
+                // Arrow IPC merge path requires live DataFusion backend (tested via integration tests)
+                'org.opensearch.lakehouse.distributed.DistributedScanExecutor',
                 'org.opensearch.lakehouse.distributed.DistributedScanExecutor.*'
             ]
             limit {

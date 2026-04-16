@@ -150,9 +150,12 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arrow_array::{Array, StructArray};
+use arrow::ipc::writer::StreamWriter as IpcStreamWriter;
+use arrow::ipc::reader::StreamReader as IpcStreamReader;
+use arrow_array::{Array, RecordBatch, StructArray};
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_schema::ffi::FFI_ArrowSchema;
+use arrow_schema::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
@@ -169,6 +172,85 @@ use object_store::ObjectStore;
 
 use crate::cross_rt_stream::CrossRtStream;
 use crate::runtime_manager::RuntimeManager;
+
+// mimalloc C API — linked via the global allocator set in the native lib crate.
+extern "C" {
+    /// Force mimalloc to return unused pages to the OS.
+    /// `force = true` aggressively decommits all freed pages.
+    fn mi_collect(force: bool);
+}
+
+/// Forces mimalloc to decommit freed pages back to the OS.
+///
+/// Called after each query completes to prevent RSS accumulation across queries.
+/// Without this, mimalloc retains freed pages in thread-local heaps for reuse,
+/// causing the process RSS to grow monotonically until the OS OOM killer triggers.
+fn mimalloc_purge() {
+    unsafe { mi_collect(true) };
+}
+
+/// Result container for Arrow IPC bytes returned to Java.
+/// Java accesses the data via `ipc_result_data_ptr` and `ipc_result_data_len`,
+/// then frees via `free_ipc_result`.
+pub struct IpcResult {
+    pub data: Vec<u8>,
+}
+
+/// Returns a pointer to the IPC data buffer.
+///
+/// # Safety
+/// `result_ptr` must be a valid pointer returned by `execute_iceberg_query_to_ipc`.
+pub unsafe fn ipc_result_data_ptr(result_ptr: i64) -> i64 {
+    let result = &*(result_ptr as *const IpcResult);
+    result.data.as_ptr() as i64
+}
+
+/// Returns the length of the IPC data buffer.
+///
+/// # Safety
+/// `result_ptr` must be a valid pointer returned by `execute_iceberg_query_to_ipc`.
+pub unsafe fn ipc_result_data_len(result_ptr: i64) -> i64 {
+    let result = &*(result_ptr as *const IpcResult);
+    result.data.len() as i64
+}
+
+/// Frees an IPC result. Safe to call with 0 (no-op).
+///
+/// # Safety
+/// `result_ptr` must be 0 or a valid pointer returned by `execute_iceberg_query_to_ipc`.
+pub unsafe fn free_ipc_result(result_ptr: i64) {
+    if result_ptr != 0 {
+        let _ = Box::from_raw(result_ptr as *mut IpcResult);
+    }
+}
+
+/// Serializes a list of RecordBatches to Arrow IPC stream format.
+fn batches_to_ipc(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<Vec<u8>, DataFusionError> {
+    let mut buf = Vec::new();
+    {
+        let mut writer = IpcStreamWriter::try_new(&mut buf, schema.as_ref())
+            .map_err(|e| DataFusionError::Execution(format!("IPC writer creation failed: {}", e)))?;
+        for batch in batches {
+            writer.write(batch)
+                .map_err(|e| DataFusionError::Execution(format!("IPC write failed: {}", e)))?;
+        }
+        writer.finish()
+            .map_err(|e| DataFusionError::Execution(format!("IPC finish failed: {}", e)))?;
+    }
+    Ok(buf)
+}
+
+/// Deserializes Arrow IPC stream bytes to RecordBatches.
+fn ipc_to_batches(ipc_bytes: &[u8]) -> Result<(SchemaRef, Vec<RecordBatch>), DataFusionError> {
+    let cursor = std::io::Cursor::new(ipc_bytes);
+    let reader = IpcStreamReader::try_new(cursor, None)
+        .map_err(|e| DataFusionError::Execution(format!("IPC reader creation failed: {}", e)))?;
+    let schema = reader.schema();
+    let batches: Vec<RecordBatch> = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| DataFusionError::Execution(format!("IPC read failed: {}", e)))?;
+    Ok((schema, batches))
+}
 
 /// Build ObjectMeta for each file using the given object store.
 pub async fn create_object_metas(
@@ -483,7 +565,8 @@ pub async fn execute_iceberg_query(
     // Build session — limit partitions to file count to avoid empty partition tasks
     let num_files = object_metas.len();
     let mut config = SessionConfig::new();
-    config.options_mut().execution.target_partitions = num_files.min(16).max(1);
+    let half_cpus = (num_cpus::get() / 2).max(1);
+    config.options_mut().execution.target_partitions = num_files.min(half_cpus).max(1);
     config.options_mut().execution.batch_size = 8192;
 
     let state = SessionStateBuilder::new()
@@ -618,6 +701,8 @@ pub async unsafe fn stream_next(
 }
 
 /// Closes a result stream. Safe to call with 0 (no-op).
+/// After dropping the stream, forces mimalloc to return freed pages to the OS
+/// so that accumulated native memory from previous queries doesn't cause OOM.
 ///
 /// # Safety
 /// `stream_ptr` must be 0 or a valid pointer returned by `execute_query`.
@@ -625,6 +710,673 @@ pub unsafe fn stream_close(stream_ptr: i64) {
     if stream_ptr != 0 {
         let _ = Box::from_raw(stream_ptr as *mut MemoryTrackingStream);
     }
+    // Force mimalloc to decommit freed pages back to the OS.
+    // Without this, mimalloc holds freed virtual memory pages in thread-local
+    // heaps for reuse, causing RSS to accumulate across queries until OOM.
+    mimalloc_purge();
+}
+
+/// Executes a SQL query against Parquet files and returns results as Arrow IPC bytes.
+///
+/// Same setup as `execute_iceberg_query` but collects all result batches and
+/// serializes them to Arrow IPC stream format. The returned `IpcResult` contains
+/// the complete IPC byte stream (schema + all batches).
+///
+/// This is used by distributed workers to produce Arrow IPC bytes for efficient
+/// network transport — Java passes the bytes through without deserialization.
+pub async fn execute_iceberg_query_to_ipc(
+    s3_region: &str,
+    s3_bucket: Option<&str>,
+    s3_access_key_id: Option<&str>,
+    s3_secret_access_key: Option<&str>,
+    s3_session_token: Option<&str>,
+    s3_endpoint: Option<&str>,
+    file_paths: Vec<String>,
+    file_sizes: Vec<i64>,
+    table_name: &str,
+    sql_query: &str,
+    runtime: &DataFusionRuntime,
+    cpu_executor: crate::executor::DedicatedExecutor,
+    io_handle: tokio::runtime::Handle,
+) -> Result<Vec<u8>, DataFusionError> {
+    use datafusion::datasource::file_format::parquet::ParquetFormat;
+    use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
+    use datafusion::execution::cache::cache_manager::CacheManagerConfig;
+    use datafusion::prelude::SessionContext;
+
+    use std::time::Instant;
+    let t_start = Instant::now();
+
+    let is_local = file_paths.first().map_or(false, |p| p.starts_with("file://"));
+
+    info!(
+        "execute_iceberg_query_to_ipc: region={}, bucket={:?}, files={}, local={}, table={}, sql={}",
+        s3_region, s3_bucket, file_paths.len(), is_local, table_name, sql_query
+    );
+
+    let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+        .with_cache_manager(
+            CacheManagerConfig::default()
+                .with_file_metadata_cache(Some(
+                    runtime.runtime_env.cache_manager.get_file_metadata_cache(),
+                ))
+                .with_files_statistics_cache(
+                    runtime.runtime_env.cache_manager.get_file_statistic_cache(),
+                ),
+        )
+        .build()
+        .map_err(|e| {
+            error!("Failed to build runtime env: {}", e);
+            e
+        })?;
+
+    let store: Arc<dyn ObjectStore>;
+    let file_urls: Vec<String>;
+
+    if is_local {
+        let local_store = Arc::new(object_store::local::LocalFileSystem::new());
+        store = local_store;
+        file_urls = file_paths.clone();
+        let local_url = url::Url::parse("file:///").map_err(|e| {
+            DataFusionError::Execution(format!("Invalid file URL: {}", e))
+        })?;
+        runtime_env.register_object_store(&local_url, store.clone());
+    } else {
+        let bucket = s3_bucket.unwrap_or("unknown");
+        let mut builder = AmazonS3Builder::new()
+            .with_region(s3_region)
+            .with_bucket_name(bucket);
+
+        if let Some(key) = s3_access_key_id {
+            builder = builder.with_access_key_id(key);
+        }
+        if let Some(secret) = s3_secret_access_key {
+            builder = builder.with_secret_access_key(secret);
+        }
+        if let Some(token) = s3_session_token {
+            builder = builder.with_token(token);
+        }
+        if let Some(endpoint) = s3_endpoint {
+            builder = builder.with_endpoint(endpoint);
+        }
+
+        let s3_store = Arc::new(builder.build().map_err(|e| {
+            DataFusionError::Execution(format!("Failed to build S3 object store: {}", e))
+        })?);
+        store = s3_store.clone();
+
+        let store_url = url::Url::parse(&format!("s3://{}/", bucket)).map_err(|e| {
+            DataFusionError::Execution(format!("Invalid S3 URL: {}", e))
+        })?;
+        let cross_rt_store = Arc::new(
+            crate::cross_rt_object_store::CrossRuntimeObjectStore::new(s3_store.clone(), io_handle)
+        );
+        runtime_env.register_object_store(&store_url, cross_rt_store);
+
+        let bucket_prefix = format!("s3://{}/", bucket);
+        file_urls = file_paths.iter().map(|path| {
+            if path.starts_with("s3://") {
+                path.clone()
+            } else {
+                format!("{}{}", bucket_prefix, path)
+            }
+        }).collect();
+    }
+
+    let object_metas: Vec<object_store::ObjectMeta> = file_paths.iter().zip(file_sizes.iter()).map(|(path, &size)| {
+        let key = if let Some(stripped) = path.strip_prefix("file://") {
+            stripped.to_string()
+        } else if let Some(bucket) = s3_bucket {
+            let bucket_prefix = format!("s3://{}/", bucket);
+            if let Some(stripped) = path.strip_prefix(&bucket_prefix) {
+                stripped.to_string()
+            } else if let Some(stripped) = path.strip_prefix("s3://") {
+                if let Some(after_bucket) = stripped.find('/') {
+                    stripped[after_bucket + 1..].to_string()
+                } else {
+                    path.clone()
+                }
+            } else {
+                path.clone()
+            }
+        } else {
+            path.clone()
+        };
+        object_store::ObjectMeta {
+            location: object_store::path::Path::from(key.as_str()),
+            size: size as u64,
+            last_modified: Default::default(),
+            e_tag: None,
+            version: None,
+        }
+    }).collect();
+
+    let num_files = object_metas.len();
+    let mut config = SessionConfig::new();
+    let half_cpus = (num_cpus::get() / 2).max(1);
+    config.options_mut().execution.target_partitions = num_files.min(half_cpus).max(1);
+    config.options_mut().execution.batch_size = 8192;
+
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(Arc::from(runtime_env))
+        .with_default_features()
+        .build();
+
+    let ctx = SessionContext::new_with_state(state);
+
+    let file_format = Arc::new(ParquetFormat::new());
+    use datafusion::datasource::file_format::FileFormat;
+    let resolved_schema = file_format.infer_schema(
+        &ctx.state(),
+        &store,
+        &[object_metas[0].clone()],
+    ).await?;
+
+    let listing_options = ListingOptions::new(file_format)
+        .with_file_extension(".parquet")
+        .with_collect_stat(true);
+
+    let table_config = ListingTableConfig::new_with_multi_paths(
+        file_urls.iter()
+            .map(|u| ListingTableUrl::parse(u))
+            .collect::<Result<Vec<_>, _>>()?
+    )
+        .with_listing_options(listing_options)
+        .with_schema(resolved_schema);
+
+    let provider = Arc::new(ListingTable::try_new(table_config)?);
+    ctx.register_table(table_name, provider)?;
+
+    crate::cross_rt_object_store::reset_s3_counters();
+
+    let dataframe = ctx.sql(sql_query).await?;
+    let plan = dataframe.create_physical_plan().await?;
+
+    let stream = datafusion::physical_plan::execute_stream(plan, ctx.task_ctx())?;
+    let schema = stream.schema();
+
+    // Collect all batches via CrossRtStream (CPU executor pulls batches)
+    let cross_rt_stream = CrossRtStream::new_with_df_error_stream(stream, cpu_executor);
+    let batches: Vec<RecordBatch> = cross_rt_stream.try_collect().await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    eprintln!(
+        "[PERF] execute_iceberg_query_to_ipc: {}ms, {} batches, {} rows",
+        t_start.elapsed().as_millis(), batches.len(), total_rows
+    );
+
+    crate::cross_rt_object_store::dump_s3_counters();
+
+    // Serialize to Arrow IPC stream format
+    let ipc_bytes = batches_to_ipc(&schema, &batches)?;
+    eprintln!("[PERF] Arrow IPC serialization: {} bytes", ipc_bytes.len());
+
+    // Drop intermediate data before purging
+    drop(batches);
+
+    // Force mimalloc to return freed pages to the OS after query execution.
+    // Without this, worker RSS accumulates across queries causing OOM.
+    mimalloc_purge();
+
+    Ok(ipc_bytes)
+}
+
+/// Executes a SQL query against Parquet files and returns results as a batch handle.
+///
+/// Same setup as `execute_iceberg_query_to_ipc` but skips IPC serialization.
+/// Returns a heap-allocated pointer to `(SchemaRef, Vec<RecordBatch>)` as i64.
+/// The caller must eventually pass this handle to `execute_merge_streaming` or
+/// `batch_handle_free` to avoid leaking memory.
+///
+/// This is used by the coordinator when it also acts as a worker — the local
+/// batches are merged with remote IPC results without serialization overhead.
+pub async fn execute_query_to_batches(
+    s3_region: &str,
+    s3_bucket: Option<&str>,
+    s3_access_key_id: Option<&str>,
+    s3_secret_access_key: Option<&str>,
+    s3_session_token: Option<&str>,
+    s3_endpoint: Option<&str>,
+    file_paths: Vec<String>,
+    file_sizes: Vec<i64>,
+    table_name: &str,
+    sql_query: &str,
+    runtime: &DataFusionRuntime,
+    cpu_executor: crate::executor::DedicatedExecutor,
+    io_handle: tokio::runtime::Handle,
+) -> Result<i64, DataFusionError> {
+    use datafusion::datasource::file_format::parquet::ParquetFormat;
+    use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
+    use datafusion::execution::cache::cache_manager::CacheManagerConfig;
+    use datafusion::prelude::SessionContext;
+
+    use std::time::Instant;
+    let t_start = Instant::now();
+
+    let is_local = file_paths.first().map_or(false, |p| p.starts_with("file://"));
+
+    info!(
+        "execute_query_to_batches: region={}, bucket={:?}, files={}, local={}, table={}, sql={}",
+        s3_region, s3_bucket, file_paths.len(), is_local, table_name, sql_query
+    );
+
+    let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+        .with_cache_manager(
+            CacheManagerConfig::default()
+                .with_file_metadata_cache(Some(
+                    runtime.runtime_env.cache_manager.get_file_metadata_cache(),
+                ))
+                .with_files_statistics_cache(
+                    runtime.runtime_env.cache_manager.get_file_statistic_cache(),
+                ),
+        )
+        .build()
+        .map_err(|e| {
+            error!("Failed to build runtime env: {}", e);
+            e
+        })?;
+
+    let store: Arc<dyn ObjectStore>;
+    let file_urls: Vec<String>;
+
+    if is_local {
+        let local_store = Arc::new(object_store::local::LocalFileSystem::new());
+        store = local_store;
+        file_urls = file_paths.clone();
+        let local_url = url::Url::parse("file:///").map_err(|e| {
+            DataFusionError::Execution(format!("Invalid file URL: {}", e))
+        })?;
+        runtime_env.register_object_store(&local_url, store.clone());
+    } else {
+        let bucket = s3_bucket.unwrap_or("unknown");
+        let mut builder = AmazonS3Builder::new()
+            .with_region(s3_region)
+            .with_bucket_name(bucket);
+
+        if let Some(key) = s3_access_key_id {
+            builder = builder.with_access_key_id(key);
+        }
+        if let Some(secret) = s3_secret_access_key {
+            builder = builder.with_secret_access_key(secret);
+        }
+        if let Some(token) = s3_session_token {
+            builder = builder.with_token(token);
+        }
+        if let Some(endpoint) = s3_endpoint {
+            builder = builder.with_endpoint(endpoint);
+        }
+
+        let s3_store = Arc::new(builder.build().map_err(|e| {
+            DataFusionError::Execution(format!("Failed to build S3 object store: {}", e))
+        })?);
+        store = s3_store.clone();
+
+        let store_url = url::Url::parse(&format!("s3://{}/", bucket)).map_err(|e| {
+            DataFusionError::Execution(format!("Invalid S3 URL: {}", e))
+        })?;
+        let cross_rt_store = Arc::new(
+            crate::cross_rt_object_store::CrossRuntimeObjectStore::new(s3_store.clone(), io_handle)
+        );
+        runtime_env.register_object_store(&store_url, cross_rt_store);
+
+        let bucket_prefix = format!("s3://{}/", bucket);
+        file_urls = file_paths.iter().map(|path| {
+            if path.starts_with("s3://") {
+                path.clone()
+            } else {
+                format!("{}{}", bucket_prefix, path)
+            }
+        }).collect();
+    }
+
+    let object_metas: Vec<object_store::ObjectMeta> = file_paths.iter().zip(file_sizes.iter()).map(|(path, &size)| {
+        let key = if let Some(stripped) = path.strip_prefix("file://") {
+            stripped.to_string()
+        } else if let Some(bucket) = s3_bucket {
+            let bucket_prefix = format!("s3://{}/", bucket);
+            if let Some(stripped) = path.strip_prefix(&bucket_prefix) {
+                stripped.to_string()
+            } else if let Some(stripped) = path.strip_prefix("s3://") {
+                if let Some(after_bucket) = stripped.find('/') {
+                    stripped[after_bucket + 1..].to_string()
+                } else {
+                    path.clone()
+                }
+            } else {
+                path.clone()
+            }
+        } else {
+            path.clone()
+        };
+        object_store::ObjectMeta {
+            location: object_store::path::Path::from(key.as_str()),
+            size: size as u64,
+            last_modified: Default::default(),
+            e_tag: None,
+            version: None,
+        }
+    }).collect();
+
+    let num_files = object_metas.len();
+    let mut config = SessionConfig::new();
+    let half_cpus = (num_cpus::get() / 2).max(1);
+    config.options_mut().execution.target_partitions = num_files.min(half_cpus).max(1);
+    config.options_mut().execution.batch_size = 8192;
+
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(Arc::from(runtime_env))
+        .with_default_features()
+        .build();
+
+    let ctx = SessionContext::new_with_state(state);
+
+    let file_format = Arc::new(ParquetFormat::new());
+    use datafusion::datasource::file_format::FileFormat;
+    let resolved_schema = file_format.infer_schema(
+        &ctx.state(),
+        &store,
+        &[object_metas[0].clone()],
+    ).await?;
+
+    let listing_options = ListingOptions::new(file_format)
+        .with_file_extension(".parquet")
+        .with_collect_stat(true);
+
+    let table_config = ListingTableConfig::new_with_multi_paths(
+        file_urls.iter()
+            .map(|u| ListingTableUrl::parse(u))
+            .collect::<Result<Vec<_>, _>>()?
+    )
+        .with_listing_options(listing_options)
+        .with_schema(resolved_schema);
+
+    let provider = Arc::new(ListingTable::try_new(table_config)?);
+    ctx.register_table(table_name, provider)?;
+
+    crate::cross_rt_object_store::reset_s3_counters();
+
+    let dataframe = ctx.sql(sql_query).await?;
+    let plan = dataframe.create_physical_plan().await?;
+
+    let stream = datafusion::physical_plan::execute_stream(plan, ctx.task_ctx())?;
+    let schema = stream.schema();
+
+    // Collect all batches via CrossRtStream (CPU executor pulls batches)
+    let cross_rt_stream = CrossRtStream::new_with_df_error_stream(stream, cpu_executor);
+    let batches: Vec<RecordBatch> = cross_rt_stream.try_collect().await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    eprintln!(
+        "[PERF] execute_query_to_batches: {}ms, {} batches, {} rows",
+        t_start.elapsed().as_millis(), batches.len(), total_rows
+    );
+
+    crate::cross_rt_object_store::dump_s3_counters();
+
+    // Return batch handle — batches stay alive until batch_handle_free or execute_merge_streaming
+    Ok(Box::into_raw(Box::new((schema, batches))) as i64)
+}
+
+/// A PartitionStream backed by in-memory RecordBatches.
+/// Used to create StreamingTable from deserialized Arrow IPC data.
+#[derive(Debug)]
+struct MemoryPartitionStream {
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+}
+
+impl datafusion::physical_plan::streaming::PartitionStream for MemoryPartitionStream {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    fn execute(
+        &self,
+        _ctx: Arc<datafusion::execution::TaskContext>,
+    ) -> datafusion::execution::SendableRecordBatchStream {
+        let schema = self.schema.clone();
+        let batches = self.batches.clone();
+        let stream = futures::stream::iter(batches.into_iter().map(Ok));
+        Box::pin(RecordBatchStreamAdapter::new(schema, stream))
+    }
+}
+
+/// Executes SQL against Arrow IPC input data using DataFusion StreamingTable.
+///
+/// Used by the coordinator to merge worker results: takes Arrow IPC bytes from
+/// multiple workers, registers them as a single StreamingTable named "input",
+/// runs the merge SQL, and returns the result as Arrow IPC bytes.
+///
+/// This is the foundation for Phase 2.2 (coordinator StreamingTable merge) and
+/// will later be used by Stage 1 workers for shuffle consumption.
+pub async fn execute_from_ipc(
+    ipc_batches: Vec<&[u8]>,
+    sql: &str,
+    runtime: &DataFusionRuntime,
+    cpu_executor: crate::executor::DedicatedExecutor,
+) -> Result<Vec<u8>, DataFusionError> {
+    use datafusion::catalog::streaming::StreamingTable;
+    use datafusion::prelude::SessionContext;
+
+    use std::time::Instant;
+    let t_start = Instant::now();
+
+    // Deserialize all worker IPC bytes into RecordBatches
+    let mut all_batches = Vec::new();
+    let mut schema: Option<SchemaRef> = None;
+    for (i, ipc_bytes) in ipc_batches.iter().enumerate() {
+        let (batch_schema, batches) = ipc_to_batches(ipc_bytes)?;
+        if schema.is_none() {
+            schema = Some(batch_schema);
+        }
+        eprintln!("[PERF] execute_from_ipc: worker {} → {} batches", i, batches.len());
+        all_batches.extend(batches);
+    }
+
+    let schema = schema.ok_or_else(|| {
+        DataFusionError::Execution("No Arrow IPC data from workers".to_string())
+    })?;
+
+    info!(
+        "execute_from_ipc: {} workers, {} total batches, sql={}",
+        ipc_batches.len(), all_batches.len(), sql
+    );
+
+    // Create a StreamingTable from the collected batches via PartitionStream
+    let partition = Arc::new(MemoryPartitionStream {
+        schema: schema.clone(),
+        batches: all_batches,
+    }) as Arc<dyn datafusion::physical_plan::streaming::PartitionStream>;
+
+    let streaming_table = StreamingTable::try_new(
+        schema.clone(),
+        vec![partition],
+    )?;
+
+    // Build session and register the streaming table as "input"
+    let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+        .build()
+        .map_err(|e| {
+            error!("Failed to build runtime env for merge: {}", e);
+            e
+        })?;
+
+    let config = SessionConfig::new();
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(Arc::from(runtime_env))
+        .with_default_features()
+        .build();
+
+    let ctx = SessionContext::new_with_state(state);
+    ctx.register_table("input", Arc::new(streaming_table))?;
+
+    // Execute the merge SQL
+    let dataframe = ctx.sql(sql).await?;
+    let plan = dataframe.create_physical_plan().await?;
+    let stream = datafusion::physical_plan::execute_stream(plan, ctx.task_ctx())?;
+    let result_schema = stream.schema();
+
+    // Collect results via CrossRtStream
+    let cross_rt_stream = CrossRtStream::new_with_df_error_stream(stream, cpu_executor);
+    let result_batches: Vec<RecordBatch> = cross_rt_stream.try_collect().await?;
+
+    let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+    eprintln!(
+        "[PERF] execute_from_ipc: {}ms, {} result rows",
+        t_start.elapsed().as_millis(), total_rows
+    );
+
+    // Serialize result to Arrow IPC
+    let ipc = batches_to_ipc(&result_schema, &result_batches)?;
+
+    // Drop intermediate data before purging
+    drop(result_batches);
+
+    // Force mimalloc to return freed pages to the OS after merge.
+    mimalloc_purge();
+
+    Ok(ipc)
+}
+
+/// Executes SQL against a mix of local batches and remote Arrow IPC data, returning
+/// a streaming result (MemoryTrackingStream pointer).
+///
+/// If `local_batch_handle` is non-zero, it is consumed (zero-copy move) — the handle
+/// becomes invalid after this call. Remote IPC bytes are deserialized as usual.
+/// All batches are registered as a single StreamingTable named "input", the merge SQL
+/// runs against it, and the result is returned as a stream pointer for stream_next/
+/// stream_close.
+///
+/// This is used by the coordinator-as-worker path: the coordinator runs its own
+/// partition locally (producing a batch handle), then merges with remote worker
+/// IPC results via this function — avoiding a round-trip through IPC serialization
+/// for local data.
+///
+/// # Safety
+/// `local_batch_handle` must be 0 or a valid pointer from `execute_query_to_batches`.
+pub async fn execute_merge_streaming(
+    local_batch_handle: i64,
+    ipc_batches: Vec<&[u8]>,
+    sql: &str,
+    runtime: &DataFusionRuntime,
+    cpu_executor: crate::executor::DedicatedExecutor,
+) -> Result<i64, DataFusionError> {
+    use datafusion::catalog::streaming::StreamingTable;
+    use datafusion::prelude::SessionContext;
+
+    use std::time::Instant;
+    let t_start = Instant::now();
+
+    let mut all_batches = Vec::new();
+    let mut schema: Option<SchemaRef> = None;
+
+    // Consume local batch handle (zero-copy move) if present
+    if local_batch_handle != 0 {
+        let (local_schema, local_batches) = unsafe {
+            *Box::from_raw(local_batch_handle as *mut (SchemaRef, Vec<RecordBatch>))
+        };
+        eprintln!(
+            "[PERF] execute_merge_streaming: local → {} batches",
+            local_batches.len()
+        );
+        schema = Some(local_schema);
+        all_batches.extend(local_batches);
+    }
+
+    // Deserialize remote IPC bytes into RecordBatches
+    for (i, ipc_bytes) in ipc_batches.iter().enumerate() {
+        let (batch_schema, batches) = ipc_to_batches(ipc_bytes)?;
+        if schema.is_none() {
+            schema = Some(batch_schema);
+        }
+        eprintln!(
+            "[PERF] execute_merge_streaming: worker {} → {} batches",
+            i, batches.len()
+        );
+        all_batches.extend(batches);
+    }
+
+    let schema = schema.ok_or_else(|| {
+        DataFusionError::Execution("No data from local batches or remote workers".to_string())
+    })?;
+
+    info!(
+        "execute_merge_streaming: local={}, remote={}, total batches={}, sql={}",
+        local_batch_handle != 0, ipc_batches.len(), all_batches.len(), sql
+    );
+
+    // Create a StreamingTable from the collected batches via PartitionStream
+    let partition = Arc::new(MemoryPartitionStream {
+        schema: schema.clone(),
+        batches: all_batches,
+    }) as Arc<dyn datafusion::physical_plan::streaming::PartitionStream>;
+
+    let streaming_table = StreamingTable::try_new(
+        schema.clone(),
+        vec![partition],
+    )?;
+
+    // Build session and register the streaming table as "input"
+    let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+        .build()
+        .map_err(|e| {
+            error!("Failed to build runtime env for merge: {}", e);
+            e
+        })?;
+
+    let config = SessionConfig::new();
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(Arc::from(runtime_env))
+        .with_default_features()
+        .build();
+
+    let ctx = SessionContext::new_with_state(state);
+    ctx.register_table("input", Arc::new(streaming_table))?;
+
+    // Execute the merge SQL
+    let dataframe = ctx.sql(sql).await?;
+    let plan = dataframe.create_physical_plan().await?;
+
+    let memory_pool = runtime.runtime_env.memory_pool.clone();
+    let pool_reserved = memory_pool.reserved();
+    eprintln!(
+        "[PERF] execute_merge_streaming: memory pool {} MB reserved before execution",
+        pool_reserved / (1024 * 1024)
+    );
+
+    let stream = datafusion::physical_plan::execute_stream(plan, ctx.task_ctx())?;
+    eprintln!(
+        "[PERF] execute_merge_streaming setup: {}ms",
+        t_start.elapsed().as_millis()
+    );
+
+    // CrossRtStream + MemoryTrackingStream (same pattern as execute_iceberg_query)
+    let cross_rt_stream = CrossRtStream::new_with_df_error_stream(stream, cpu_executor);
+    let wrapped = MemoryTrackingStream {
+        inner: RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream),
+        memory_pool,
+        peak_memory: std::sync::atomic::AtomicUsize::new(pool_reserved),
+    };
+
+    Ok(Box::into_raw(Box::new(wrapped)) as i64)
+}
+
+/// Frees a batch handle returned by `execute_query_to_batches`.
+///
+/// Safe to call with 0 (no-op). Used for error cleanup when
+/// `execute_merge_streaming` is never called after obtaining a batch handle.
+///
+/// # Safety
+/// `handle` must be 0 or a valid pointer from `execute_query_to_batches`.
+pub unsafe fn batch_handle_free(handle: i64) {
+    if handle != 0 {
+        let _ = Box::from_raw(handle as *mut (SchemaRef, Vec<RecordBatch>));
+    }
+    mimalloc_purge();
 }
 
 /// Converts SQL to Substrait plan bytes (test only).
@@ -696,4 +1448,241 @@ pub unsafe fn sql_to_substrait(
             .map_err(|e| DataFusionError::Execution(format!("Substrait encode failed: {}", e)))?;
         Ok(buf)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow_array::{Int64Array, StringArray};
+
+    fn test_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+        ]))
+    }
+
+    fn test_batch(ids: &[i64], names: &[&str]) -> RecordBatch {
+        RecordBatch::try_new(
+            test_schema(),
+            vec![
+                Arc::new(Int64Array::from(ids.to_vec())),
+                Arc::new(StringArray::from(names.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_ipc_roundtrip_single_batch() {
+        let schema = test_schema();
+        let batch = test_batch(&[1, 2, 3], &["alice", "bob", "charlie"]);
+
+        let ipc_bytes = batches_to_ipc(&schema, &[batch.clone()]).unwrap();
+        let (decoded_schema, decoded_batches) = ipc_to_batches(&ipc_bytes).unwrap();
+
+        assert_eq!(decoded_schema, schema);
+        assert_eq!(decoded_batches.len(), 1);
+        assert_eq!(decoded_batches[0].num_rows(), 3);
+        assert_eq!(decoded_batches[0], batch);
+    }
+
+    #[test]
+    fn test_ipc_roundtrip_multiple_batches() {
+        let schema = test_schema();
+        let batch1 = test_batch(&[1, 2], &["a", "b"]);
+        let batch2 = test_batch(&[3, 4, 5], &["c", "d", "e"]);
+
+        let ipc_bytes = batches_to_ipc(&schema, &[batch1.clone(), batch2.clone()]).unwrap();
+        let (_, decoded_batches) = ipc_to_batches(&ipc_bytes).unwrap();
+
+        assert_eq!(decoded_batches.len(), 2);
+        assert_eq!(decoded_batches[0], batch1);
+        assert_eq!(decoded_batches[1], batch2);
+    }
+
+    #[test]
+    fn test_ipc_roundtrip_empty_batch() {
+        let schema = test_schema();
+        let batch = RecordBatch::new_empty(schema.clone());
+
+        let ipc_bytes = batches_to_ipc(&schema, &[batch]).unwrap();
+        let (decoded_schema, decoded_batches) = ipc_to_batches(&ipc_bytes).unwrap();
+
+        assert_eq!(decoded_schema, schema);
+        assert_eq!(decoded_batches.len(), 1);
+        assert_eq!(decoded_batches[0].num_rows(), 0);
+    }
+
+    #[test]
+    fn test_ipc_roundtrip_no_batches() {
+        let schema = test_schema();
+
+        let ipc_bytes = batches_to_ipc(&schema, &[]).unwrap();
+        let (decoded_schema, decoded_batches) = ipc_to_batches(&ipc_bytes).unwrap();
+
+        assert_eq!(decoded_schema, schema);
+        assert_eq!(decoded_batches.len(), 0);
+    }
+
+    #[test]
+    fn test_ipc_schema_preserved() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("col_a", DataType::Int64, true),
+            Field::new("col_b", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1), None, Some(3)])),
+                Arc::new(StringArray::from(vec!["x", "y", "z"])),
+            ],
+        )
+        .unwrap();
+
+        let ipc_bytes = batches_to_ipc(&schema, &[batch]).unwrap();
+        let (decoded_schema, _) = ipc_to_batches(&ipc_bytes).unwrap();
+
+        assert_eq!(decoded_schema.fields().len(), 2);
+        assert_eq!(decoded_schema.field(0).name(), "col_a");
+        assert!(decoded_schema.field(0).is_nullable());
+        assert_eq!(decoded_schema.field(1).name(), "col_b");
+        assert!(!decoded_schema.field(1).is_nullable());
+    }
+
+    fn create_test_runtime() -> DataFusionRuntime {
+        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        let runtime_env = RuntimeEnvBuilder::new()
+            .build()
+            .unwrap();
+        DataFusionRuntime {
+            runtime_env: runtime_env,
+        }
+    }
+
+    fn create_test_executor() -> crate::executor::DedicatedExecutor {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(2).enable_all();
+        crate::executor::DedicatedExecutor::new("test-cpu", builder)
+    }
+
+    #[tokio::test]
+    async fn test_execute_from_ipc_concat() {
+        let runtime = create_test_runtime();
+        let executor = create_test_executor();
+
+        let schema = test_schema();
+        let batch1 = test_batch(&[1, 2], &["a", "b"]);
+        let batch2 = test_batch(&[3, 4], &["c", "d"]);
+
+        let ipc1 = batches_to_ipc(&schema, &[batch1]).unwrap();
+        let ipc2 = batches_to_ipc(&schema, &[batch2]).unwrap();
+
+        let result_bytes = execute_from_ipc(
+            vec![ipc1.as_slice(), ipc2.as_slice()],
+            "SELECT * FROM input",
+            &runtime,
+            executor.clone(),
+        )
+        .await
+        .unwrap();
+
+        let (_, result_batches) = ipc_to_batches(&result_bytes).unwrap();
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 4);
+        executor.join_blocking();
+    }
+
+    #[tokio::test]
+    async fn test_execute_from_ipc_aggregation() {
+        let runtime = create_test_runtime();
+        let executor = create_test_executor();
+
+        let agg_schema = Arc::new(Schema::new(vec![
+            Field::new("cnt", DataType::Int64, false),
+            Field::new("total", DataType::Int64, false),
+        ]));
+        let batch1 = RecordBatch::try_new(
+            agg_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![100])),
+                Arc::new(Int64Array::from(vec![5000])),
+            ],
+        )
+        .unwrap();
+        let batch2 = RecordBatch::try_new(
+            agg_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![200])),
+                Arc::new(Int64Array::from(vec![3000])),
+            ],
+        )
+        .unwrap();
+
+        let ipc1 = batches_to_ipc(&agg_schema, &[batch1]).unwrap();
+        let ipc2 = batches_to_ipc(&agg_schema, &[batch2]).unwrap();
+
+        let result_bytes = execute_from_ipc(
+            vec![ipc1.as_slice(), ipc2.as_slice()],
+            "SELECT SUM(cnt) AS cnt, SUM(total) AS total FROM input",
+            &runtime,
+            executor.clone(),
+        )
+        .await
+        .unwrap();
+
+        let (_, result_batches) = ipc_to_batches(&result_bytes).unwrap();
+        assert_eq!(result_batches.len(), 1);
+        assert_eq!(result_batches[0].num_rows(), 1);
+
+        let cnt_col = result_batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let total_col = result_batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(cnt_col.value(0), 300);
+        assert_eq!(total_col.value(0), 8000);
+        executor.join_blocking();
+    }
+
+    #[tokio::test]
+    async fn test_execute_from_ipc_topk() {
+        let runtime = create_test_runtime();
+        let executor = create_test_executor();
+
+        let schema = test_schema();
+        let batch1 = test_batch(&[10, 30], &["x", "z"]);
+        let batch2 = test_batch(&[20, 40], &["y", "w"]);
+
+        let ipc1 = batches_to_ipc(&schema, &[batch1]).unwrap();
+        let ipc2 = batches_to_ipc(&schema, &[batch2]).unwrap();
+
+        let result_bytes = execute_from_ipc(
+            vec![ipc1.as_slice(), ipc2.as_slice()],
+            "SELECT * FROM input ORDER BY id DESC LIMIT 2",
+            &runtime,
+            executor.clone(),
+        )
+        .await
+        .unwrap();
+
+        let (_, result_batches) = ipc_to_batches(&result_bytes).unwrap();
+        let total_rows: usize = result_batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+
+        let id_col = result_batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(id_col.value(0), 40);
+        assert_eq!(id_col.value(1), 30);
+        executor.join_blocking();
+    }
 }
