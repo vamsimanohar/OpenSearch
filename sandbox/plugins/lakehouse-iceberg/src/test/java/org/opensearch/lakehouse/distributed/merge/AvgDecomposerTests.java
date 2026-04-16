@@ -46,7 +46,7 @@ public class AvgDecomposerTests extends OpenSearchTestCase {
         String sql = "SELECT AVG(\"resolutionwidth\") FROM \"hits\"";
         String result = AvgDecomposer.decomposeWorkerSql(sql);
         assertEquals(
-            "SELECT SUM(\"resolutionwidth\") AS \"__avg_sum_0\", COUNT(\"resolutionwidth\") AS \"__avg_count_0\" FROM \"hits\"",
+            "SELECT SUM(CAST(\"resolutionwidth\" AS DOUBLE)) AS \"__avg_sum_0\", COUNT(\"resolutionwidth\") AS \"__avg_count_0\" FROM \"hits\"",
             result
         );
     }
@@ -55,7 +55,7 @@ public class AvgDecomposerTests extends OpenSearchTestCase {
         String sql = "SELECT AVG(length(\"url\")) AS \"l\", COUNT(*) AS \"c\" FROM \"hits\"";
         String result = AvgDecomposer.decomposeWorkerSql(sql);
         assertEquals(
-            "SELECT SUM(length(\"url\")) AS \"__avg_sum_0\", COUNT(length(\"url\")) AS \"__avg_count_0\", COUNT(*) AS \"c\" FROM \"hits\"",
+            "SELECT SUM(CAST(length(\"url\") AS DOUBLE)) AS \"__avg_sum_0\", COUNT(length(\"url\")) AS \"__avg_count_0\", COUNT(*) AS \"c\" FROM \"hits\"",
             result
         );
     }
@@ -64,8 +64,8 @@ public class AvgDecomposerTests extends OpenSearchTestCase {
         String sql = "SELECT AVG(\"col1\"), AVG(\"col2\") FROM \"hits\"";
         String result = AvgDecomposer.decomposeWorkerSql(sql);
         assertEquals(
-            "SELECT SUM(\"col1\") AS \"__avg_sum_0\", COUNT(\"col1\") AS \"__avg_count_0\", "
-                + "SUM(\"col2\") AS \"__avg_sum_1\", COUNT(\"col2\") AS \"__avg_count_1\" FROM \"hits\"",
+            "SELECT SUM(CAST(\"col1\" AS DOUBLE)) AS \"__avg_sum_0\", COUNT(\"col1\") AS \"__avg_count_0\", "
+                + "SUM(CAST(\"col2\" AS DOUBLE)) AS \"__avg_sum_1\", COUNT(\"col2\") AS \"__avg_count_1\" FROM \"hits\"",
             result
         );
     }
@@ -80,7 +80,7 @@ public class AvgDecomposerTests extends OpenSearchTestCase {
         String sql = "SELECT SUM(\"advengineid\"), COUNT(*), AVG(\"resolutionwidth\") FROM \"hits\"";
         String result = AvgDecomposer.decomposeWorkerSql(sql);
         assertEquals(
-            "SELECT SUM(\"advengineid\"), COUNT(*), SUM(\"resolutionwidth\") AS \"__avg_sum_0\", COUNT(\"resolutionwidth\") AS \"__avg_count_0\" FROM \"hits\"",
+            "SELECT SUM(\"advengineid\"), COUNT(*), SUM(CAST(\"resolutionwidth\" AS DOUBLE)) AS \"__avg_sum_0\", COUNT(\"resolutionwidth\") AS \"__avg_count_0\" FROM \"hits\"",
             result
         );
     }
@@ -88,7 +88,7 @@ public class AvgDecomposerTests extends OpenSearchTestCase {
     public void testDecomposeAvgInGroupByQuery() {
         String sql = "SELECT \"searchengineid\", \"clientip\", COUNT(*) AS \"c\", SUM(\"isrefresh\"), AVG(\"resolutionwidth\") FROM \"hits\" WHERE \"searchphrase\" <> '' GROUP BY \"searchengineid\", \"clientip\" ORDER BY \"c\" DESC LIMIT 10";
         String result = AvgDecomposer.decomposeWorkerSql(sql);
-        assertTrue(result.contains("SUM(\"resolutionwidth\") AS \"__avg_sum_0\""));
+        assertTrue(result.contains("SUM(CAST(\"resolutionwidth\" AS DOUBLE)) AS \"__avg_sum_0\""));
         assertTrue(result.contains("COUNT(\"resolutionwidth\") AS \"__avg_count_0\""));
         assertFalse(result.contains("AVG"));
     }

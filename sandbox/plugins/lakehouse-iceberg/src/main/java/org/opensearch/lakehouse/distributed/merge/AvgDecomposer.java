@@ -62,7 +62,7 @@ public final class AvgDecomposer {
         int avgIndex = 0;
         while (matcher.find()) {
             String innerExpr = matcher.group(1);
-            String replacement = "SUM(" + innerExpr + ") AS \"__avg_sum_" + avgIndex
+            String replacement = "SUM(CAST(" + innerExpr + " AS DOUBLE)) AS \"__avg_sum_" + avgIndex
                 + "\", COUNT(" + innerExpr + ") AS \"__avg_count_" + avgIndex + "\"";
             matcher.appendReplacement(sb, Matcher.quoteReplacement(replacement));
             avgIndex++;
