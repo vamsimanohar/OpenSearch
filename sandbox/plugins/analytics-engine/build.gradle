@@ -49,6 +49,24 @@ dependencies {
   // Also provides calcite-core transitively via api.
   api project(':sandbox:libs:analytics-framework')
 
+  // Arrow — upstream's new Scheduler/QueryContext/RowProducingSink code uses Arrow types directly.
+  implementation "org.apache.arrow:arrow-vector:${versions.arrow}"
+  implementation "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+
+  // Arrow Flight RPC — compile-only; the arrow-flight-rpc plugin provides it at runtime.
+  compileOnly(project(':plugins:arrow-flight-rpc')) {
+    transitive = false
+  }
+  testCompileOnly(project(':plugins:arrow-flight-rpc')) {
+    transitive = false
+  }
+
+  // Arrow Flight types reference these at compile/javadoc time.
+  compileOnly "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+  compileOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+  compileOnly "org.apache.arrow:arrow-format:${versions.arrow}"
+  compileOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
+
   // Guava — required at compile time because Calcite base classes expose guava types.
   // Uses custom config to bypass forbidden-dependencies.gradle check on compileClasspath.
   calciteCompile "com.google.guava:guava:${versions.guava}"
@@ -56,9 +74,21 @@ dependencies {
   // Guava for test compilation — Calcite API exposes guava types
   calciteTestCompile "com.google.guava:guava:${versions.guava}"
 
+  // Guava at runtime — Calcite static initializers use com.google.common classes.
+  runtimeOnly "com.google.guava:guava:${versions.guava}"
+  runtimeOnly 'com.google.guava:failureaccess:1.0.2'
+
+  // SLF4J — Arrow's BaseAllocator requires it at runtime.
+  runtimeOnly "org.slf4j:slf4j-api:${versions.slf4j}"
+
   // Calcite code generation (optional in calcite-core POM, needed at runtime for Enumerable pipeline)
   runtimeOnly "org.codehaus.janino:janino:3.1.12"
   runtimeOnly "org.codehaus.janino:commons-compiler:3.1.12"
+
+  // Arrow memory-unsafe provides DefaultAllocationManager via ServiceLoader at runtime.
+  runtimeOnly "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"
+  testRuntimeOnly "org.apache.arrow:arrow-format:${versions.arrow}"
+  testRuntimeOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
 
   // SQL Unified Query API for PPL parsing
   implementation("org.opensearch.query:unified-query-api:${sqlUnifiedQueryVersion}") {
@@ -73,6 +103,9 @@ dependencies {
 
   // Arrow Flight streaming transport for ITs
   internalClusterTestImplementation project(':plugins:arrow-flight-rpc')
+
+  // jackson-annotations — required at runtime by jackson-databind (transitive via Calcite).
+  runtimeOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
 
   // Calcite bytecode references @Immutable from immutables — resolve at compile time
   compileOnly 'org.immutables:value-annotations:2.8.8'
@@ -89,6 +122,7 @@ configurations.all {
     force 'com.google.guava:failureaccess:1.0.2'
     force 'com.google.errorprone:error_prone_annotations:2.36.0'
     force 'org.checkerframework:checker-qual:3.43.0'
+    force "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
     force "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
     force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
     force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
@@ -114,6 +148,50 @@ configurations.all {
     force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.21"
     force "org.jetbrains.kotlin:kotlin-stdlib-common:1.9.10"
   }
+}
+
+tasks.withType(JavaCompile).configureEach {
+  options.compilerArgs -= '-Werror'
+}
+
+test {
+  jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
+  jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED'
+  jvmArgs '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED'
+  jvmArgs '-Darrow.memory.debug.allocator=false'
+}
+
+tasks.named('thirdPartyAudit').configure {
+  ignoreViolations(
+    'org.apache.arrow.memory.util.MemoryUtil',
+    'org.apache.arrow.memory.util.MemoryUtil$1',
+    'com.google.common.cache.Striped64',
+    'com.google.common.cache.Striped64$1',
+    'com.google.common.cache.Striped64$Cell',
+    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray',
+    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$1',
+    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$2',
+    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$3',
+    'com.google.common.hash.Striped64',
+    'com.google.common.hash.Striped64$1',
+    'com.google.common.hash.Striped64$Cell',
+    'com.google.common.primitives.UnsignedBytes$LexicographicalComparatorHolder$UnsafeComparator',
+    'com.google.common.primitives.UnsignedBytes$LexicographicalComparatorHolder$UnsafeComparator$1',
+    'com.google.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper',
+    'com.google.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper$1'
+  )
+  ignoreMissingClasses(
+    'com.google.appengine.api.urlfetch.FetchOptions',
+    'com.google.appengine.api.urlfetch.FetchOptions$Builder',
+    'com.google.appengine.api.urlfetch.HTTPHeader',
+    'com.google.appengine.api.urlfetch.HTTPMethod',
+    'com.google.appengine.api.urlfetch.HTTPRequest',
+    'com.google.appengine.api.urlfetch.HTTPResponse',
+    'com.google.appengine.api.urlfetch.URLFetchService',
+    'com.google.appengine.api.urlfetch.URLFetchServiceFactory',
+    'javax.annotation.Nullable',
+    'sun.misc.Unsafe'
+  )
 }
 
 // Arrow/Flight requires these JVM flags

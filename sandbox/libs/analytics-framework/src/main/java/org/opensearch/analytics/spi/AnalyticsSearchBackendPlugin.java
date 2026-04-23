@@ -58,4 +58,12 @@ public interface AnalyticsSearchBackendPlugin {
         throw new UnsupportedOperationException("getFragmentConvertor not implemented for [" + name() + "]");
     }
 
+    /**
+     * Returns the exchange sink provider for this backend, or {@code null} if the backend
+     * cannot act as a coordinator-side executor.
+     */
+    default ExchangeSinkProvider getExchangeSinkProvider() {
+        return null;
+    }
+
 }
