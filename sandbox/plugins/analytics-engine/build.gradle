@@ -34,11 +34,19 @@ repositories {
 configurations {
   calciteCompile
   calciteTestCompile
+  // Jackson jars needed at runtime by Arrow C Data (SchemaImporter) but excluded from
+  // bundlePlugin because server's compileOnly BOM constraint causes Gradle set-subtraction
+  // to remove them. Custom config bypasses this.
+  arrowJackson
   compileClasspath { exclude group: 'com.google.guava' }
   testCompileClasspath { exclude group: 'com.google.guava' }
 }
 sourceSets.main.compileClasspath += configurations.calciteCompile
 sourceSets.test.compileClasspath += configurations.calciteTestCompile
+
+tasks.named('bundlePlugin').configure {
+  from configurations.arrowJackson
+}
 
 tasks.named('missingJavadoc').configure {
   classpath += configurations.calciteCompile
@@ -64,6 +72,13 @@ dependencies {
   // Arrow Flight types reference these at compile/javadoc time.
   compileOnly "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
   compileOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+  // Jackson databind + annotations — needed at runtime by Arrow C Data (SchemaImporter).
+  // jackson-core is in server lib; databind and annotations get excluded from bundlePlugin
+  // by server BOM constraint. Custom config bypasses this.
+  arrowJackson("com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}") {
+    exclude group: 'com.fasterxml.jackson.core', module: 'jackson-core'
+  }
+  arrowJackson "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
   // arrow-format + flatbuffers: arrow-vector types (loaded by this parent CL) reference
   // flatbuffers.Table via arrow-format's ArrowType — must be in this classloader.
   implementation "org.apache.arrow:arrow-format:${versions.arrow}"
@@ -103,9 +118,6 @@ dependencies {
 
   // Arrow Flight streaming transport for ITs
   internalClusterTestImplementation project(':plugins:arrow-flight-rpc')
-
-  // jackson-annotations — required at runtime by jackson-databind (transitive via Calcite).
-  runtimeOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
 
   // Calcite bytecode references @Immutable from immutables — resolve at compile time
   compileOnly 'org.immutables:value-annotations:2.8.8'

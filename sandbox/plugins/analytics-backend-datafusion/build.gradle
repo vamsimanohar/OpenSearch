@@ -36,10 +36,11 @@ dependencies {
   compileOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
   compileOnly "org.checkerframework:checker-qual:3.43.0"
 
-  // Jackson — required by Arrow's schema import (C Data Interface)
-  implementation "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
-  implementation "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
-  implementation "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+  // Jackson — required by Arrow's schema import (C Data Interface).
+  // jackson-core is in server lib; databind + annotations provided by parent analytics-engine plugin.
+  compileOnly "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
+  compileOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+  compileOnly "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
 }
 
 test {
