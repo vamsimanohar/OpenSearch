@@ -135,10 +135,9 @@ load_queries() {
     # Q34  (GROUP BY url ~100M unique values — needs unlimited DF pool + 4GB JVM on 32GB nodes)
     QUERIES+=("SELECT url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
     # Q35  (same as Q34)
-    # Note: `CAST(1 AS INTEGER)` — Calcite parser rejects aliasing a bare or parenthesized
-    # numeric literal (`1 AS "one"` / `(1) AS "one"`); wrapping in CAST forces it to parse
-    # as an expression, which accepts the alias.
-    QUERIES+=("SELECT CAST(1 AS INTEGER) AS \"one\", url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
+    # Note: bare `one` identifier (no quotes). Lex.MYSQL treats "one" as a string literal,
+    # not a quoted identifier — need backticks or a bare identifier to alias.
+    QUERIES+=("SELECT 1 AS one, url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
     # Q36
     QUERIES+=("SELECT clientip, clientip - 1, clientip - 2, clientip - 3, COUNT(*) AS c FROM __TABLE__ GROUP BY clientip, clientip - 1, clientip - 2, clientip - 3 ORDER BY c DESC LIMIT 10")
     # Q37
