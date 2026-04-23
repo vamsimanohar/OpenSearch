@@ -29,10 +29,11 @@ dependencies {
   compileOnly "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"
   compileOnly "org.apache.arrow:arrow-vector:${versions.arrow}"
   compileOnly "org.slf4j:slf4j-api:${versions.slf4j}"
-  // Arrow jars not in analytics-engine — needed at runtime by this plugin.
+  // Arrow C Data — needed at runtime by this plugin (not in parent analytics-engine).
   implementation "org.apache.arrow:arrow-c-data:${versions.arrow}"
-  implementation "org.apache.arrow:arrow-format:${versions.arrow}"
-  implementation "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
+  // arrow-format + flatbuffers — provided at runtime by parent analytics-engine plugin.
+  compileOnly "org.apache.arrow:arrow-format:${versions.arrow}"
+  compileOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
   compileOnly "org.checkerframework:checker-qual:3.43.0"
 
   // Jackson — required by Arrow's schema import (C Data Interface)

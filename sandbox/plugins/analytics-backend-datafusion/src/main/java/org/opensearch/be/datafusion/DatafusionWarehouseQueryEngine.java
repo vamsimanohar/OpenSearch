@@ -47,6 +47,20 @@ public class DatafusionWarehouseQueryEngine implements DataWarehouseQueryEngine 
 
     @Override
     public Iterable<Object[]> executeQuery(DataWarehouseScanContext scanContext) {
+        // Arrow C Data imports (SchemaImporter → Format.asType → flatbuffers) need this
+        // plugin's classloader on the TCCL. When called from lakehouse worker threads,
+        // the TCCL is the lakehouse plugin's classloader which lacks flatbuffers/arrow-format.
+        Thread currentThread = Thread.currentThread();
+        ClassLoader originalCl = currentThread.getContextClassLoader();
+        currentThread.setContextClassLoader(DatafusionWarehouseQueryEngine.class.getClassLoader());
+        try {
+            return doExecuteQuery(scanContext);
+        } finally {
+            currentThread.setContextClassLoader(originalCl);
+        }
+    }
+
+    private Iterable<Object[]> doExecuteQuery(DataWarehouseScanContext scanContext) {
         long t0 = System.currentTimeMillis();
         DataFusionService dfService = DataFusionPlugin.ensureSharedService();
 
@@ -131,12 +145,6 @@ public class DatafusionWarehouseQueryEngine implements DataWarehouseQueryEngine 
         BufferAllocator allocator = dfService.newChildAllocator();
         DatafusionResultStream resultStream = new DatafusionResultStream(streamHandle, allocator);
 
-        // Arrow C Data imports (SchemaImporter) need flatbuffers on the TCCL.
-        // When called from lakehouse worker threads, the TCCL is the lakehouse plugin's
-        // classloader which doesn't have flatbuffers. Swap to this plugin's classloader.
-        Thread currentThread = Thread.currentThread();
-        ClassLoader originalCl = currentThread.getContextClassLoader();
-        currentThread.setContextClassLoader(DatafusionWarehouseQueryEngine.class.getClassLoader());
         List<Object[]> rows = new ArrayList<>();
         try {
             Iterator<EngineResultBatch> batchIterator = resultStream.iterator();
@@ -156,7 +164,6 @@ public class DatafusionWarehouseQueryEngine implements DataWarehouseQueryEngine 
                 }
             }
         } finally {
-            currentThread.setContextClassLoader(originalCl);
             resultStream.close();
         }
         long t2 = System.currentTimeMillis();

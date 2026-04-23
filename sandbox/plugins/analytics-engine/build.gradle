@@ -64,8 +64,10 @@ dependencies {
   // Arrow Flight types reference these at compile/javadoc time.
   compileOnly "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
   compileOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
-  compileOnly "org.apache.arrow:arrow-format:${versions.arrow}"
-  compileOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
+  // arrow-format + flatbuffers: arrow-vector types (loaded by this parent CL) reference
+  // flatbuffers.Table via arrow-format's ArrowType — must be in this classloader.
+  implementation "org.apache.arrow:arrow-format:${versions.arrow}"
+  implementation "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
 
   // Guava — required at compile time because Calcite base classes expose guava types.
   // Uses custom config to bypass forbidden-dependencies.gradle check on compileClasspath.
@@ -87,8 +89,6 @@ dependencies {
 
   // Arrow memory-unsafe provides DefaultAllocationManager via ServiceLoader at runtime.
   runtimeOnly "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"
-  testRuntimeOnly "org.apache.arrow:arrow-format:${versions.arrow}"
-  testRuntimeOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
 
   // SQL Unified Query API for PPL parsing
   implementation("org.opensearch.query:unified-query-api:${sqlUnifiedQueryVersion}") {
