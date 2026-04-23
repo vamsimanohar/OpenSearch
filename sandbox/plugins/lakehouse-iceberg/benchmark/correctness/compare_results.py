@@ -436,11 +436,7 @@ ORDERED_QUERIES = {8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 24, 25, 26, 27,
                    28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43}
 
 # Queries known to be problematic
-EXPECTED_FAILURES = {
-    34: "timeout on high-cardinality GROUP BY (URL, ~100M unique values)",
-    35: "timeout on high-cardinality GROUP BY (URL, ~100M unique values)",
-    36: "TopK OOM on high-cardinality clientip GROUP BY",
-}
+EXPECTED_FAILURES = {}
 
 
 def batch_compare(os_dir, df_dir, max_rows=100, num_queries=43):

@@ -133,6 +133,17 @@ public class DataFusionSqlDialect extends PostgresqlSqlDialect {
             return;
         }
 
+        // ANY_VALUE(x) → MIN(x). Calcite emits ANY_VALUE for columns that are
+        // functionally dependent on GROUP BY keys but not aggregated. DataFusion
+        // has no any_value() — MIN is a deterministic substitute with identical
+        // semantics when the column is FD on the group key.
+        if (call.getKind() == SqlKind.ANY_VALUE && call.operandCount() == 1) {
+            writer.print("MIN(");
+            call.operand(0).unparse(writer, 0, 0);
+            writer.print(")");
+            return;
+        }
+
         // Simple renames: SIGN→SIGNUM, TRUNCATE→TRUNC
         String renamed = FUNCTION_RENAMES.get(name);
         if (renamed != null) {

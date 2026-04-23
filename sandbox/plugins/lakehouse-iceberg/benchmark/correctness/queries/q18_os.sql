@@ -1,1 +1,1 @@
-SELECT userid, searchphrase, COUNT(*) AS c FROM hits GROUP BY userid, searchphrase LIMIT 10;
+SELECT userid, searchphrase, COUNT(*) AS c FROM hits GROUP BY userid, searchphrase ORDER BY userid, searchphrase LIMIT 10;

@@ -173,6 +173,18 @@ public class DataFusionSqlDialectTests extends OpenSearchTestCase {
         assertTrue("Should multiply by 1000, got: " + sql, sql.contains("* 1000"));
     }
 
+    // ── unparseCall: ANY_VALUE ──
+
+    public void testUnparseCallAnyValueToMin() {
+        SqlPrettyWriter writer = new SqlPrettyWriter(DIALECT);
+        SqlNode arg = SqlLiteral.createCharString("col", SqlParserPos.ZERO);
+        SqlNode call = SqlStdOperatorTable.ANY_VALUE.createCall(SqlParserPos.ZERO, arg);
+        call.unparse(writer, 0, 0);
+        String sql = writer.toString();
+        assertTrue("Should rewrite ANY_VALUE to MIN, got: " + sql, sql.contains("MIN("));
+        assertFalse("Should not emit ANY_VALUE literal, got: " + sql, sql.contains("ANY_VALUE"));
+    }
+
     // ── Constructor ──
 
     public void testCustomContext() {
