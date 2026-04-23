@@ -135,9 +135,7 @@ load_queries() {
     # Q34  (GROUP BY url ~100M unique values — needs unlimited DF pool + 4GB JVM on 32GB nodes)
     QUERIES+=("SELECT url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
     # Q35  (same as Q34)
-    # Note: bare `one` identifier (no quotes). Lex.MYSQL treats "one" as a string literal,
-    # not a quoted identifier — need backticks or a bare identifier to alias.
-    QUERIES+=("SELECT 1 AS one, url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
+    QUERIES+=("SELECT 1, url, COUNT(*) AS c FROM __TABLE__ GROUP BY 1, url ORDER BY c DESC LIMIT 10")
     # Q36
     QUERIES+=("SELECT clientip, clientip - 1, clientip - 2, clientip - 3, COUNT(*) AS c FROM __TABLE__ GROUP BY clientip, clientip - 1, clientip - 2, clientip - 3 ORDER BY c DESC LIMIT 10")
     # Q37
@@ -145,17 +143,17 @@ load_queries() {
     # Q38
     QUERIES+=("SELECT title, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND dontcounthits = 0 AND isrefresh = 0 AND title <> '' GROUP BY title ORDER BY PageViews DESC LIMIT 10")
     # Q39
-    QUERIES+=("SELECT url, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0 AND islink <> 0 AND isdownload = 0 GROUP BY url ORDER BY PageViews DESC LIMIT 10")
+    QUERIES+=("SELECT url, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0 AND islink <> 0 AND isdownload = 0 GROUP BY url ORDER BY PageViews DESC LIMIT 10 OFFSET 1000")
     # Q40
     # Note: Wrap CASE in a subquery — identical unaliased CASE expressions in both SELECT and
     # GROUP BY cause the Calcite validator to NPE (null slot in a SqlNodeList during dedup).
-    QUERIES+=("SELECT traficsourceid, searchengineid, advengineid, src_referer, url, COUNT(*) AS PageViews FROM (SELECT traficsourceid, searchengineid, advengineid, CASE WHEN (searchengineid = 0 AND advengineid = 0) THEN referer ELSE '' END AS src_referer, url FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0) t GROUP BY traficsourceid, searchengineid, advengineid, src_referer, url ORDER BY PageViews DESC LIMIT 10")
+    QUERIES+=("SELECT traficsourceid, searchengineid, advengineid, src_referer, url, COUNT(*) AS PageViews FROM (SELECT traficsourceid, searchengineid, advengineid, CASE WHEN (searchengineid = 0 AND advengineid = 0) THEN referer ELSE '' END AS src_referer, url FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0) t GROUP BY traficsourceid, searchengineid, advengineid, src_referer, url ORDER BY PageViews DESC LIMIT 10 OFFSET 1000")
     # Q41
-    QUERIES+=("SELECT urlhash, eventdate, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0 AND traficsourceid IN (-1, 6) AND refererhash = 3594120000172545465 GROUP BY urlhash, eventdate ORDER BY PageViews DESC LIMIT 10")
+    QUERIES+=("SELECT urlhash, eventdate, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0 AND traficsourceid IN (-1, 6) AND refererhash = 3594120000172545465 GROUP BY urlhash, eventdate ORDER BY PageViews DESC LIMIT 10 OFFSET 100")
     # Q42
-    QUERIES+=("SELECT windowclientwidth, windowclientheight, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0 AND dontcounthits = 0 AND urlhash = 2868770270353813622 GROUP BY windowclientwidth, windowclientheight ORDER BY PageViews DESC LIMIT 10")
+    QUERIES+=("SELECT windowclientwidth, windowclientheight, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0 AND dontcounthits = 0 AND urlhash = 2868770270353813622 GROUP BY windowclientwidth, windowclientheight ORDER BY PageViews DESC LIMIT 10 OFFSET 10000")
     # Q43
-    QUERIES+=("SELECT FLOOR(eventtime TO MINUTE) AS M, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-15' AND eventdate <= DATE '2013-07-16' AND isrefresh = 0 AND dontcounthits = 0 GROUP BY FLOOR(eventtime TO MINUTE) ORDER BY M LIMIT 10")
+    QUERIES+=("SELECT FLOOR(eventtime TO MINUTE) AS M, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-14' AND eventdate <= DATE '2013-07-15' AND isrefresh = 0 AND dontcounthits = 0 GROUP BY FLOOR(eventtime TO MINUTE) ORDER BY M LIMIT 10 OFFSET 1000")
 
     # Replace __TABLE__ placeholder with actual table name
     for i in "${!QUERIES[@]}"; do
