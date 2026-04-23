@@ -13,18 +13,12 @@ import org.opensearch.analytics.backend.ExecutionContext;
 import org.opensearch.analytics.backend.SearchExecEngine;
 
 /**
- * SPI for shard-level query execution backends that provide a full {@link SearchExecEngine}
- * with prepare/execute/stream semantics for the analytics query path.
- * <p>
- * Discovered via {@link org.opensearch.plugins.ExtensiblePlugin} and used by the
- * analytics executor for shard-level query lifecycle.
+ * Execution engine factory for backend plugins.
+ * Creates a {@link SearchExecEngine} bound to a given execution context for the analytics query path.
  *
  * @opensearch.internal
  */
 public interface SearchExecEngineProvider {
-
-    /** Unique backend name (e.g., "datafusion"). */
-    String name();
 
     /**
      * Creates a search execution engine bound to the given execution context.

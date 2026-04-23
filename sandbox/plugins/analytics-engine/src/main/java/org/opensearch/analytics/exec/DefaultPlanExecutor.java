@@ -26,9 +26,7 @@ import org.opensearch.indices.IndicesService;
 
 import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 /**
@@ -39,7 +37,7 @@ import java.util.Set;
 public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<Object[]>> {
 
     private static final Logger logger = LogManager.getLogger(DefaultPlanExecutor.class);
-    private final Map<String, SearchExecEngineProvider> backEnds;
+    private final List<SearchExecEngineProvider> backEnds;
     private volatile IndicesService indicesService;
     private final ClusterService clusterService;
 
@@ -55,10 +53,7 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
         IndicesService indicesService,
         ClusterService clusterService
     ) {
-        this.backEnds = new LinkedHashMap<>();
-        for (SearchExecEngineProvider provider : providers) {
-            this.backEnds.put(provider.name(), provider);
-        }
+        this.backEnds = new ArrayList<>(providers);
         this.indicesService = indicesService;
         this.clusterService = clusterService;
     }
@@ -85,7 +80,7 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
                 SearchExecEngine<ExecutionContext, EngineResultStream> engine = provider
                     .createSearchExecEngine(ctx)
             ) {
-                logger.info("[DefaultPlanExecutor] Executing via [{}]", provider.name());
+                logger.info("[DefaultPlanExecutor] Executing via backend provider");
                 try (EngineResultStream resultStream = engine.execute(ctx)) {
                     Iterator<EngineResultBatch> batchIterator = resultStream.iterator();
                     while (batchIterator.hasNext()) {
@@ -102,7 +97,7 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
                 }
             }
         } catch (Exception e) {
-            throw new RuntimeException("Execution failed for [" + provider.name() + "]", e);
+            throw new RuntimeException("Execution failed for backend provider", e);
         }
         return rows;
     }
@@ -133,6 +128,6 @@ public class DefaultPlanExecutor implements QueryPlanExecutor<RelNode, Iterable<
             return null;
         }
         // TODO: select based on data format available in the catalog snapshot
-        return backEnds.values().iterator().next();
+        return backEnds.get(0);
     }
 }

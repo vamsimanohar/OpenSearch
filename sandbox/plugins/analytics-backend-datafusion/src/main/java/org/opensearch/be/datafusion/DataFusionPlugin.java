@@ -52,6 +52,8 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
     private static final Logger logger = LogManager.getLogger(DataFusionPlugin.class);
 
+    private static final String SUPPORTED_FORMAT = "parquet";
+
     private static final long DEFAULT_MEMORY_POOL_LIMIT = 0L; // 0 = unlimited (GreedyMemoryPool(MAX))
 
     /** Memory pool limit for the DataFusion runtime (Rust heap, not JVM heap). */
@@ -224,40 +226,21 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         return new DatafusionReaderManager(settings.format(), settings.shardPath(), sharedDataFusionService);
     }
 
-    /**
-     * Data formats this plugin can handle. Used by CompositeEngine to route queries.
-     */
-    public List<DataFormat> getSupportedFormats() {
-        return List.of(new DataFormat() {
-            @Override
-            public String name() {
-                return "parquet";
-            }
-
-            @Override
-            public long priority() {
-                return 0;
-            }
-
-            @Override
-            public Set<FieldTypeCapabilities> supportedFields() {
-                return Set.of();
-            }
-        });
+    @Override
+    public List<String> getSupportedFormats() {
+        return List.of(SUPPORTED_FORMAT);
     }
 
     @Override
     public SearchExecEngine<ExecutionContext, EngineResultStream> createSearchExecEngine(ExecutionContext ctx) {
-        DatafusionReader dfReader = null;
-        List<DataFormat> formats = getSupportedFormats();
-        if (formats != null) {
-            for (DataFormat format : formats) {
-                dfReader = ctx.getReader().getReader(format, DatafusionReader.class);
-                if (dfReader != null) {
-                    break;
-                }
-            }
-        }
+        DatafusionReader dfReader = ctx.getReader().getReader(
+            new DataFormat() {
+                @Override public String name() { return SUPPORTED_FORMAT; }
+                @Override public long priority() { return 0; }
+                @Override public Set<FieldTypeCapabilities> supportedFields() { return Set.of(); }
+            },
+            DatafusionReader.class
+        );
         if (dfReader == null) {
             throw new IllegalStateException("No DatafusionReader available in the acquired reader");
         }
