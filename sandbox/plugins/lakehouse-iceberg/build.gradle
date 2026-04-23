@@ -26,18 +26,11 @@ opensearchplugin {
 // compile classpaths by OpenSearch. Bypass via custom config.
 configurations {
     calciteCompile
-    // Jackson jars needed at runtime by Iceberg SDK but excluded from bundlePlugin
-    // because server's compileOnly BOM constraint causes Gradle set-subtraction to remove them.
-    icebergJackson
     compileClasspath { exclude group: 'com.google.guava' }
     testCompileClasspath { exclude group: 'com.google.guava' }
 }
 sourceSets.main.compileClasspath += configurations.calciteCompile
 sourceSets.test.compileClasspath += configurations.calciteCompile
-
-tasks.named('bundlePlugin').configure {
-    from configurations.icebergJackson
-}
 
 dependencies {
     // Guava for compilation — Calcite API exposes guava types
@@ -102,13 +95,7 @@ dependencies {
     runtimeOnly "software.amazon.awssdk:aws-query-protocol:${versions.aws}"
     runtimeOnly "software.amazon.awssdk:aws-xml-protocol:${versions.aws}"
     runtimeOnly "software.amazon.awssdk:third-party-jackson-core:${versions.aws}"
-    // Jackson databind + annotations — required by Iceberg SDK (JsonUtil, TableMetadataParser) at runtime.
-    // jackson-core is in server lib; databind and annotations are not, but get excluded from bundlePlugin
-    // by server BOM constraint. Custom config bypasses this.
-    icebergJackson("com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}") {
-        exclude group: 'com.fasterxml.jackson.core', module: 'jackson-core'
-    }
-    icebergJackson "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+    // Jackson databind + annotations — provided at runtime by parent analytics-engine plugin.
     runtimeOnly "software.amazon.awssdk:metrics-spi:${versions.aws}"
     runtimeOnly "software.amazon.awssdk:annotations:${versions.aws}"
     runtimeOnly "software.amazon.awssdk:checksums:${versions.aws}"
