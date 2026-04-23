@@ -1,1 +1,1 @@
-SELECT REGEXP_REPLACE(referer, '^https?://(?:www\.)?([^/]+)/.*$', '\1') AS k, AVG(length(referer)) AS l, COUNT(*) AS c, MIN(referer) FROM hits WHERE referer <> '' GROUP BY k HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25;
+SELECT REGEXP_REPLACE(referer, '^https?://(?:www\.)?([^/:?]+).*$', '\1') AS k, AVG(length(referer)) AS l, COUNT(*) AS c, MIN(referer) FROM hits WHERE referer <> '' GROUP BY k HAVING COUNT(*) > 100000 ORDER BY l DESC, k LIMIT 25;

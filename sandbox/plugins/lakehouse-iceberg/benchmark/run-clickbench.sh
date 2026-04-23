@@ -135,9 +135,10 @@ load_queries() {
     # Q34  (GROUP BY url ~100M unique values — needs unlimited DF pool + 4GB JVM on 32GB nodes)
     QUERIES+=("SELECT url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
     # Q35  (same as Q34)
-    # Note: `(1)` (parenthesized literal) instead of `1` — Calcite parser rejects aliasing a
-    # naked numeric literal with a quoted identifier when GROUP BY is present.
-    QUERIES+=("SELECT (1) AS \"one\", url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
+    # Note: `CAST(1 AS INTEGER)` — Calcite parser rejects aliasing a bare or parenthesized
+    # numeric literal (`1 AS "one"` / `(1) AS "one"`); wrapping in CAST forces it to parse
+    # as an expression, which accepts the alias.
+    QUERIES+=("SELECT CAST(1 AS INTEGER) AS \"one\", url, COUNT(*) AS c FROM __TABLE__ GROUP BY url ORDER BY c DESC LIMIT 10")
     # Q36
     QUERIES+=("SELECT clientip, clientip - 1, clientip - 2, clientip - 3, COUNT(*) AS c FROM __TABLE__ GROUP BY clientip, clientip - 1, clientip - 2, clientip - 3 ORDER BY c DESC LIMIT 10")
     # Q37
@@ -147,9 +148,9 @@ load_queries() {
     # Q39
     QUERIES+=("SELECT url, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0 AND islink <> 0 AND isdownload = 0 GROUP BY url ORDER BY PageViews DESC LIMIT 10")
     # Q40
-    # Note: Drop `AS Src` / `AS Dst` aliases — Calcite validator throws NPE when identical
-    # CASE expression appears in both SELECT (aliased) and GROUP BY (bare).
-    QUERIES+=("SELECT traficsourceid, searchengineid, advengineid, CASE WHEN (searchengineid = 0 AND advengineid = 0) THEN referer ELSE '' END, url, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0 GROUP BY traficsourceid, searchengineid, advengineid, CASE WHEN (searchengineid = 0 AND advengineid = 0) THEN referer ELSE '' END, url ORDER BY PageViews DESC LIMIT 10")
+    # Note: Wrap CASE in a subquery — identical unaliased CASE expressions in both SELECT and
+    # GROUP BY cause the Calcite validator to NPE (null slot in a SqlNodeList during dedup).
+    QUERIES+=("SELECT traficsourceid, searchengineid, advengineid, src_referer, url, COUNT(*) AS PageViews FROM (SELECT traficsourceid, searchengineid, advengineid, CASE WHEN (searchengineid = 0 AND advengineid = 0) THEN referer ELSE '' END AS src_referer, url FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0) t GROUP BY traficsourceid, searchengineid, advengineid, src_referer, url ORDER BY PageViews DESC LIMIT 10")
     # Q41
     QUERIES+=("SELECT urlhash, eventdate, COUNT(*) AS PageViews FROM __TABLE__ WHERE counterid = 62 AND eventdate >= DATE '2013-07-01' AND eventdate <= DATE '2013-07-31' AND isrefresh = 0 AND traficsourceid IN (-1, 6) AND refererhash = 3594120000172545465 GROUP BY urlhash, eventdate ORDER BY PageViews DESC LIMIT 10")
     # Q42
