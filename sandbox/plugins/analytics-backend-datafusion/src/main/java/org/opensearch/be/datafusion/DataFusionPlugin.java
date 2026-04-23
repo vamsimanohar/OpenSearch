@@ -23,6 +23,7 @@ import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
 import org.opensearch.index.engine.dataformat.DataFormat;
+import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
 import org.opensearch.index.engine.exec.EngineReaderManager;
@@ -88,6 +89,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
     /** Shared across plugin instance and SPI instances (separate classloader instances). */
     private static volatile DataFusionService sharedDataFusionService;
     private static final Object INIT_LOCK = new Object();
+    private volatile DataFormatRegistry dataFormatRegistry;
 
     /**
      * Creates the DataFusion plugin.
@@ -146,8 +148,10 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         NodeEnvironment nodeEnvironment,
         NamedWriteableRegistry namedWriteableRegistry,
         IndexNameExpressionResolver indexNameExpressionResolver,
-        Supplier<RepositoriesService> repositoriesServiceSupplier
+        Supplier<RepositoriesService> repositoriesServiceSupplier,
+        DataFormatRegistry dataFormatRegistry
     ) {
+        this.dataFormatRegistry = dataFormatRegistry;
         Settings settings = environment.settings();
         long memoryPoolLimit = getConfiguredLong("datafusion_memory_pool_limit_bytes", DATAFUSION_MEMORY_POOL_LIMIT.get(settings));
         long spillMemoryLimit = getConfiguredLong("datafusion_spill_memory_limit_bytes", DATAFUSION_SPILL_MEMORY_LIMIT.get(settings));
@@ -180,6 +184,14 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         }
 
         return Collections.singletonList(sharedDataFusionService);
+    }
+
+    DataFormatRegistry getDataFormatRegistry() {
+        return dataFormatRegistry;
+    }
+
+    DataFusionService getDataFusionService() {
+        return sharedDataFusionService;
     }
 
     private static long getConfiguredLong(String key, long defaultValue) {
