@@ -171,7 +171,6 @@ tasks.named('thirdPartyAudit').configure {
     'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray',
     'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$1',
     'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$2',
-    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$3',
     'com.google.common.hash.Striped64',
     'com.google.common.hash.Striped64$1',
     'com.google.common.hash.Striped64$Cell',
@@ -181,16 +180,6 @@ tasks.named('thirdPartyAudit').configure {
     'com.google.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper$1'
   )
   ignoreMissingClasses(
-    'com.google.appengine.api.urlfetch.FetchOptions',
-    'com.google.appengine.api.urlfetch.FetchOptions$Builder',
-    'com.google.appengine.api.urlfetch.HTTPHeader',
-    'com.google.appengine.api.urlfetch.HTTPMethod',
-    'com.google.appengine.api.urlfetch.HTTPRequest',
-    'com.google.appengine.api.urlfetch.HTTPResponse',
-    'com.google.appengine.api.urlfetch.URLFetchService',
-    'com.google.appengine.api.urlfetch.URLFetchServiceFactory',
-    'javax.annotation.Nullable',
-    'sun.misc.Unsafe'
   )
 }
 
