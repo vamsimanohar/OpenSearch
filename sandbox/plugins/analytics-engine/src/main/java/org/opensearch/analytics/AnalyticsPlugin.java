@@ -19,6 +19,7 @@ import org.opensearch.analytics.exec.DefaultPlanExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.analytics.schema.SchemaContributor;
+import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
@@ -76,7 +77,14 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     @SuppressWarnings("rawtypes")
     @Override
     public void loadExtensions(ExtensionLoader loader) {
-        shardBackends.addAll(loader.loadExtensions(SearchExecEngineProvider.class));
+        List<AnalyticsSearchBackendPlugin> backEnds = loader.loadExtensions(AnalyticsSearchBackendPlugin.class);
+        for (AnalyticsSearchBackendPlugin be : backEnds) {
+            try {
+                shardBackends.add(be.getSearchExecEngineProvider());
+            } catch (UnsupportedOperationException e) {
+                logger.debug("Backend [{}] does not provide a SearchExecEngineProvider", be.name());
+            }
+        }
         warehouseEngines.addAll(loader.loadExtensions(DataWarehouseQueryEngine.class));
         schemaContributors.addAll(loader.loadExtensions(SchemaContributor.class));
         logger.info(
