@@ -574,7 +574,9 @@ public class DistributedScanExecutor {
             sb.append(" ORDER BY ");
             for (int i = 0; i < sortColumns.length; i++) {
                 if (i > 0) sb.append(", ");
-                sb.append("\"col_").append(sortColumns[i]).append("\"");
+                // Use 1-based column position — safe after GROUP BY because aggregate
+                // columns can't be referenced by name when wrapped in SUM/MIN/MAX
+                sb.append(sortColumns[i] + 1);
                 sb.append(sortAsc[i] ? " ASC" : " DESC");
             }
         }

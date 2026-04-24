@@ -436,7 +436,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             new int[]{1}, new boolean[]{false}, 10, 5
         );
         assertEquals(
-            "SELECT \"col_0\", SUM(\"col_1\") FROM __exchange_input__ GROUP BY \"col_0\" ORDER BY \"col_1\" DESC LIMIT 10 OFFSET 5",
+            "SELECT \"col_0\", SUM(\"col_1\") FROM __exchange_input__ GROUP BY \"col_0\" ORDER BY 2 DESC LIMIT 10 OFFSET 5",
             sql
         );
     }

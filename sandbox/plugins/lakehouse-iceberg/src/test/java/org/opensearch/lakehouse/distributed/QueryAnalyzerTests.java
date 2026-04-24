@@ -69,6 +69,17 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, QueryAnalyzer.analyze(agg));
     }
 
+    public void testGroupByWithLimitReturnsSingleNode() {
+        // Tree: Sort(fetch=LIMIT) → wrapper → Aggregate(GROUP BY, COUNT)
+        // GROUP BY + LIMIT must stay SINGLE_NODE.
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        // Wrap the aggregate in a mock node that exposes it to the visitor
+        RelNode wrapper = mockNodeWithInput(agg);
+        // Now wrap that in a Sort with fetch (LIMIT)
+        Sort sort = makeSortWithInput(wrapper, true);
+        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(sort));
+    }
+
     public void testGroupByWithDistinctReturnsSingleNode() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
@@ -331,6 +342,20 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         public Sort copy(RelTraitSet traitSet, RelNode input, RelCollation collation, RexNode offset, RexNode fetch) {
             return new StubSort(getCluster(), traitSet, input, collation, fetch);
         }
+    }
+
+    private Sort makeSortWithInput(RelNode input, boolean hasFetch) {
+        RelFieldCollation fieldCollation = new RelFieldCollation(0, RelFieldCollation.Direction.DESCENDING);
+        RelCollation collation = RelCollations.of(fieldCollation);
+        RexNode fetchNode = hasFetch ? mock(RexNode.class) : null;
+        RelOptCluster cluster = mock(RelOptCluster.class);
+        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
+        RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldNames()).thenReturn(List.of("col0", "col1"));
+        when(rowType.getFieldCount()).thenReturn(2);
+        when(input.getRowType()).thenReturn(rowType);
+        when(input.getInputs()).thenReturn(List.of());
+        return new StubSort(cluster, traitSet, input, collation, fetchNode);
     }
 
     private RelNode mockSimpleNode() {

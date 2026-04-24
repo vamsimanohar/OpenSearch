@@ -69,13 +69,16 @@ public final class QueryAnalyzer {
             }
             SqlKind[] aggKinds = extractAggKinds(classifier.aggregate);
             if (!classifier.aggregate.getGroupSet().isEmpty()) {
+                // GROUP BY + LIMIT must stay single-node: stripping LIMIT from workers
+                // OOMs on high-cardinality GROUP BY, and keeping LIMIT is lossy.
+                // Only distribute GROUP BY queries without LIMIT.
+                if (classifier.sort != null && classifier.sort.fetch != null) {
+                    return new AnalysisResult(MergeStrategy.SINGLE_NODE);
+                }
                 int groupCount = classifier.aggregate.getGroupSet().cardinality();
-                // Capture Sort info if present (for ORDER BY/LIMIT/OFFSET on coordinator)
                 int[] sortColumns = classifier.sort != null ? extractSortColumns(classifier.sort) : null;
                 boolean[] sortAsc = classifier.sort != null ? extractSortDirections(classifier.sort) : null;
-                int limit = classifier.sort != null ? extractLimit(classifier.sort) : 0;
-                int offset = classifier.sort != null ? extractOffset(classifier.sort) : 0;
-                return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, limit, null, 0, groupCount, offset);
+                return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, 0, null, 0, groupCount, 0);
             }
             return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0);
         }
