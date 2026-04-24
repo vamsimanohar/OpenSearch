@@ -27,6 +27,7 @@ import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
 import org.opensearch.index.engine.exec.EngineReaderManager;
+import org.opensearch.plugins.ExtensiblePlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.SearchBackEndPlugin;
 import org.opensearch.repositories.RepositoriesService;
@@ -49,7 +50,7 @@ import java.util.function.Supplier;
  * Data warehouse query execution is handled by {@link DatafusionWarehouseQueryEngine},
  * which is discovered as a separate SPI.
  */
-public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<DatafusionReader>, SearchExecEngineProvider {
+public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<DatafusionReader>, SearchExecEngineProvider, ExtensiblePlugin {
 
     private static final Logger logger = LogManager.getLogger(DataFusionPlugin.class);
 
