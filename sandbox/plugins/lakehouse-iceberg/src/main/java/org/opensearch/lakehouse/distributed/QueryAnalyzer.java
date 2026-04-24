@@ -26,13 +26,14 @@ import java.util.List;
  * <p>
  * Uses Calcite's {@link RelVisitor} pattern for idiomatic tree traversal.
  * <p>
- * Phase 1 classification rules:
+ * Classification rules:
  * <ul>
- *   <li>{@link MergeStrategy#GLOBAL_MERGE} — global aggregation (no GROUP BY), with only
- *       SUM/COUNT/MIN/MAX aggregate functions (no AVG, no DISTINCT)</li>
+ *   <li>{@link MergeStrategy#GLOBAL_MERGE} — global aggregation (no GROUP BY), including AVG
+ *       (decomposed into SUM+COUNT on workers, recombined on coordinator)</li>
  *   <li>{@link MergeStrategy#TOPK_MERGE} — ORDER BY with LIMIT, no aggregation</li>
- *   <li>{@link MergeStrategy#SINGLE_NODE} — GROUP BY, COUNT DISTINCT, AVG, or any other
- *       non-trivially distributable pattern</li>
+ *   <li>{@link MergeStrategy#TWO_PHASE_GROUP_BY} — GROUP BY without LIMIT/AVG/DISTINCT</li>
+ *   <li>{@link MergeStrategy#SINGLE_NODE} — COUNT DISTINCT, GROUP BY+AVG, GROUP BY+LIMIT,
+ *       or any other non-trivially distributable pattern</li>
  *   <li>{@link MergeStrategy#CONCAT} — simple scan/filter/project with no agg and no sort</li>
  * </ul>
  *
@@ -64,14 +65,16 @@ public final class QueryAnalyzer {
         classifier.go(relNode);
 
         if (classifier.aggregate != null) {
-            if (hasDistinctOrAvg(classifier.aggregate)) {
+            if (hasDistinct(classifier.aggregate)) {
                 return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
             SqlKind[] aggKinds = extractAggKinds(classifier.aggregate);
             if (!classifier.aggregate.getGroupSet().isEmpty()) {
+                if (hasAvg(classifier.aggregate)) {
+                    return new AnalysisResult(MergeStrategy.SINGLE_NODE);
+                }
                 // GROUP BY + LIMIT must stay single-node: stripping LIMIT from workers
                 // OOMs on high-cardinality GROUP BY, and keeping LIMIT is lossy.
-                // Only distribute GROUP BY queries without LIMIT.
                 if (classifier.sort != null && classifier.sort.fetch != null) {
                     return new AnalysisResult(MergeStrategy.SINGLE_NODE);
                 }
@@ -80,6 +83,7 @@ public final class QueryAnalyzer {
                 boolean[] sortAsc = classifier.sort != null ? extractSortDirections(classifier.sort) : null;
                 return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, 0, null, 0, groupCount, 0);
             }
+            // Global agg (no GROUP BY): AVG is distributable via SUM+COUNT decomposition
             return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0);
         }
 
@@ -121,16 +125,22 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Checks if the aggregate has any DISTINCT aggregate calls or AVG functions.
-     *
-     * @param aggregate the aggregate node
-     * @return true if any call is DISTINCT or AVG
+     * Checks if the aggregate has any DISTINCT aggregate calls.
      */
-    static boolean hasDistinctOrAvg(Aggregate aggregate) {
+    static boolean hasDistinct(Aggregate aggregate) {
         for (AggregateCall call : aggregate.getAggCallList()) {
             if (call.isDistinct()) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    /**
+     * Checks if the aggregate has any AVG functions.
+     */
+    static boolean hasAvg(Aggregate aggregate) {
+        for (AggregateCall call : aggregate.getAggCallList()) {
             if (call.getAggregation().getKind() == SqlKind.AVG) {
                 return true;
             }

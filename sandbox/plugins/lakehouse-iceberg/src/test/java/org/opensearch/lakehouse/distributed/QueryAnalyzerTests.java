@@ -95,9 +95,17 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
     }
 
-    public void testAvgReturnsSingleNode() {
+    public void testGlobalAvgReturnsGlobalMerge() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
-        assertEquals(MergeStrategy.SINGLE_NODE, QueryAnalyzer.analyze(agg));
+        assertEquals(MergeStrategy.GLOBAL_MERGE, QueryAnalyzer.analyze(agg));
+    }
+
+    public void testGlobalMixedSumCountAvgReturnsGlobalMerge() {
+        AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall avgCall = makeAggCall(SqlStdOperatorTable.AVG, false);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(sumCall, countCall, avgCall));
+        assertEquals(MergeStrategy.GLOBAL_MERGE, QueryAnalyzer.analyze(agg));
     }
 
     public void testSortWithLimitReturnsTopKMerge() {
@@ -127,19 +135,24 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(MergeStrategy.TOPK_MERGE, QueryAnalyzer.analyze(project));
     }
 
-    public void testHasDistinctOrAvgReturnsFalseForCount() {
+    public void testHasDistinctReturnsFalseForCount() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
-        assertFalse(QueryAnalyzer.hasDistinctOrAvg(agg));
+        assertFalse(QueryAnalyzer.hasDistinct(agg));
     }
 
-    public void testHasDistinctOrAvgReturnsTrueForDistinct() {
+    public void testHasDistinctReturnsTrueForDistinct() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
-        assertTrue(QueryAnalyzer.hasDistinctOrAvg(agg));
+        assertTrue(QueryAnalyzer.hasDistinct(agg));
     }
 
-    public void testHasDistinctOrAvgReturnsTrueForAvg() {
+    public void testHasAvgReturnsFalseForCount() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        assertFalse(QueryAnalyzer.hasAvg(agg));
+    }
+
+    public void testHasAvgReturnsTrueForAvg() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
-        assertTrue(QueryAnalyzer.hasDistinctOrAvg(agg));
+        assertTrue(QueryAnalyzer.hasAvg(agg));
     }
 
     public void testMultipleAggCallsMixedDistinct() {
@@ -173,6 +186,20 @@ public class QueryAnalyzerTests extends OpenSearchTestCase {
         assertEquals(2, result.aggKinds.length);
         assertEquals(SqlKind.MIN, result.aggKinds[0]);
         assertEquals(SqlKind.MAX, result.aggKinds[1]);
+    }
+
+    public void testAnalyzeDetailedGlobalMergeWithAvgIncludesAvgKind() {
+        AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
+        AggregateCall avgCall = makeAggCall(SqlStdOperatorTable.AVG, false);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(sumCall, avgCall));
+
+        QueryAnalyzer.AnalysisResult result = QueryAnalyzer.analyzeDetailed(agg);
+
+        assertEquals(MergeStrategy.GLOBAL_MERGE, result.strategy);
+        assertNotNull(result.aggKinds);
+        assertEquals(2, result.aggKinds.length);
+        assertEquals(SqlKind.SUM, result.aggKinds[0]);
+        assertEquals(SqlKind.AVG, result.aggKinds[1]);
     }
 
     public void testAnalyzeDetailedTopKMergeIncludesSortAndLimit() {

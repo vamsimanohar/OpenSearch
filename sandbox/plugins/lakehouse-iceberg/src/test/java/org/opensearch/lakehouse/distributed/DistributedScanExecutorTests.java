@@ -458,6 +458,85 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         );
     }
 
+    // --- AVG decomposition tests ---
+
+    public void testHasAvgKindWithAvg() {
+        assertTrue(DistributedScanExecutor.hasAvgKind(new SqlKind[]{SqlKind.SUM, SqlKind.AVG}));
+    }
+
+    public void testHasAvgKindWithoutAvg() {
+        assertFalse(DistributedScanExecutor.hasAvgKind(new SqlKind[]{SqlKind.SUM, SqlKind.COUNT}));
+    }
+
+    public void testHasAvgKindNull() {
+        assertFalse(DistributedScanExecutor.hasAvgKind(null));
+    }
+
+    public void testDecomposeAvgSimple() {
+        assertEquals(
+            "SELECT SUM(userid), COUNT(userid) FROM hits",
+            DistributedScanExecutor.decomposeAvgInSql("SELECT AVG(userid) FROM hits")
+        );
+    }
+
+    public void testDecomposeAvgMixed() {
+        assertEquals(
+            "SELECT SUM(advengineid), COUNT(*), SUM(resolutionwidth), COUNT(resolutionwidth) FROM hits",
+            DistributedScanExecutor.decomposeAvgInSql("SELECT SUM(advengineid), COUNT(*), AVG(resolutionwidth) FROM hits")
+        );
+    }
+
+    public void testDecomposeAvgNoAvgUnchanged() {
+        String sql = "SELECT SUM(x), COUNT(*), MIN(y) FROM t";
+        assertEquals(sql, DistributedScanExecutor.decomposeAvgInSql(sql));
+    }
+
+    public void testDecomposeAvgWithNestedParens() {
+        assertEquals(
+            "SELECT SUM(CHAR_LENGTH(url)), COUNT(CHAR_LENGTH(url)) FROM hits",
+            DistributedScanExecutor.decomposeAvgInSql("SELECT AVG(CHAR_LENGTH(url)) FROM hits")
+        );
+    }
+
+    public void testDecomposeAvgSkipsPartOfIdentifier() {
+        String sql = "SELECT XAVG(col) FROM t";
+        assertEquals(sql, DistributedScanExecutor.decomposeAvgInSql(sql));
+    }
+
+    // --- GLOBAL_MERGE with AVG coordinator SQL tests ---
+
+    public void testBuildGlobalMergeCoordinatorSqlWithAvg() {
+        // q4: SELECT AVG(userid) FROM hits
+        // Workers compute SUM(userid), COUNT(userid) → col_0, col_1
+        WorkerQueryResponse r = new WorkerQueryResponse(
+            List.of("col_0", "col_1"), List.of("Long", "Long"), 1,
+            new Object[][]{{50000L}, {1000L}}
+        );
+        SqlKind[] aggKinds = {SqlKind.AVG};
+        String sql = DistributedScanExecutor.buildGlobalMergeCoordinatorSql(List.of(r), aggKinds);
+        assertEquals(
+            "SELECT CAST(SUM(\"col_0\") AS DOUBLE) / SUM(\"col_1\") FROM __exchange_input__",
+            sql
+        );
+    }
+
+    public void testBuildGlobalMergeCoordinatorSqlWithMixedSumCountAvg() {
+        // q3: SELECT SUM(advengineid), COUNT(*), AVG(resolutionwidth) FROM hits
+        // Workers return: col_0=SUM(adveng), col_1=COUNT(*), col_2=SUM(reswidth), col_3=COUNT(reswidth)
+        WorkerQueryResponse r = new WorkerQueryResponse(
+            List.of("col_0", "col_1", "col_2", "col_3"),
+            List.of("Long", "Long", "Long", "Long"),
+            1,
+            new Object[][]{{500L}, {100L}, {1280000L}, {100L}}
+        );
+        SqlKind[] aggKinds = {SqlKind.SUM, SqlKind.COUNT, SqlKind.AVG};
+        String sql = DistributedScanExecutor.buildGlobalMergeCoordinatorSql(List.of(r), aggKinds);
+        assertEquals(
+            "SELECT SUM(\"col_0\"), SUM(\"col_1\"), CAST(SUM(\"col_2\") AS DOUBLE) / SUM(\"col_3\") FROM __exchange_input__",
+            sql
+        );
+    }
+
     // --- stripOrderByLimitOffset tests ---
 
     public void testStripOrderByLimitOffset() {

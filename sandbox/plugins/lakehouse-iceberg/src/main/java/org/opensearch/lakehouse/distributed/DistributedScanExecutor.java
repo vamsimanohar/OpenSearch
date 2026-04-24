@@ -179,9 +179,16 @@ public class DistributedScanExecutor {
             filePaths.size()
         );
 
+        // For GLOBAL_MERGE with AVG: decompose AVG(expr) → SUM(expr), COUNT(expr) in worker SQL.
+        // Workers compute partial sums and counts; coordinator recombines as SUM/SUM.
+        String workerSql = sqlQuery;
+        if (analysis.strategy == MergeStrategy.GLOBAL_MERGE && hasAvgKind(analysis.aggKinds)) {
+            workerSql = decomposeAvgInSql(sqlQuery);
+            logger.info("[ScanExecutor] GLOBAL_MERGE: decomposed AVG in worker SQL");
+        }
+
         // For TWO_PHASE_GROUP_BY: strip ORDER BY/LIMIT/OFFSET from worker SQL.
         // Workers must return ALL groups for their partition — coordinator re-aggregates and applies ordering.
-        String workerSql = sqlQuery;
         if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY && analysis.sortColumns != null) {
             workerSql = stripOrderByLimitOffset(sqlQuery);
             logger.info("[ScanExecutor] TWO_PHASE_GROUP_BY: stripped ORDER BY/LIMIT/OFFSET from worker SQL");
@@ -464,6 +471,67 @@ public class DistributedScanExecutor {
     }
 
     /**
+     * Returns true if any of the aggregate kinds is AVG.
+     */
+    static boolean hasAvgKind(SqlKind[] aggKinds) {
+        if (aggKinds == null) return false;
+        for (SqlKind kind : aggKinds) {
+            if (kind == SqlKind.AVG) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Decomposes AVG(expr) into SUM(expr), COUNT(expr) in the SELECT clause.
+     * Other aggregate functions (SUM, COUNT, MIN, MAX) pass through unchanged.
+     * <p>
+     * Example: {@code SELECT SUM(x), AVG(y), COUNT(*) FROM t}
+     * becomes: {@code SELECT SUM(x), SUM(y), COUNT(y), COUNT(*) FROM t}
+     */
+    static String decomposeAvgInSql(String sql) {
+        String upper = sql.toUpperCase();
+        StringBuilder result = new StringBuilder();
+        int pos = 0;
+
+        while (pos < sql.length()) {
+            int avgIdx = upper.indexOf("AVG(", pos);
+            if (avgIdx < 0) {
+                result.append(sql, pos, sql.length());
+                break;
+            }
+            // Verify AVG is not part of a longer identifier (e.g., XAVG)
+            if (avgIdx > 0 && Character.isLetterOrDigit(sql.charAt(avgIdx - 1))) {
+                result.append(sql, pos, avgIdx + 4);
+                pos = avgIdx + 4;
+                continue;
+            }
+            // Find the matching closing paren
+            int parenDepth = 0;
+            int closeIdx = -1;
+            for (int i = avgIdx + 3; i < sql.length(); i++) {
+                if (sql.charAt(i) == '(') parenDepth++;
+                else if (sql.charAt(i) == ')') {
+                    parenDepth--;
+                    if (parenDepth == 0) {
+                        closeIdx = i;
+                        break;
+                    }
+                }
+            }
+            if (closeIdx < 0) {
+                result.append(sql, pos, sql.length());
+                break;
+            }
+            // Extract the expression inside AVG(...)
+            String innerExpr = sql.substring(avgIdx + 4, closeIdx);
+            result.append(sql, pos, avgIdx);
+            result.append("SUM(").append(innerExpr).append("), COUNT(").append(innerExpr).append(")");
+            pos = closeIdx + 1;
+        }
+        return result.toString();
+    }
+
+    /**
      * Builds the coordinator SQL for the given merge strategy and worker responses.
      * <p>
      * For CONCAT: {@code SELECT * FROM __exchange_input__}<br>
@@ -505,17 +573,32 @@ public class DistributedScanExecutor {
         WorkerQueryResponse first = responses.stream().filter(r -> r.getRowCount() > 0).findFirst().orElse(responses.get(0));
         List<String> columnNames = first.getColumnNames();
 
+        // When AVG was decomposed, each AVG became 2 worker columns (SUM + COUNT).
+        // Map aggKinds (original agg positions) to worker column positions.
         StringBuilder sb = new StringBuilder("SELECT ");
-        for (int i = 0; i < columnNames.size(); i++) {
-            if (i > 0) sb.append(", ");
-            SqlKind kind = (aggKinds != null && i < aggKinds.length) ? aggKinds[i] : SqlKind.SUM;
-            String quotedCol = "\"" + columnNames.get(i) + "\"";
-            String func = switch (kind) {
-                case MIN -> "MIN";
-                case MAX -> "MAX";
-                default -> "SUM";
-            };
-            sb.append(func).append("(").append(quotedCol).append(")");
+        int workerCol = 0;
+        int aggIdx = 0;
+        while (workerCol < columnNames.size()) {
+            if (workerCol > 0) sb.append(", ");
+            SqlKind kind = (aggKinds != null && aggIdx < aggKinds.length) ? aggKinds[aggIdx] : SqlKind.SUM;
+
+            if (kind == SqlKind.AVG && workerCol + 1 < columnNames.size()) {
+                // AVG was decomposed into SUM(expr), COUNT(expr) — recombine
+                String sumCol = "\"" + columnNames.get(workerCol) + "\"";
+                String countCol = "\"" + columnNames.get(workerCol + 1) + "\"";
+                sb.append("CAST(SUM(").append(sumCol).append(") AS DOUBLE) / SUM(").append(countCol).append(")");
+                workerCol += 2;
+            } else {
+                String quotedCol = "\"" + columnNames.get(workerCol) + "\"";
+                String func = switch (kind) {
+                    case MIN -> "MIN";
+                    case MAX -> "MAX";
+                    default -> "SUM";
+                };
+                sb.append(func).append("(").append(quotedCol).append(")");
+                workerCol++;
+            }
+            aggIdx++;
         }
         sb.append(" FROM __exchange_input__");
         return sb.toString();
