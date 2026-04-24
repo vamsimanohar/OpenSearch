@@ -525,7 +525,7 @@ public class DistributedScanExecutor {
             // Extract the expression inside AVG(...)
             String innerExpr = sql.substring(avgIdx + 4, closeIdx);
             result.append(sql, pos, avgIdx);
-            result.append("SUM(").append(innerExpr).append("), COUNT(").append(innerExpr).append(")");
+            result.append("SUM(CAST(").append(innerExpr).append(" AS DOUBLE)), COUNT(").append(innerExpr).append(")");
             pos = closeIdx + 1;
         }
         return result.toString();

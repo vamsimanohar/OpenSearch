@@ -474,14 +474,14 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
     public void testDecomposeAvgSimple() {
         assertEquals(
-            "SELECT SUM(userid), COUNT(userid) FROM hits",
+            "SELECT SUM(CAST(userid AS DOUBLE)), COUNT(userid) FROM hits",
             DistributedScanExecutor.decomposeAvgInSql("SELECT AVG(userid) FROM hits")
         );
     }
 
     public void testDecomposeAvgMixed() {
         assertEquals(
-            "SELECT SUM(advengineid), COUNT(*), SUM(resolutionwidth), COUNT(resolutionwidth) FROM hits",
+            "SELECT SUM(advengineid), COUNT(*), SUM(CAST(resolutionwidth AS DOUBLE)), COUNT(resolutionwidth) FROM hits",
             DistributedScanExecutor.decomposeAvgInSql("SELECT SUM(advengineid), COUNT(*), AVG(resolutionwidth) FROM hits")
         );
     }
@@ -493,7 +493,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
     public void testDecomposeAvgWithNestedParens() {
         assertEquals(
-            "SELECT SUM(CHAR_LENGTH(url)), COUNT(CHAR_LENGTH(url)) FROM hits",
+            "SELECT SUM(CAST(CHAR_LENGTH(url) AS DOUBLE)), COUNT(CHAR_LENGTH(url)) FROM hits",
             DistributedScanExecutor.decomposeAvgInSql("SELECT AVG(CHAR_LENGTH(url)) FROM hits")
         );
     }
