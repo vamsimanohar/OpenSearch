@@ -12,6 +12,7 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.GroupedActionListener;
@@ -29,7 +30,6 @@ import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.lakehouse.LakehousePlugin;
 import org.opensearch.lakehouse.distributed.merge.MergeStrategy;
-import org.opensearch.lakehouse.distributed.merge.ResultMerger;
 import org.opensearch.lakehouse.distributed.merge.ResultSerializer;
 import org.opensearch.lakehouse.distributed.merge.WorkerResponseToArrow;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryAction;
@@ -180,11 +180,10 @@ public class DistributedScanExecutor {
         );
 
         // For TOPK_MERGE, sort columns may not be in the SELECT output.
-        // Detect missing sort columns, add them to worker SQL, and strip after merge.
+        // Detect missing sort columns and add them to worker SQL so they appear in Arrow IPC.
+        // The coordinator SQL handles stripping them from the final output.
         String workerSql = sqlQuery;
-        int[] mergeSortColumns = analysis.sortColumns;
         int outputColumnCount = analysis.outputColumnCount;
-        boolean needsColumnStripping = false;
 
         if (analysis.strategy == MergeStrategy.TOPK_MERGE && analysis.sortColumnNames != null) {
             List<String> outputNames = relNode.getRowType().getFieldNames();
@@ -196,30 +195,20 @@ public class DistributedScanExecutor {
                 }
             }
 
-            List<String> workerOutputNames = new ArrayList<>(outputNames);
             if (!missingColumns.isEmpty()) {
                 workerSql = addColumnsToSelect(sqlQuery, missingColumns);
-                workerOutputNames.addAll(missingColumns);
-                needsColumnStripping = true;
                 logger.info(
                     "[ScanExecutor] TOPK_MERGE: added {} sort columns to worker SQL: {}",
                     missingColumns.size(),
                     missingColumns
                 );
             }
-
-            // Remap sort indices to worker output column positions (name-based)
-            mergeSortColumns = new int[analysis.sortColumnNames.length];
-            for (int i = 0; i < analysis.sortColumnNames.length; i++) {
-                mergeSortColumns[i] = workerOutputNames.indexOf(analysis.sortColumnNames[i]);
-            }
         }
 
         // Capture effectively-final locals for lambda
         final String finalWorkerSql = workerSql;
-        final int[] finalMergeSortColumns = mergeSortColumns;
-        final boolean finalNeedsStripping = needsColumnStripping;
         final int finalOutputColumnCount = outputColumnCount;
+        final List<String> originalOutputNames = List.copyOf(relNode.getRowType().getFieldNames());
 
         // Partition files across workers
         List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());
@@ -228,17 +217,10 @@ public class DistributedScanExecutor {
         dispatchAndCollect(workers, assignments, finalWorkerSql, storageConfig, tableName, ActionListener.wrap(
             responses -> {
                 try {
-                    if (analysis.strategy == MergeStrategy.CONCAT) {
-                        mergeViaDataFusion(responses, CONCAT_COORDINATOR_SQL, listener);
-                    } else {
-                        WorkerQueryResponse merged = ResultMerger.merge(
-                            responses, analysis.strategy, finalMergeSortColumns, analysis.sortAsc, analysis.limit, analysis.aggKinds
-                        );
-                        if (finalNeedsStripping) {
-                            merged = stripExtraColumns(merged, finalOutputColumnCount);
-                        }
-                        listener.onResponse(ResultSerializer.toRows(merged));
-                    }
+                    String coordinatorSql = buildCoordinatorSql(
+                        analysis, responses, finalOutputColumnCount, originalOutputNames
+                    );
+                    mergeViaDataFusion(responses, coordinatorSql, analysis.strategy, listener);
                 } catch (Exception e) {
                     listener.onFailure(e);
                 }
@@ -428,27 +410,119 @@ public class DistributedScanExecutor {
     }
 
     /**
-     * Removes columns beyond the original output count from a worker response.
-     * Used after TOPK_MERGE to strip sort-only columns that were added to the worker SQL.
-     *
-     * @param response          the merged response with extra columns
-     * @param outputColumnCount the number of columns in the original query output
-     * @return a response with only the original output columns
+     * Builds the coordinator SQL for the given merge strategy and worker responses.
+     * <p>
+     * For CONCAT: {@code SELECT * FROM __exchange_input__}<br>
+     * For GLOBAL_MERGE: re-aggregate partial results (SUM/MIN/MAX per column)<br>
+     * For TOPK_MERGE: merge-sort and limit ({@code ORDER BY ... LIMIT N})
      */
-    static WorkerQueryResponse stripExtraColumns(WorkerQueryResponse response, int outputColumnCount) {
-        if (outputColumnCount >= response.getColumnNames().size()) {
-            return response;
-        }
-        List<String> names = new ArrayList<>(response.getColumnNames().subList(0, outputColumnCount));
-        List<String> types = new ArrayList<>(response.getColumnTypes().subList(0, outputColumnCount));
-        Object[][] data = response.getColumnData();
-        Object[][] trimmed = new Object[outputColumnCount][];
-        System.arraycopy(data, 0, trimmed, 0, outputColumnCount);
-        return new WorkerQueryResponse(names, types, response.getRowCount(), trimmed);
+    static String buildCoordinatorSql(
+        QueryAnalyzer.AnalysisResult analysis,
+        List<WorkerQueryResponse> responses,
+        int outputColumnCount,
+        List<String> originalOutputNames
+    ) {
+        return switch (analysis.strategy) {
+            case CONCAT -> CONCAT_COORDINATOR_SQL;
+            case GLOBAL_MERGE -> buildGlobalMergeCoordinatorSql(responses, analysis.aggKinds);
+            case TOPK_MERGE -> buildTopKMergeCoordinatorSql(
+                analysis.sortColumnNames, analysis.sortAsc, analysis.limit, outputColumnCount, originalOutputNames
+            );
+            case SINGLE_NODE -> throw new IllegalStateException("SINGLE_NODE should not reach coordinator SQL");
+        };
     }
 
     /**
-     * Merges CONCAT-strategy worker responses via the native DataFusion runtime.
+     * Builds coordinator SQL for GLOBAL_MERGE: re-aggregates single-row partial results.
+     * <p>
+     * Each worker returns one row of partial aggregates. The coordinator re-aggregates
+     * by applying the correct function per column: SUM for SUM/COUNT, MIN for MIN, MAX for MAX.
+     * <p>
+     * Example: worker SQL {@code SELECT COUNT(*), SUM(x), MIN(y) FROM t} produces columns
+     * {@code ["count(*)","sum(x)","min(y)"]}. Coordinator SQL becomes:
+     * {@code SELECT SUM("count(*)"), SUM("sum(x)"), MIN("min(y)") FROM __exchange_input__}
+     */
+    static String buildGlobalMergeCoordinatorSql(List<WorkerQueryResponse> responses, SqlKind[] aggKinds) {
+        WorkerQueryResponse first = responses.stream().filter(r -> r.getRowCount() > 0).findFirst().orElse(responses.get(0));
+        List<String> columnNames = first.getColumnNames();
+
+        StringBuilder sb = new StringBuilder("SELECT ");
+        for (int i = 0; i < columnNames.size(); i++) {
+            if (i > 0) sb.append(", ");
+            SqlKind kind = (aggKinds != null && i < aggKinds.length) ? aggKinds[i] : SqlKind.SUM;
+            String quotedCol = "\"" + columnNames.get(i) + "\"";
+            String func = switch (kind) {
+                case MIN -> "MIN";
+                case MAX -> "MAX";
+                default -> "SUM";
+            };
+            sb.append(func).append("(").append(quotedCol).append(")");
+        }
+        sb.append(" FROM __exchange_input__");
+        return sb.toString();
+    }
+
+    /**
+     * Builds coordinator SQL for TOPK_MERGE: merge-sorts pre-sorted worker results and limits.
+     * <p>
+     * Workers each return their local top-K rows. The coordinator merge-sorts all results
+     * and takes the global top-K. When extra sort columns were added to the worker SQL
+     * (not in the original SELECT), the coordinator uses a subquery to ORDER BY those
+     * columns but only returns the original output columns.
+     * <p>
+     * Example without extra columns:
+     * {@code SELECT * FROM __exchange_input__ ORDER BY "eventTime" ASC LIMIT 10}
+     * <p>
+     * Example with extra sort columns stripped via column-name projection:
+     * {@code SELECT "col0", "col1" FROM (SELECT * FROM __exchange_input__ ORDER BY "sortCol" ASC LIMIT 10)}
+     */
+    static String buildTopKMergeCoordinatorSql(
+        String[] sortColumnNames,
+        boolean[] sortAsc,
+        int limit,
+        int outputColumnCount,
+        List<String> originalOutputNames
+    ) {
+        StringBuilder orderBy = new StringBuilder(" ORDER BY ");
+        for (int i = 0; i < sortColumnNames.length; i++) {
+            if (i > 0) orderBy.append(", ");
+            orderBy.append("\"").append(sortColumnNames[i]).append("\"");
+            orderBy.append(sortAsc[i] ? " ASC" : " DESC");
+        }
+        if (limit > 0) {
+            orderBy.append(" LIMIT ").append(limit);
+        }
+
+        boolean needsStripping = originalOutputNames != null && outputColumnCount > 0
+            && outputColumnCount < originalOutputNames.size() + sortColumnNames.length;
+
+        // Check if any sort column is NOT already in the original output
+        if (originalOutputNames != null) {
+            boolean hasMissingSortCol = false;
+            for (String sortCol : sortColumnNames) {
+                if (!originalOutputNames.contains(sortCol)) {
+                    hasMissingSortCol = true;
+                    break;
+                }
+            }
+            needsStripping = hasMissingSortCol;
+        }
+
+        if (needsStripping && originalOutputNames != null) {
+            StringBuilder sb = new StringBuilder("SELECT ");
+            for (int i = 0; i < originalOutputNames.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append("\"").append(originalOutputNames.get(i)).append("\"");
+            }
+            sb.append(" FROM (SELECT * FROM __exchange_input__").append(orderBy).append(")");
+            return sb.toString();
+        }
+
+        return "SELECT * FROM __exchange_input__" + orderBy;
+    }
+
+    /**
+     * Merges worker responses via the native DataFusion runtime.
      * <p>
      * Converts all non-empty worker responses to Arrow VectorSchemaRoots, serializes them
      * as a single Arrow IPC stream, sends the stream to the native DataFusion runtime with
@@ -461,11 +535,13 @@ public class DistributedScanExecutor {
      *
      * @param responses      worker responses to merge
      * @param coordinatorSql SQL to run over the accumulated input (e.g. {@code SELECT * FROM __exchange_input__})
+     * @param strategy       the merge strategy (for logging)
      * @param listener       callback for the merged row-major result
      */
     void mergeViaDataFusion(
         List<WorkerQueryResponse> responses,
         String coordinatorSql,
+        MergeStrategy strategy,
         ActionListener<Iterable<Object[]>> listener
     ) {
         // Filter out empty responses
@@ -487,8 +563,8 @@ public class DistributedScanExecutor {
             byte[] ipc = serializeResponsesAsIpc(nonEmpty, dfService);
 
             logger.info(
-                "[ScanExecutor] CONCAT merge via DataFusion: {} responses, {} bytes IPC, sql={}",
-                nonEmpty.size(), ipc.length, coordinatorSql
+                "[ScanExecutor] {} merge via DataFusion: {} responses, {} bytes IPC, sql={}",
+                strategy, nonEmpty.size(), ipc.length, coordinatorSql
             );
 
             // 2. Call NativeBridge.executeFromIpcAsync to get a stream pointer
@@ -514,16 +590,16 @@ public class DistributedScanExecutor {
             } catch (TimeoutException e) {
                 FutureUtils.cancel(future);
                 listener.onFailure(new RuntimeException(
-                    "DataFusion CONCAT merge timed out after " + NATIVE_TIMEOUT_MINUTES + " minutes", e));
+                    "DataFusion " + strategy + " merge timed out after " + NATIVE_TIMEOUT_MINUTES + " minutes", e));
                 return;
             } catch (ExecutionException e) {
                 Throwable cause = e.getCause();
                 listener.onFailure(new RuntimeException(
-                    "DataFusion CONCAT merge failed", cause != null ? cause : e));
+                    "DataFusion " + strategy + " merge failed", cause != null ? cause : e));
                 return;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                listener.onFailure(new RuntimeException("DataFusion CONCAT merge interrupted", e));
+                listener.onFailure(new RuntimeException("DataFusion " + strategy + " merge interrupted", e));
                 return;
             }
 

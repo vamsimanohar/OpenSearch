@@ -8,10 +8,8 @@
 
 package org.opensearch.lakehouse.distributed.merge;
 
-import org.apache.calcite.sql.SqlKind;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryResponse;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -19,14 +17,8 @@ import java.util.List;
  * Combines partial {@link WorkerQueryResponse} results from distributed workers into a single
  * merged response according to the given {@link MergeStrategy}.
  * <p>
- * This is a thin dispatcher that routes to the appropriate merge implementation:
- * <ul>
- *   <li><b>CONCAT</b> — handled externally via DataFusion native merge (Arrow IPC pipeline);
- *       calling {@code merge()} with CONCAT throws {@link IllegalStateException}</li>
- *   <li><b>GLOBAL_MERGE</b> — re-aggregate via {@link AggregationReducer}</li>
- *   <li><b>TOPK_MERGE</b> — merge-sort via {@link TopKMerger}</li>
- *   <li><b>SINGLE_NODE</b> — pass through the single worker's response</li>
- * </ul>
+ * All distributable strategies (CONCAT, GLOBAL_MERGE, TOPK_MERGE) are handled by the
+ * DataFusion native pipeline via Arrow IPC. Only SINGLE_NODE passes through here.
  *
  * @opensearch.internal
  */
@@ -35,104 +27,23 @@ public final class ResultMerger {
     private ResultMerger() {}
 
     /**
-     * Merges multiple worker responses according to the given strategy.
+     * Merges multiple worker responses. Only SINGLE_NODE is still handled in Java;
+     * all other strategies are routed through the DataFusion native pipeline.
      *
-     * @param responses    the worker responses to merge
-     * @param strategy     the merge strategy
-     * @param sortColumns  column indices to sort by (for TOPK_MERGE), may be null
-     * @param sortAsc      ascending flag for each sort column (for TOPK_MERGE), may be null
-     * @param limit        row limit (for TOPK_MERGE), ignored for other strategies
+     * @param responses the worker responses to merge
+     * @param strategy  the merge strategy
      * @return the merged response
      */
-    public static WorkerQueryResponse merge(
-        List<WorkerQueryResponse> responses,
-        MergeStrategy strategy,
-        int[] sortColumns,
-        boolean[] sortAsc,
-        int limit
-    ) {
-        return merge(responses, strategy, sortColumns, sortAsc, limit, null);
-    }
-
-    /**
-     * Merges multiple worker responses with aggregate function metadata.
-     *
-     * @param responses    the worker responses to merge
-     * @param strategy     the merge strategy
-     * @param sortColumns  column indices to sort by (for TOPK_MERGE), may be null
-     * @param sortAsc      ascending flag for each sort column (for TOPK_MERGE), may be null
-     * @param limit        row limit (for TOPK_MERGE), ignored for other strategies
-     * @param aggKinds     aggregate function kinds per column (for GLOBAL_MERGE), may be null
-     * @return the merged response
-     */
-    public static WorkerQueryResponse merge(
-        List<WorkerQueryResponse> responses,
-        MergeStrategy strategy,
-        int[] sortColumns,
-        boolean[] sortAsc,
-        int limit,
-        SqlKind[] aggKinds
-    ) {
-        List<WorkerQueryResponse> nonEmpty = filterNonEmpty(responses);
-        if (nonEmpty.isEmpty()) {
-            return emptyResponse(responses);
+    public static WorkerQueryResponse merge(List<WorkerQueryResponse> responses, MergeStrategy strategy) {
+        if (strategy != MergeStrategy.SINGLE_NODE) {
+            throw new IllegalStateException(strategy + " merge is handled by DataFusion native pipeline");
         }
-
-        return switch (strategy) {
-            case CONCAT -> throw new IllegalStateException("CONCAT merge is handled by DataFusion native pipeline");
-            case GLOBAL_MERGE -> mergeGlobal(nonEmpty, aggKinds);
-            case TOPK_MERGE -> TopKMerger.merge(nonEmpty, sortColumns, sortAsc, limit);
-            case SINGLE_NODE -> nonEmpty.get(0);
-        };
-    }
-
-    /**
-     * Re-aggregates single-row global results. Assumes each worker returns exactly one row.
-     * <p>
-     * Uses aggregate function kinds to determine merge operation per column:
-     * SUM/COUNT -> sum, MIN -> min, MAX -> max. Falls back to sum if aggKinds is null.
-     * Delegates column-level operations to {@link AggregationReducer}.
-     *
-     * @param responses the worker responses (one row each)
-     * @param aggKinds  aggregate function kinds per column, may be null (defaults to SUM)
-     */
-    static WorkerQueryResponse mergeGlobal(List<WorkerQueryResponse> responses, SqlKind[] aggKinds) {
-        WorkerQueryResponse first = responses.get(0);
-        List<String> columnNames = first.getColumnNames();
-        List<String> columnTypes = first.getColumnTypes();
-        int numCols = columnNames.size();
-
-        Object[][] merged = new Object[numCols][1];
-        for (int col = 0; col < numCols; col++) {
-            SqlKind kind = (aggKinds != null && col < aggKinds.length) ? aggKinds[col] : SqlKind.SUM;
-            if (kind == SqlKind.MIN) {
-                merged[col][0] = AggregationReducer.minColumn(responses, col);
-            } else if (kind == SqlKind.MAX) {
-                merged[col][0] = AggregationReducer.maxColumn(responses, col);
-            } else {
-                merged[col][0] = AggregationReducer.sumColumn(responses, col);
-            }
-        }
-
-        return new WorkerQueryResponse(columnNames, columnTypes, 1, merged);
-    }
-
-    /**
-     * Filters out responses with zero rows.
-     */
-    static List<WorkerQueryResponse> filterNonEmpty(List<WorkerQueryResponse> responses) {
-        List<WorkerQueryResponse> result = new ArrayList<>();
         for (WorkerQueryResponse r : responses) {
-            if (r.getRowCount() > 0) {
-                result.add(r);
-            }
+            if (r.getRowCount() > 0) return r;
         }
-        return result;
+        return emptyResponse(responses);
     }
 
-    /**
-     * Creates an empty response preserving column metadata from the first response if available.
-     */
     static WorkerQueryResponse emptyResponse(List<WorkerQueryResponse> responses) {
         if (!responses.isEmpty()) {
             WorkerQueryResponse first = responses.get(0);

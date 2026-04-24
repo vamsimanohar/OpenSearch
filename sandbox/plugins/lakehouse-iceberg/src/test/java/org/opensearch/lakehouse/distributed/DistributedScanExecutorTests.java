@@ -9,6 +9,7 @@
 package org.opensearch.lakehouse.distributed;
 
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.sql.SqlKind;
 import org.opensearch.Version;
 import org.opensearch.analytics.exec.DataWarehouseScanContext;
 import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
@@ -304,25 +305,63 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         assertEquals(sql, result);
     }
 
-    public void testStripExtraColumnsRemovesAppendedColumns() {
-        WorkerQueryResponse response = new WorkerQueryResponse(
-            List.of("searchphrase", "eventtime"),
-            List.of("Utf8", "Timestamp"),
-            2,
-            new Object[][]{{"a", "b"}, {100L, 200L}}
+    // --- Coordinator SQL builder tests ---
+
+    public void testBuildGlobalMergeCoordinatorSqlSumCountMinMax() {
+        WorkerQueryResponse r = new WorkerQueryResponse(
+            List.of("count(*)", "sum(x)", "min(y)", "max(z)"),
+            List.of("Long", "Double", "String", "String"),
+            1,
+            new Object[][]{{100L}, {1000.0}, {"2013-07-01"}, {"2013-07-30"}}
         );
-        WorkerQueryResponse stripped = DistributedScanExecutor.stripExtraColumns(response, 1);
-        assertEquals(1, stripped.getColumnNames().size());
-        assertEquals("searchphrase", stripped.getColumnNames().get(0));
-        assertEquals(2, stripped.getRowCount());
+        SqlKind[] aggKinds = {SqlKind.COUNT, SqlKind.SUM, SqlKind.MIN, SqlKind.MAX};
+        String sql = DistributedScanExecutor.buildGlobalMergeCoordinatorSql(List.of(r), aggKinds);
+        assertEquals(
+            "SELECT SUM(\"count(*)\"), SUM(\"sum(x)\"), MIN(\"min(y)\"), MAX(\"max(z)\") FROM __exchange_input__",
+            sql
+        );
     }
 
-    public void testStripExtraColumnsNoOpWhenNoExtraColumns() {
-        WorkerQueryResponse response = new WorkerQueryResponse(
-            List.of("col1"), List.of("Integer"), 1, new Object[][]{{42}}
+    public void testBuildGlobalMergeCoordinatorSqlDefaultsToSum() {
+        WorkerQueryResponse r = new WorkerQueryResponse(
+            List.of("col0", "col1"), List.of("Long", "Long"), 1, new Object[][]{{10L}, {20L}}
         );
-        WorkerQueryResponse result = DistributedScanExecutor.stripExtraColumns(response, 1);
-        assertSame(response, result);
+        String sql = DistributedScanExecutor.buildGlobalMergeCoordinatorSql(List.of(r), null);
+        assertEquals("SELECT SUM(\"col0\"), SUM(\"col1\") FROM __exchange_input__", sql);
+    }
+
+    public void testBuildTopKMergeCoordinatorSqlSortColumnsInOutput() {
+        // Sort column IS in the output → no wrapping needed
+        String sql = DistributedScanExecutor.buildTopKMergeCoordinatorSql(
+            new String[]{"eventTime"}, new boolean[]{true}, 10, 2, List.of("col0", "eventTime")
+        );
+        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"eventTime\" ASC LIMIT 10", sql);
+    }
+
+    public void testBuildTopKMergeCoordinatorSqlMultiSortAllInOutput() {
+        // All sort columns in output → no wrapping
+        String sql = DistributedScanExecutor.buildTopKMergeCoordinatorSql(
+            new String[]{"a", "b"}, new boolean[]{true, false}, 5, 3, List.of("a", "b", "c")
+        );
+        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"a\" ASC, \"b\" DESC LIMIT 5", sql);
+    }
+
+    public void testBuildTopKMergeCoordinatorSqlWithExtraColumns() {
+        // sortCol is not in originalOutputNames → needs stripping via subquery
+        String sql = DistributedScanExecutor.buildTopKMergeCoordinatorSql(
+            new String[]{"sortCol"}, new boolean[]{true}, 10, 1, List.of("searchphrase")
+        );
+        assertEquals(
+            "SELECT \"searchphrase\" FROM (SELECT * FROM __exchange_input__ ORDER BY \"sortCol\" ASC LIMIT 10)",
+            sql
+        );
+    }
+
+    public void testBuildTopKMergeCoordinatorSqlNoLimitOmitsLimit() {
+        String sql = DistributedScanExecutor.buildTopKMergeCoordinatorSql(
+            new String[]{"col"}, new boolean[]{true}, 0, 1, List.of("col")
+        );
+        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col\" ASC", sql);
     }
 
     // --- Helper methods ---
