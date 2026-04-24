@@ -179,11 +179,18 @@ public class DistributedScanExecutor {
             filePaths.size()
         );
 
+        // For TWO_PHASE_GROUP_BY: strip ORDER BY/LIMIT/OFFSET from worker SQL.
+        // Workers must return ALL groups for their partition — coordinator re-aggregates and applies ordering.
+        String workerSql = sqlQuery;
+        if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY && analysis.sortColumns != null) {
+            workerSql = stripOrderByLimitOffset(sqlQuery);
+            logger.info("[ScanExecutor] TWO_PHASE_GROUP_BY: stripped ORDER BY/LIMIT/OFFSET from worker SQL");
+        }
+
         // For TOPK_MERGE, sort columns may not be in the SELECT output.
         // Detect missing sort columns and add them to worker SQL so they appear in Arrow IPC.
         // The coordinator SQL handles stripping them from the final output.
         // Workers use generic col_N naming, so we track sort column indices for coordinator SQL.
-        String workerSql = sqlQuery;
         int outputColumnCount = analysis.outputColumnCount;
         int[] sortColumnIndices = analysis.sortColumns;
 
@@ -420,6 +427,43 @@ public class DistributedScanExecutor {
     }
 
     /**
+     * Strips ORDER BY, LIMIT, and OFFSET clauses from a SQL query.
+     * Used for TWO_PHASE_GROUP_BY workers that must return all groups, not a truncated top-K.
+     * The coordinator SQL re-applies ordering after re-aggregation.
+     *
+     * @param sql the original SQL query with ORDER BY/LIMIT/OFFSET
+     * @return the SQL with those clauses removed
+     */
+    static String stripOrderByLimitOffset(String sql) {
+        String upper = sql.toUpperCase();
+        int orderByIdx = findKeyword(upper, "ORDER BY");
+        if (orderByIdx >= 0) {
+            return sql.substring(0, orderByIdx).stripTrailing();
+        }
+        int limitIdx = findKeyword(upper, "LIMIT");
+        if (limitIdx >= 0) {
+            return sql.substring(0, limitIdx).stripTrailing();
+        }
+        return sql;
+    }
+
+    /**
+     * Finds a SQL keyword preceded by whitespace in the uppercase query string.
+     */
+    private static int findKeyword(String upper, String keyword) {
+        int searchFrom = 0;
+        while (searchFrom < upper.length()) {
+            int idx = upper.indexOf(keyword, searchFrom);
+            if (idx < 0) return -1;
+            if (idx == 0 || Character.isWhitespace(upper.charAt(idx - 1))) {
+                return idx;
+            }
+            searchFrom = idx + keyword.length();
+        }
+        return -1;
+    }
+
+    /**
      * Builds the coordinator SQL for the given merge strategy and worker responses.
      * <p>
      * For CONCAT: {@code SELECT * FROM __exchange_input__}<br>
@@ -440,7 +484,8 @@ public class DistributedScanExecutor {
                 sortColumnIndices, analysis.sortAsc, analysis.limit, outputColumnCount
             );
             case TWO_PHASE_GROUP_BY -> buildTwoPhaseGroupByCoordinatorSql(
-                responses, analysis.groupCount, analysis.aggKinds
+                responses, analysis.groupCount, analysis.aggKinds,
+                analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.offset
             );
             case SINGLE_NODE -> throw new IllegalStateException("SINGLE_NODE should not reach coordinator SQL");
         };
@@ -493,7 +538,11 @@ public class DistributedScanExecutor {
     static String buildTwoPhaseGroupByCoordinatorSql(
         List<WorkerQueryResponse> responses,
         int groupCount,
-        SqlKind[] aggKinds
+        SqlKind[] aggKinds,
+        int[] sortColumns,
+        boolean[] sortAsc,
+        int limit,
+        int offset
     ) {
         WorkerQueryResponse first = responses.stream().filter(r -> r.getRowCount() > 0).findFirst().orElse(responses.get(0));
         int totalCols = first.getColumnNames().size();
@@ -519,6 +568,21 @@ public class DistributedScanExecutor {
         for (int i = 0; i < groupCount; i++) {
             if (i > 0) sb.append(", ");
             sb.append("\"col_").append(i).append("\"");
+        }
+
+        if (sortColumns != null && sortColumns.length > 0) {
+            sb.append(" ORDER BY ");
+            for (int i = 0; i < sortColumns.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append("\"col_").append(sortColumns[i]).append("\"");
+                sb.append(sortAsc[i] ? " ASC" : " DESC");
+            }
+        }
+        if (limit > 0) {
+            sb.append(" LIMIT ").append(limit);
+        }
+        if (offset > 0) {
+            sb.append(" OFFSET ").append(offset);
         }
         return sb.toString();
     }

@@ -372,7 +372,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             new Object[][]{{"a", "b"}, {10L, 20L}}
         );
         String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
-            List.of(r), 1, new SqlKind[]{SqlKind.COUNT}
+            List.of(r), 1, new SqlKind[]{SqlKind.COUNT}, null, null, 0, 0
         );
         assertEquals(
             "SELECT \"col_0\", SUM(\"col_1\") FROM __exchange_input__ GROUP BY \"col_0\"",
@@ -388,7 +388,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             new Object[][]{{"x"}, {1}, {50L}, {100L}, {"2013-07-01"}}
         );
         String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
-            List.of(r), 2, new SqlKind[]{SqlKind.COUNT, SqlKind.SUM, SqlKind.MIN}
+            List.of(r), 2, new SqlKind[]{SqlKind.COUNT, SqlKind.SUM, SqlKind.MIN}, null, null, 0, 0
         );
         assertEquals(
             "SELECT \"col_0\", \"col_1\", SUM(\"col_2\"), SUM(\"col_3\"), MIN(\"col_4\") FROM __exchange_input__ GROUP BY \"col_0\", \"col_1\"",
@@ -404,7 +404,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             new Object[][]{{"grp"}, {"2013-01-01"}, {"2013-12-31"}}
         );
         String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
-            List.of(r), 1, new SqlKind[]{SqlKind.MIN, SqlKind.MAX}
+            List.of(r), 1, new SqlKind[]{SqlKind.MIN, SqlKind.MAX}, null, null, 0, 0
         );
         assertEquals(
             "SELECT \"col_0\", MIN(\"col_1\"), MAX(\"col_2\") FROM __exchange_input__ GROUP BY \"col_0\"",
@@ -418,10 +418,25 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             new Object[][]{{1}, {100L}}
         );
         String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
-            List.of(r), 1, null
+            List.of(r), 1, null, null, null, 0, 0
         );
         assertEquals(
             "SELECT \"col_0\", SUM(\"col_1\") FROM __exchange_input__ GROUP BY \"col_0\"",
+            sql
+        );
+    }
+
+    public void testBuildTwoPhaseGroupByWithOrderByLimitOffset() {
+        WorkerQueryResponse r = new WorkerQueryResponse(
+            List.of("col_0", "col_1"), List.of("String", "Long"), 2,
+            new Object[][]{{"a", "b"}, {10L, 20L}}
+        );
+        String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
+            List.of(r), 1, new SqlKind[]{SqlKind.COUNT},
+            new int[]{1}, new boolean[]{false}, 10, 5
+        );
+        assertEquals(
+            "SELECT \"col_0\", SUM(\"col_1\") FROM __exchange_input__ GROUP BY \"col_0\" ORDER BY \"col_1\" DESC LIMIT 10 OFFSET 5",
             sql
         );
     }
@@ -435,12 +450,37 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
             new Object[][]{{"a"}, {5L}}
         );
         String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
-            List.of(empty, nonEmpty), 1, new SqlKind[]{SqlKind.COUNT}
+            List.of(empty, nonEmpty), 1, new SqlKind[]{SqlKind.COUNT}, null, null, 0, 0
         );
         assertEquals(
             "SELECT \"col_0\", SUM(\"col_1\") FROM __exchange_input__ GROUP BY \"col_0\"",
             sql
         );
+    }
+
+    // --- stripOrderByLimitOffset tests ---
+
+    public void testStripOrderByLimitOffset() {
+        assertEquals(
+            "SELECT a, COUNT(*) FROM t GROUP BY a",
+            DistributedScanExecutor.stripOrderByLimitOffset(
+                "SELECT a, COUNT(*) FROM t GROUP BY a ORDER BY COUNT(*) DESC LIMIT 10"
+            )
+        );
+    }
+
+    public void testStripOrderByLimitOffsetWithOffset() {
+        assertEquals(
+            "SELECT a, COUNT(*) FROM t GROUP BY a",
+            DistributedScanExecutor.stripOrderByLimitOffset(
+                "SELECT a, COUNT(*) FROM t GROUP BY a ORDER BY COUNT(*) DESC LIMIT 10 OFFSET 1000"
+            )
+        );
+    }
+
+    public void testStripOrderByLimitOffsetNoOrderBy() {
+        String sql = "SELECT a, COUNT(*) FROM t GROUP BY a";
+        assertEquals(sql, DistributedScanExecutor.stripOrderByLimitOffset(sql));
     }
 
     // --- Helper methods ---

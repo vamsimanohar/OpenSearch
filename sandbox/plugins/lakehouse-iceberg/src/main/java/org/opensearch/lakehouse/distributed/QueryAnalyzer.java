@@ -70,7 +70,12 @@ public final class QueryAnalyzer {
             SqlKind[] aggKinds = extractAggKinds(classifier.aggregate);
             if (!classifier.aggregate.getGroupSet().isEmpty()) {
                 int groupCount = classifier.aggregate.getGroupSet().cardinality();
-                return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, groupCount);
+                // Capture Sort info if present (for ORDER BY/LIMIT/OFFSET on coordinator)
+                int[] sortColumns = classifier.sort != null ? extractSortColumns(classifier.sort) : null;
+                boolean[] sortAsc = classifier.sort != null ? extractSortDirections(classifier.sort) : null;
+                int limit = classifier.sort != null ? extractLimit(classifier.sort) : 0;
+                int offset = classifier.sort != null ? extractOffset(classifier.sort) : 0;
+                return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, sortColumns, sortAsc, limit, null, 0, groupCount, offset);
             }
             return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0);
         }
@@ -178,6 +183,17 @@ public final class QueryAnalyzer {
     }
 
     /**
+     * Extracts the OFFSET value from the Sort node's offset expression.
+     * Returns 0 if offset is null or not a literal.
+     */
+    static int extractOffset(Sort sort) {
+        if (sort.offset instanceof RexLiteral) {
+            return ((RexLiteral) sort.offset).getValueAs(Integer.class);
+        }
+        return 0;
+    }
+
+    /**
      * Extracts sort column names from the Sort node's input row type.
      * These names are used to detect sort columns missing from the SELECT output
      * and to remap sort indices for TopKMerger.
@@ -205,17 +221,14 @@ public final class QueryAnalyzer {
         final String[] sortColumnNames;
         final int outputColumnCount;
         final int groupCount;
+        final int offset;
 
         AnalysisResult(MergeStrategy strategy) {
-            this(strategy, null, null, null, 0, null, 0, 0);
+            this(strategy, null, null, null, 0, null, 0, 0, 0);
         }
 
         AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit) {
-            this(strategy, aggKinds, sortColumns, sortAsc, limit, null, 0, 0);
-        }
-
-        AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int groupCount) {
-            this(strategy, aggKinds, null, null, 0, null, 0, groupCount);
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, null, 0, 0, 0);
         }
 
         AnalysisResult(
@@ -227,7 +240,7 @@ public final class QueryAnalyzer {
             String[] sortColumnNames,
             int outputColumnCount
         ) {
-            this(strategy, aggKinds, sortColumns, sortAsc, limit, sortColumnNames, outputColumnCount, 0);
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, sortColumnNames, outputColumnCount, 0, 0);
         }
 
         AnalysisResult(
@@ -238,7 +251,8 @@ public final class QueryAnalyzer {
             int limit,
             String[] sortColumnNames,
             int outputColumnCount,
-            int groupCount
+            int groupCount,
+            int offset
         ) {
             this.strategy = strategy;
             this.aggKinds = aggKinds;
@@ -248,6 +262,7 @@ public final class QueryAnalyzer {
             this.sortColumnNames = sortColumnNames;
             this.outputColumnCount = outputColumnCount;
             this.groupCount = groupCount;
+            this.offset = offset;
         }
     }
 }
