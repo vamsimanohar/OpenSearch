@@ -331,37 +331,37 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
     }
 
     public void testBuildTopKMergeCoordinatorSqlSortColumnsInOutput() {
-        // Sort column IS in the output → no wrapping needed
+        // Sort column index 1 is within outputColumnCount=2 → no wrapping needed
         String sql = DistributedScanExecutor.buildTopKMergeCoordinatorSql(
-            new String[]{"eventTime"}, new boolean[]{true}, 10, 2, List.of("col0", "eventTime")
+            new int[]{1}, new boolean[]{true}, 10, 2
         );
-        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"eventTime\" ASC LIMIT 10", sql);
+        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col_1\" ASC LIMIT 10", sql);
     }
 
     public void testBuildTopKMergeCoordinatorSqlMultiSortAllInOutput() {
-        // All sort columns in output → no wrapping
+        // All sort column indices (0,1) within outputColumnCount=3 → no wrapping
         String sql = DistributedScanExecutor.buildTopKMergeCoordinatorSql(
-            new String[]{"a", "b"}, new boolean[]{true, false}, 5, 3, List.of("a", "b", "c")
+            new int[]{0, 1}, new boolean[]{true, false}, 5, 3
         );
-        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"a\" ASC, \"b\" DESC LIMIT 5", sql);
+        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col_0\" ASC, \"col_1\" DESC LIMIT 5", sql);
     }
 
     public void testBuildTopKMergeCoordinatorSqlWithExtraColumns() {
-        // sortCol is not in originalOutputNames → needs stripping via subquery
+        // Sort column index 1 >= outputColumnCount=1 → needs stripping via subquery
         String sql = DistributedScanExecutor.buildTopKMergeCoordinatorSql(
-            new String[]{"sortCol"}, new boolean[]{true}, 10, 1, List.of("searchphrase")
+            new int[]{1}, new boolean[]{true}, 10, 1
         );
         assertEquals(
-            "SELECT \"searchphrase\" FROM (SELECT * FROM __exchange_input__ ORDER BY \"sortCol\" ASC LIMIT 10)",
+            "SELECT \"col_0\" FROM (SELECT * FROM __exchange_input__ ORDER BY \"col_1\" ASC LIMIT 10)",
             sql
         );
     }
 
     public void testBuildTopKMergeCoordinatorSqlNoLimitOmitsLimit() {
         String sql = DistributedScanExecutor.buildTopKMergeCoordinatorSql(
-            new String[]{"col"}, new boolean[]{true}, 0, 1, List.of("col")
+            new int[]{0}, new boolean[]{true}, 0, 1
         );
-        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col\" ASC", sql);
+        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col_0\" ASC", sql);
     }
 
     // --- Helper methods ---

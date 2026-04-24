@@ -182,8 +182,10 @@ public class DistributedScanExecutor {
         // For TOPK_MERGE, sort columns may not be in the SELECT output.
         // Detect missing sort columns and add them to worker SQL so they appear in Arrow IPC.
         // The coordinator SQL handles stripping them from the final output.
+        // Workers use generic col_N naming, so we track sort column indices for coordinator SQL.
         String workerSql = sqlQuery;
         int outputColumnCount = analysis.outputColumnCount;
+        int[] sortColumnIndices = analysis.sortColumns;
 
         if (analysis.strategy == MergeStrategy.TOPK_MERGE && analysis.sortColumnNames != null) {
             List<String> outputNames = relNode.getRowType().getFieldNames();
@@ -203,12 +205,20 @@ public class DistributedScanExecutor {
                     missingColumns
                 );
             }
+
+            // Remap sort indices to worker output positions (name-based lookup)
+            List<String> workerOutputNames = new ArrayList<>(outputNames);
+            workerOutputNames.addAll(missingColumns);
+            sortColumnIndices = new int[analysis.sortColumnNames.length];
+            for (int i = 0; i < analysis.sortColumnNames.length; i++) {
+                sortColumnIndices[i] = workerOutputNames.indexOf(analysis.sortColumnNames[i]);
+            }
         }
 
         // Capture effectively-final locals for lambda
         final String finalWorkerSql = workerSql;
         final int finalOutputColumnCount = outputColumnCount;
-        final List<String> originalOutputNames = List.copyOf(relNode.getRowType().getFieldNames());
+        final int[] finalSortColumnIndices = sortColumnIndices;
 
         // Partition files across workers
         List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());
@@ -218,7 +228,7 @@ public class DistributedScanExecutor {
             responses -> {
                 try {
                     String coordinatorSql = buildCoordinatorSql(
-                        analysis, responses, finalOutputColumnCount, originalOutputNames
+                        analysis, responses, finalOutputColumnCount, finalSortColumnIndices
                     );
                     mergeViaDataFusion(responses, coordinatorSql, analysis.strategy, listener);
                 } catch (Exception e) {
@@ -420,13 +430,13 @@ public class DistributedScanExecutor {
         QueryAnalyzer.AnalysisResult analysis,
         List<WorkerQueryResponse> responses,
         int outputColumnCount,
-        List<String> originalOutputNames
+        int[] sortColumnIndices
     ) {
         return switch (analysis.strategy) {
             case CONCAT -> CONCAT_COORDINATOR_SQL;
             case GLOBAL_MERGE -> buildGlobalMergeCoordinatorSql(responses, analysis.aggKinds);
             case TOPK_MERGE -> buildTopKMergeCoordinatorSql(
-                analysis.sortColumnNames, analysis.sortAsc, analysis.limit, outputColumnCount, originalOutputNames
+                sortColumnIndices, analysis.sortAsc, analysis.limit, outputColumnCount
             );
             case SINGLE_NODE -> throw new IllegalStateException("SINGLE_NODE should not reach coordinator SQL");
         };
@@ -465,54 +475,52 @@ public class DistributedScanExecutor {
     /**
      * Builds coordinator SQL for TOPK_MERGE: merge-sorts pre-sorted worker results and limits.
      * <p>
-     * Workers each return their local top-K rows. The coordinator merge-sorts all results
-     * and takes the global top-K. When extra sort columns were added to the worker SQL
-     * (not in the original SELECT), the coordinator uses a subquery to ORDER BY those
-     * columns but only returns the original output columns.
+     * Workers each return their local top-K rows with generic {@code col_N} naming.
+     * The coordinator merge-sorts all results and takes the global top-K.
+     * When extra sort columns were appended to the worker SQL (not in the original SELECT),
+     * a subquery strips them by projecting only the first {@code outputColumnCount} columns.
      * <p>
      * Example without extra columns:
-     * {@code SELECT * FROM __exchange_input__ ORDER BY "eventTime" ASC LIMIT 10}
+     * {@code SELECT * FROM __exchange_input__ ORDER BY "col_2" ASC LIMIT 10}
      * <p>
-     * Example with extra sort columns stripped via column-name projection:
-     * {@code SELECT "col0", "col1" FROM (SELECT * FROM __exchange_input__ ORDER BY "sortCol" ASC LIMIT 10)}
+     * Example with extra sort columns stripped:
+     * {@code SELECT "col_0", "col_1" FROM (SELECT * FROM __exchange_input__ ORDER BY "col_3" ASC LIMIT 10)}
+     *
+     * @param sortColumnIndices position-based indices into the worker output (col_N)
+     * @param sortAsc           sort direction per sort column (true=ASC)
+     * @param limit             LIMIT value (0 = no limit)
+     * @param outputColumnCount number of original output columns (before sort column appending)
      */
     static String buildTopKMergeCoordinatorSql(
-        String[] sortColumnNames,
+        int[] sortColumnIndices,
         boolean[] sortAsc,
         int limit,
-        int outputColumnCount,
-        List<String> originalOutputNames
+        int outputColumnCount
     ) {
         StringBuilder orderBy = new StringBuilder(" ORDER BY ");
-        for (int i = 0; i < sortColumnNames.length; i++) {
+        for (int i = 0; i < sortColumnIndices.length; i++) {
             if (i > 0) orderBy.append(", ");
-            orderBy.append("\"").append(sortColumnNames[i]).append("\"");
+            orderBy.append("\"col_").append(sortColumnIndices[i]).append("\"");
             orderBy.append(sortAsc[i] ? " ASC" : " DESC");
         }
         if (limit > 0) {
             orderBy.append(" LIMIT ").append(limit);
         }
 
-        boolean needsStripping = originalOutputNames != null && outputColumnCount > 0
-            && outputColumnCount < originalOutputNames.size() + sortColumnNames.length;
-
-        // Check if any sort column is NOT already in the original output
-        if (originalOutputNames != null) {
-            boolean hasMissingSortCol = false;
-            for (String sortCol : sortColumnNames) {
-                if (!originalOutputNames.contains(sortCol)) {
-                    hasMissingSortCol = true;
-                    break;
-                }
+        // Check if any sort column index falls outside the original output range
+        boolean needsStripping = false;
+        for (int idx : sortColumnIndices) {
+            if (idx >= outputColumnCount) {
+                needsStripping = true;
+                break;
             }
-            needsStripping = hasMissingSortCol;
         }
 
-        if (needsStripping && originalOutputNames != null) {
+        if (needsStripping && outputColumnCount > 0) {
             StringBuilder sb = new StringBuilder("SELECT ");
-            for (int i = 0; i < originalOutputNames.size(); i++) {
+            for (int i = 0; i < outputColumnCount; i++) {
                 if (i > 0) sb.append(", ");
-                sb.append("\"").append(originalOutputNames.get(i)).append("\"");
+                sb.append("\"col_").append(i).append("\"");
             }
             sb.append(" FROM (SELECT * FROM __exchange_input__").append(orderBy).append(")");
             return sb.toString();
