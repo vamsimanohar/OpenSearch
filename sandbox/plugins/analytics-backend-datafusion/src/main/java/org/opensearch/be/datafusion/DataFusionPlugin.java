@@ -98,9 +98,10 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
     /**
      * Returns the shared DataFusionService, lazy-initializing if needed.
-     * Used by {@link DatafusionWarehouseQueryEngine} to access the native runtime.
+     * Used by {@link DatafusionWarehouseQueryEngine} and cross-plugin code
+     * (e.g., lakehouse CONCAT merge) to access the native runtime.
      */
-    static DataFusionService ensureSharedService() {
+    public static DataFusionService ensureSharedService() {
         DataFusionService svc = sharedDataFusionService;
         if (svc != null) {
             return svc;

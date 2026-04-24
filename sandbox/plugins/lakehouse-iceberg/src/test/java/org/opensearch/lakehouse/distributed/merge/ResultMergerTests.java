@@ -17,42 +17,17 @@ import java.util.List;
 
 public class ResultMergerTests extends OpenSearchTestCase {
 
-    // --- CONCAT tests ---
+    // --- CONCAT tests (now throws because CONCAT is handled by DataFusion merge) ---
 
-    public void testConcatMultipleResponses() {
+    public void testConcatThrowsIllegalState() {
         WorkerQueryResponse r1 = makeResponse(List.of("col"), List.of("Integer"), new Object[][]{{1, 2}}, 2);
         WorkerQueryResponse r2 = makeResponse(List.of("col"), List.of("Integer"), new Object[][]{{3, 4}}, 2);
 
-        WorkerQueryResponse merged = ResultMerger.merge(List.of(r1, r2), MergeStrategy.CONCAT, null, null, 0);
-
-        assertEquals(4, merged.getRowCount());
-        assertEquals(1, merged.getColumnData()[0][0]);
-        assertEquals(2, merged.getColumnData()[0][1]);
-        assertEquals(3, merged.getColumnData()[0][2]);
-        assertEquals(4, merged.getColumnData()[0][3]);
-    }
-
-    public void testConcatSingleResponse() {
-        WorkerQueryResponse r1 = makeResponse(List.of("a"), List.of("String"), new Object[][]{{"x", "y"}}, 2);
-
-        WorkerQueryResponse merged = ResultMerger.merge(List.of(r1), MergeStrategy.CONCAT, null, null, 0);
-
-        assertEquals(2, merged.getRowCount());
-        assertEquals("x", merged.getColumnData()[0][0]);
-        assertEquals("y", merged.getColumnData()[0][1]);
-    }
-
-    public void testConcatMultipleColumns() {
-        WorkerQueryResponse r1 = makeResponse(List.of("a", "b"), List.of("Integer", "String"), new Object[][]{{1}, {"x"}}, 1);
-        WorkerQueryResponse r2 = makeResponse(List.of("a", "b"), List.of("Integer", "String"), new Object[][]{{2}, {"y"}}, 1);
-
-        WorkerQueryResponse merged = ResultMerger.merge(List.of(r1, r2), MergeStrategy.CONCAT, null, null, 0);
-
-        assertEquals(2, merged.getRowCount());
-        assertEquals(1, merged.getColumnData()[0][0]);
-        assertEquals(2, merged.getColumnData()[0][1]);
-        assertEquals("x", merged.getColumnData()[1][0]);
-        assertEquals("y", merged.getColumnData()[1][1]);
+        IllegalStateException ex = expectThrows(
+            IllegalStateException.class,
+            () -> ResultMerger.merge(List.of(r1, r2), MergeStrategy.CONCAT, null, null, 0)
+        );
+        assertTrue(ex.getMessage().contains("DataFusion"));
     }
 
     // --- GLOBAL_MERGE tests ---
@@ -386,30 +361,33 @@ public class ResultMergerTests extends OpenSearchTestCase {
     // --- Empty response tests ---
 
     public void testEmptyResponsesReturnEmpty() {
+        // All empty responses → filterNonEmpty yields empty list → emptyResponse path (no strategy dispatch)
         WorkerQueryResponse empty1 = makeResponse(List.of("col"), List.of("Integer"), new Object[0][], 0);
         WorkerQueryResponse empty2 = makeResponse(List.of("col"), List.of("Integer"), new Object[0][], 0);
 
-        WorkerQueryResponse merged = ResultMerger.merge(List.of(empty1, empty2), MergeStrategy.CONCAT, null, null, 0);
+        // Use GLOBAL_MERGE to verify empty-response path (CONCAT now throws for non-empty)
+        WorkerQueryResponse merged = ResultMerger.merge(List.of(empty1, empty2), MergeStrategy.GLOBAL_MERGE, null, null, 0);
 
         assertEquals(0, merged.getRowCount());
         assertEquals(List.of("col"), merged.getColumnNames());
     }
 
     public void testEmptyResponseListReturnsEmpty() {
-        WorkerQueryResponse merged = ResultMerger.merge(List.of(), MergeStrategy.CONCAT, null, null, 0);
+        // Use GLOBAL_MERGE — strategy doesn't matter when all responses are empty
+        WorkerQueryResponse merged = ResultMerger.merge(List.of(), MergeStrategy.GLOBAL_MERGE, null, null, 0);
         // Empty list with no metadata → empty column names too
         assertTrue(merged.getColumnNames().isEmpty());
         assertEquals(0, merged.getRowCount());
     }
 
-    public void testMixedEmptyAndNonEmptyResponses() {
-        WorkerQueryResponse empty = makeResponse(List.of("val"), List.of("Integer"), new Object[0][], 0);
-        WorkerQueryResponse nonEmpty = makeResponse(List.of("val"), List.of("Integer"), new Object[][]{{42}}, 1);
+    public void testMixedEmptyAndNonEmptyGlobalMerge() {
+        WorkerQueryResponse empty = makeResponse(List.of("val"), List.of("Long"), new Object[0][], 0);
+        WorkerQueryResponse nonEmpty = makeResponse(List.of("val"), List.of("Long"), new Object[][]{{42L}}, 1);
 
-        WorkerQueryResponse merged = ResultMerger.merge(List.of(empty, nonEmpty), MergeStrategy.CONCAT, null, null, 0);
+        WorkerQueryResponse merged = ResultMerger.merge(List.of(empty, nonEmpty), MergeStrategy.GLOBAL_MERGE, null, null, 0);
 
         assertEquals(1, merged.getRowCount());
-        assertEquals(42, merged.getColumnData()[0][0]);
+        assertEquals(42L, merged.getColumnData()[0][0]);
     }
 
     // --- Comparator tests ---

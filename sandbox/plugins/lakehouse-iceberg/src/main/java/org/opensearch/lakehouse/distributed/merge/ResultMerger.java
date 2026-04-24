@@ -21,7 +21,8 @@ import java.util.List;
  * <p>
  * This is a thin dispatcher that routes to the appropriate merge implementation:
  * <ul>
- *   <li><b>CONCAT</b> — concatenate all rows ({@link #mergeConcat})</li>
+ *   <li><b>CONCAT</b> — handled externally via DataFusion native merge (Arrow IPC pipeline);
+ *       calling {@code merge()} with CONCAT throws {@link IllegalStateException}</li>
  *   <li><b>GLOBAL_MERGE</b> — re-aggregate via {@link AggregationReducer}</li>
  *   <li><b>TOPK_MERGE</b> — merge-sort via {@link TopKMerger}</li>
  *   <li><b>SINGLE_NODE</b> — pass through the single worker's response</li>
@@ -78,38 +79,11 @@ public final class ResultMerger {
         }
 
         return switch (strategy) {
-            case CONCAT -> mergeConcat(nonEmpty);
+            case CONCAT -> throw new IllegalStateException("CONCAT merge is handled by DataFusion native pipeline");
             case GLOBAL_MERGE -> mergeGlobal(nonEmpty, aggKinds);
             case TOPK_MERGE -> TopKMerger.merge(nonEmpty, sortColumns, sortAsc, limit);
             case SINGLE_NODE -> nonEmpty.get(0);
         };
-    }
-
-    /**
-     * Concatenates all rows from all worker responses.
-     */
-    static WorkerQueryResponse mergeConcat(List<WorkerQueryResponse> responses) {
-        WorkerQueryResponse first = responses.get(0);
-        List<String> columnNames = first.getColumnNames();
-        List<String> columnTypes = first.getColumnTypes();
-        int numCols = columnNames.size();
-
-        int totalRows = 0;
-        for (WorkerQueryResponse r : responses) {
-            totalRows += r.getRowCount();
-        }
-
-        Object[][] merged = new Object[numCols][totalRows];
-        int offset = 0;
-        for (WorkerQueryResponse r : responses) {
-            Object[][] data = r.getColumnData();
-            for (int col = 0; col < numCols; col++) {
-                System.arraycopy(data[col], 0, merged[col], offset, r.getRowCount());
-            }
-            offset += r.getRowCount();
-        }
-
-        return new WorkerQueryResponse(columnNames, columnTypes, totalRows, merged);
     }
 
     /**

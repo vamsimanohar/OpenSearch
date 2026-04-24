@@ -43,6 +43,14 @@ dependencies {
     compileOnly project(':sandbox:plugins:analytics-engine')
     compileOnly project(':sandbox:libs:analytics-framework')
 
+    // DataFusion backend — needed for NativeBridge, DataFusionService, DatafusionResultStream (CONCAT merge path)
+    compileOnly project(':sandbox:plugins:analytics-backend-datafusion')
+
+    // Arrow core — needed for WorkerResponseToArrow (column-major → Arrow VectorSchemaRoot conversion)
+    compileOnly "org.apache.arrow:arrow-memory-core:18.3.0"
+    compileOnly "org.apache.arrow:arrow-vector:18.3.0"
+    compileOnly "org.apache.arrow:arrow-c-data:18.3.0"
+
     // SQL Unified Query API (compile-only, provided at runtime via analytics-engine)
     compileOnly("org.opensearch.query:unified-query-api:3.6.0.0-SNAPSHOT") {
         exclude group: 'org.opensearch'
@@ -107,6 +115,11 @@ dependencies {
     runtimeOnly "software.amazon.awssdk:http-auth-aws:${versions.aws}"
     runtimeOnly "software.amazon.awssdk:crt-core:${versions.aws}"
 
+    // Arrow for unit tests (compileOnly doesn't carry to test classpath)
+    testImplementation "org.apache.arrow:arrow-memory-core:18.3.0"
+    testImplementation "org.apache.arrow:arrow-memory-unsafe:18.3.0"
+    testImplementation "org.apache.arrow:arrow-vector:18.3.0"
+
     // Integration test dependencies
     internalClusterTestImplementation project(':server')
     internalClusterTestImplementation project(':test:framework')
@@ -138,7 +151,9 @@ jacocoTestCoverageVerification {
                 // LakehouseQueryTransportAction requires Guice-injected EngineContext
                 'org.opensearch.lakehouse.action.LakehouseQueryTransportAction',
                 // WorkerQueryTransportAction.doExecute requires Guice-injected TransportService and doPrivileged
-                'org.opensearch.lakehouse.distributed.WorkerQueryTransportAction',
+                'org.opensearch.lakehouse.distributed.worker.WorkerQueryTransportAction',
+                // DistributedScanExecutor: native DataFusion merge path requires native library; tested via integration tests
+                'org.opensearch.lakehouse.distributed.DistributedScanExecutor',
                 // Anonymous TransportResponseHandler classes in DistributedScanExecutor — tested via transport mocks
                 'org.opensearch.lakehouse.distributed.DistributedScanExecutor.*'
             ]
@@ -152,13 +167,20 @@ jacocoTestCoverageVerification {
 check.dependsOn jacocoTestCoverageVerification
 
 // DataFusion and dataformat-native target JVM 25. Override JVM version attribute
-// so Gradle resolves them correctly (we run on JVM 25 at test time).
-['internalClusterTestCompileClasspath', 'internalClusterTestRuntimeClasspath'].each { configName ->
+// so Gradle resolves them correctly (we build and test on JVM 25).
+['compileClasspath', 'testCompileClasspath', 'testRuntimeClasspath',
+ 'internalClusterTestCompileClasspath', 'internalClusterTestRuntimeClasspath'].each { configName ->
     configurations.named(configName).configure {
         attributes {
             attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, Integer.valueOf(25))
         }
     }
+}
+
+// Arrow requires these JVM flags for unit tests (WorkerResponseToArrowTests)
+test {
+    jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
+    jvmArgs '-Darrow.memory.debug.allocator=false'
 }
 
 // Arrow/Flight requires these JVM flags for integration tests
