@@ -236,6 +236,54 @@ pub unsafe extern "C" fn df_execute_iceberg_query(
         .map_err(|e| e.to_string())
 }
 
+/// Executes a SQL query against an in-memory table built from Arrow IPC stream bytes.
+///
+/// `ipc_bytes` is a contiguous buffer containing a complete Arrow IPC stream (one or
+/// more record batches). An empty stream (schema only, no batches) is not an error.
+///
+/// The table is registered under `__exchange_input__` (see
+/// `api::EXCHANGE_INPUT_TABLE`) in a fresh `SessionContext` that shares the runtime's
+/// memory pool. The returned stream pointer has the same lifecycle as the one from
+/// [`df_execute_iceberg_query`] — close it via [`df_stream_close`].
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_execute_from_ipc(
+    ipc_bytes: *const u8,
+    ipc_len: i64,
+    sql_ptr: *const u8,
+    sql_len: i64,
+    runtime_ptr: i64,
+) -> i64 {
+    let mgr = get_rt_manager()?;
+
+    if ipc_bytes.is_null() {
+        return Err("df_execute_from_ipc: null ipc_bytes pointer".to_string());
+    }
+    if ipc_len < 0 {
+        return Err(format!("df_execute_from_ipc: negative ipc_len: {}", ipc_len));
+    }
+    if runtime_ptr == 0 {
+        return Err("df_execute_from_ipc: null runtime_ptr".to_string());
+    }
+
+    let sql = str_from_raw(sql_ptr, sql_len)
+        .map_err(|e| format!("df_execute_from_ipc: sql: {}", e))?;
+
+    // Copy the IPC buffer into an owned Vec so the async task has a 'static lifetime.
+    let ipc_vec = slice::from_raw_parts(ipc_bytes, ipc_len as usize).to_vec();
+
+    let runtime = &*(runtime_ptr as *const api::DataFusionRuntime);
+
+    mgr.io_runtime
+        .block_on(api::execute_from_ipc(
+            ipc_vec,
+            sql,
+            runtime,
+            mgr.cpu_executor(),
+        ))
+        .map_err(|e| e.to_string())
+}
+
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn df_sql_to_substrait(

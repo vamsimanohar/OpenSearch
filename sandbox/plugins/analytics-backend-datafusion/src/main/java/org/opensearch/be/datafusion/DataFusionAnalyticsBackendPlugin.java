@@ -13,11 +13,13 @@ import org.opensearch.analytics.spi.AggregateFunction;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.spi.BackendCapabilityProvider;
 import org.opensearch.analytics.spi.EngineCapability;
+import org.opensearch.analytics.spi.ExchangeSinkProvider;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.FilterCapability;
 import org.opensearch.analytics.spi.FilterOperator;
 import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.analytics.spi.SearchExecEngineProvider;
+import org.opensearch.be.datafusion.exchange.DataFusionExchangeSinkProvider;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 
 import java.util.HashSet;
@@ -116,6 +118,16 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 return Set.copyOf(caps);
             }
         };
+    }
+
+    @Override
+    public ExchangeSinkProvider getExchangeSinkProvider() {
+        DataFusionService dataFusionService = plugin.getDataFusionService();
+        if (dataFusionService == null) {
+            // createComponents() may not have been called yet; fall back to the lazy SPI path.
+            dataFusionService = DataFusionPlugin.ensureSharedService();
+        }
+        return new DataFusionExchangeSinkProvider(dataFusionService);
     }
 
     @Override

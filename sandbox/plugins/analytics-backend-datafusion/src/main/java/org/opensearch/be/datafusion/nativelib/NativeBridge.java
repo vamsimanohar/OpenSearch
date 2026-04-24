@@ -51,6 +51,7 @@ public final class NativeBridge {
     private static final MethodHandle STREAM_NEXT;
     private static final MethodHandle STREAM_CLOSE;
     private static final MethodHandle EXECUTE_ICEBERG_QUERY;
+    private static final MethodHandle EXECUTE_FROM_IPC;
     private static final MethodHandle SQL_TO_SUBSTRAIT;
 
     static {
@@ -141,6 +142,17 @@ public final class NativeBridge {
                 ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,  // files
                 ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // table_name
                 ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // sql_query
+                ValueLayout.JAVA_LONG                          // runtime_ptr
+            )
+        );
+
+        // i64 df_execute_from_ipc(ipc_bytes, ipc_len, sql_ptr, sql_len, runtime_ptr) -> i64
+        EXECUTE_FROM_IPC = linker.downcallHandle(
+            lib.find("df_execute_from_ipc").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // ipc_bytes
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // sql
                 ValueLayout.JAVA_LONG                          // runtime_ptr
             )
         );
@@ -351,6 +363,41 @@ public final class NativeBridge {
                 paths.ptrs(), paths.lens(), sizes, paths.count(),
                 table.segment(), table.len(),
                 sql.segment(), sql.len(),
+                runtimePtr
+            );
+            listener.onResponse(result);
+        } catch (Throwable t) {
+            listener.onFailure(t instanceof Exception ? (Exception) t : new RuntimeException(t));
+        }
+    }
+
+    // ---- Execute SQL over accumulated Arrow IPC bytes (exchange-sink path) ----
+
+    /**
+     * Executes a SQL query over a serialized Arrow IPC stream via DataFusion.
+     * The IPC bytes contain a full stream-format encoding (schema + record batches + EOS)
+     * of the input. Rust reads the IPC, registers it as an in-memory table that {@code sql}
+     * references, runs the SQL, and returns a stream pointer via the listener on success.
+     *
+     * @param ipc         full Arrow IPC stream-format bytes; must not be {@code null}
+     * @param sql         coordinator SQL to evaluate over the IPC input
+     * @param runtimePtr  native DataFusion runtime pointer
+     * @param listener    receives the resulting stream pointer or any failure
+     */
+    public static void executeFromIpcAsync(byte[] ipc, String sql, long runtimePtr, ActionListener<Long> listener) {
+        try {
+            NativeHandle.validatePointer(runtimePtr, "runtime");
+        } catch (Exception e) {
+            listener.onFailure(e);
+            return;
+        }
+        try (var call = new NativeCall()) {
+            var ipcBuf = call.bytes(ipc);
+            var sqlStr = call.str(sql != null ? sql : "");
+            long result = call.invoke(
+                EXECUTE_FROM_IPC,
+                ipcBuf, (long) ipc.length,
+                sqlStr.segment(), sqlStr.len(),
                 runtimePtr
             );
             listener.onResponse(result);

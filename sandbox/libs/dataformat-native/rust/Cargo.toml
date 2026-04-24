@@ -61,8 +61,6 @@ crc32fast = "1.4"
 parking_lot = "0.12.5"
 lazy_static = "1.4.0"
 thiserror = "1.0"
-async-trait = "0.1"
-bytes = "1"
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 # Internal

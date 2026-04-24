@@ -301,6 +301,11 @@ pub unsafe fn close_reader(ptr: i64) {
 /// This is an async function — the bridge layer decides how to run it
 /// (`block_on` for synchronous JNI, `spawn` for async delivery).
 ///
+/// `context_id` enables per-query memory tracking: when non-zero, a
+/// [`crate::query_memory_pool_tracker::QueryTrackingContext`] is created and its
+/// [`crate::query_memory_pool_tracker::QueryMemoryPool`] is installed on the per-query
+/// `RuntimeEnv`. A value of 0 disables tracking.
+///
 /// # Safety
 /// `shard_view_ptr` and `runtime_ptr` must be valid, non-zero pointers.
 pub async unsafe fn execute_query(
@@ -309,6 +314,7 @@ pub async unsafe fn execute_query(
     plan_bytes: &[u8],
     runtime_ptr: i64,
     manager: &RuntimeManager,
+    context_id: i64,
 ) -> Result<i64, DataFusionError> {
     let shard_view = &*(shard_view_ptr as *const ShardView);
     let runtime = &*(runtime_ptr as *const DataFusionRuntime);
@@ -317,6 +323,21 @@ pub async unsafe fn execute_query(
     let object_metas = shard_view.object_metas.clone();
     let cpu_executor = manager.cpu_executor();
 
+    // Wire up per-query tracking if the caller supplied a non-zero context_id.
+    let tracking_ctx = crate::query_memory_pool_tracker::QueryTrackingContext::new(
+        context_id,
+        runtime.runtime_env.memory_pool.clone(),
+    );
+    let query_memory_pool = tracking_ctx
+        .memory_pool()
+        .map(|p| p as Arc<dyn datafusion::execution::memory_pool::MemoryPool>);
+    // Keep the tracking context alive for the duration of the query planning.
+    // Once the returned stream is dropped, `tracking_ctx` drops with it (it is
+    // captured by the closures in `query_executor::execute_query` via the pool
+    // cloned into the `RuntimeEnv`). We explicitly drop it here to mark
+    // completion immediately — the registry retains a snapshot for JNI readers.
+    let _ = &tracking_ctx;
+
     let result = crate::query_executor::execute_query(
         table_path,
         object_metas,
@@ -324,9 +345,12 @@ pub async unsafe fn execute_query(
         plan_bytes.to_vec(),
         runtime,
         cpu_executor,
+        query_memory_pool,
     )
     .await?;
 
+    // Dropping the context marks it completed; metrics remain in the registry.
+    drop(tracking_ctx);
     Ok(result)
 }
 
@@ -627,6 +651,108 @@ pub unsafe fn stream_close(stream_ptr: i64) {
     }
 }
 
+/// Logical table name under which IPC-backed batches are registered for
+/// [`execute_from_ipc`]. The caller's SQL must reference this name.
+pub const EXCHANGE_INPUT_TABLE: &str = "__exchange_input__";
+
+/// Executes a SQL query against an in-memory table built from Arrow IPC stream bytes.
+///
+/// `ipc_bytes` must be a valid Arrow IPC stream (one or more record batches prefixed by a
+/// schema header) — exactly what `arrow_ipc::writer::StreamWriter` produces. An empty
+/// stream (schema only, no batches) is not an error: the table is registered with the
+/// schema and zero partitions of data.
+///
+/// The in-memory table is registered under [`EXCHANGE_INPUT_TABLE`] in a fresh
+/// `SessionContext` bound to the supplied `runtime` (sharing its memory pool and caches).
+/// The stream is returned in the same boxed [`MemoryTrackingStream`] form as
+/// [`execute_iceberg_query`], so the caller closes it via `stream_close`.
+pub async fn execute_from_ipc(
+    ipc_bytes: Vec<u8>,
+    sql: &str,
+    runtime: &DataFusionRuntime,
+    cpu_executor: crate::executor::DedicatedExecutor,
+) -> Result<i64, DataFusionError> {
+    use datafusion::arrow::ipc::reader::StreamReader;
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::catalog::MemTable;
+    use datafusion::execution::cache::cache_manager::CacheManagerConfig;
+    use datafusion::prelude::SessionContext;
+
+    // Decode the IPC stream into batches. The reader validates the header and
+    // yields the schema before any batches; an empty stream is legal and just
+    // produces zero batches.
+    let mut reader = StreamReader::try_new(std::io::Cursor::new(ipc_bytes), None)
+        .map_err(|e| DataFusionError::Execution(format!("Invalid Arrow IPC stream: {}", e)))?;
+    let schema = reader.schema();
+    let mut batches: Vec<RecordBatch> = Vec::new();
+    for batch_result in reader.by_ref() {
+        let batch = batch_result.map_err(|e| {
+            DataFusionError::Execution(format!("Failed to read IPC batch: {}", e))
+        })?;
+        batches.push(batch);
+    }
+
+    info!(
+        "execute_from_ipc: schema fields={}, batches={}, sql={}",
+        schema.fields().len(),
+        batches.len(),
+        sql
+    );
+
+    // Share the global memory pool / caches, same pattern as execute_iceberg_query.
+    let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
+        .with_cache_manager(
+            CacheManagerConfig::default()
+                .with_file_metadata_cache(Some(
+                    runtime.runtime_env.cache_manager.get_file_metadata_cache(),
+                ))
+                .with_files_statistics_cache(
+                    runtime.runtime_env.cache_manager.get_file_statistic_cache(),
+                ),
+        )
+        .build()
+        .map_err(|e| {
+            error!("Failed to build runtime env: {}", e);
+            e
+        })?;
+
+    let mut config = SessionConfig::new();
+    // A single partition is sufficient for coordinator-side merges over already
+    // materialized IPC batches; increasing partitions here just adds empty splits.
+    config.options_mut().execution.target_partitions = 1;
+    config.options_mut().execution.batch_size = 8192;
+
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(Arc::from(runtime_env))
+        .with_default_features()
+        .build();
+    let ctx = SessionContext::new_with_state(state);
+
+    // MemTable::try_new requires at least one partition; use a single partition
+    // containing all batches (or no batches for schema-only input).
+    let mem_table = MemTable::try_new(schema.clone(), vec![batches]).map_err(|e| {
+        DataFusionError::Execution(format!("Failed to build MemTable from IPC batches: {}", e))
+    })?;
+    ctx.register_table(EXCHANGE_INPUT_TABLE, Arc::new(mem_table))?;
+
+    // Plan + stream, exactly like execute_iceberg_query.
+    let dataframe = ctx.sql(sql).await?;
+    let stream = dataframe.execute_stream().await?;
+
+    let memory_pool = runtime.runtime_env.memory_pool.clone();
+    let pool_reserved = memory_pool.reserved();
+
+    let cross_rt_stream = CrossRtStream::new_with_df_error_stream(stream, cpu_executor);
+    let wrapped = MemoryTrackingStream {
+        inner: RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream),
+        memory_pool,
+        peak_memory: std::sync::atomic::AtomicUsize::new(pool_reserved),
+    };
+
+    Ok(Box::into_raw(Box::new(wrapped)) as i64)
+}
+
 /// Converts SQL to Substrait plan bytes (test only).
 ///
 /// # Safety
@@ -696,4 +822,237 @@ pub unsafe fn sql_to_substrait(
             .map_err(|e| DataFusionError::Execution(format!("Substrait encode failed: {}", e)))?;
         Ok(buf)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{Int64Array, RecordBatch};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::ipc::writer::StreamWriter;
+
+    use crate::executor::DedicatedExecutor;
+
+    // ---------------------------------------------------------------------
+    // Fixtures
+    // ---------------------------------------------------------------------
+
+    fn test_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![Field::new("val", DataType::Int64, false)]))
+    }
+
+    fn batch(values: &[i64]) -> RecordBatch {
+        RecordBatch::try_new(
+            test_schema(),
+            vec![Arc::new(Int64Array::from(values.to_vec()))],
+        )
+        .unwrap()
+    }
+
+    /// Serialize batches into an Arrow IPC stream byte buffer.
+    fn batches_to_ipc(schema: &Arc<Schema>, batches: &[RecordBatch]) -> Vec<u8> {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, schema.as_ref()).unwrap();
+            for b in batches {
+                writer.write(b).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    /// Small self-contained runtime for tests — isolated from the global
+    /// `TOKIO_RUNTIME_MANAGER` held by `ffm.rs` (so tests can run in parallel).
+    struct TestHarness {
+        runtime_ptr: i64,
+        tokio_rt: tokio::runtime::Runtime,
+        cpu_executor: DedicatedExecutor,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let mut cpu_builder = tokio::runtime::Builder::new_multi_thread();
+            cpu_builder.worker_threads(1).enable_all();
+            let cpu_executor = DedicatedExecutor::new("test-ipc-cpu", cpu_builder);
+
+            // Small pool is plenty for these tests. 64 MiB.
+            let runtime_ptr =
+                create_global_runtime(64 * 1024 * 1024, "/tmp", 64 * 1024 * 1024).unwrap();
+
+            Self { runtime_ptr, tokio_rt, cpu_executor }
+        }
+
+        fn runtime(&self) -> &DataFusionRuntime {
+            unsafe { &*(self.runtime_ptr as *const DataFusionRuntime) }
+        }
+
+        /// Drain a `MemoryTrackingStream` pointer and return the total row count.
+        fn drain_rows(&self, stream_ptr: i64) -> usize {
+            assert!(stream_ptr > 0, "expected positive stream pointer, got {}", stream_ptr);
+            let tracking = unsafe { &mut *(stream_ptr as *mut MemoryTrackingStream) };
+            let mut rows = 0;
+            self.tokio_rt.block_on(async {
+                while let Some(batch) = tracking.inner.try_next().await.unwrap() {
+                    rows += batch.num_rows();
+                }
+            });
+            unsafe { stream_close(stream_ptr) };
+            rows
+        }
+    }
+
+    impl Drop for TestHarness {
+        fn drop(&mut self) {
+            self.cpu_executor.shutdown();
+            unsafe { close_global_runtime(self.runtime_ptr) };
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Tests
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_execute_from_ipc_select_all() {
+        let harness = TestHarness::new();
+        let schema = test_schema();
+        let batches = vec![batch(&[1, 2, 3]), batch(&[4, 5])];
+        let ipc = batches_to_ipc(&schema, &batches);
+
+        let ptr = harness
+            .tokio_rt
+            .block_on(execute_from_ipc(
+                ipc,
+                "SELECT * FROM __exchange_input__",
+                harness.runtime(),
+                harness.cpu_executor.clone(),
+            ))
+            .unwrap();
+
+        let rows = harness.drain_rows(ptr);
+        assert_eq!(rows, 5);
+    }
+
+    #[test]
+    fn test_execute_from_ipc_empty_stream_returns_zero_rows() {
+        let harness = TestHarness::new();
+        let schema = test_schema();
+        // Writer must be finished even without any batches so the IPC stream is valid.
+        let ipc = batches_to_ipc(&schema, &[]);
+
+        // Sanity check: the IPC bytes decode to zero batches but a valid schema.
+        {
+            let reader =
+                datafusion::arrow::ipc::reader::StreamReader::try_new(
+                    std::io::Cursor::new(&ipc),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(reader.schema().fields().len(), 1);
+        }
+
+        let ptr = harness
+            .tokio_rt
+            .block_on(execute_from_ipc(
+                ipc,
+                "SELECT * FROM __exchange_input__",
+                harness.runtime(),
+                harness.cpu_executor.clone(),
+            ))
+            .unwrap();
+
+        let rows = harness.drain_rows(ptr);
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn test_execute_from_ipc_count_star_aggregation() {
+        let harness = TestHarness::new();
+        let schema = test_schema();
+        let batches = vec![batch(&[10, 20, 30]), batch(&[40, 50, 60, 70])];
+        let ipc = batches_to_ipc(&schema, &batches);
+
+        let ptr = harness
+            .tokio_rt
+            .block_on(execute_from_ipc(
+                ipc,
+                "SELECT COUNT(*) AS c FROM __exchange_input__",
+                harness.runtime(),
+                harness.cpu_executor.clone(),
+            ))
+            .unwrap();
+
+        // Aggregation returns a single row containing the count.
+        assert!(ptr > 0);
+        let tracking = unsafe { &mut *(ptr as *mut MemoryTrackingStream) };
+        let count_batch = harness
+            .tokio_rt
+            .block_on(async { tracking.inner.try_next().await.unwrap() })
+            .unwrap();
+        assert_eq!(count_batch.num_rows(), 1);
+        let col = count_batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(col.value(0), 7);
+        // Drain any trailer and close.
+        harness
+            .tokio_rt
+            .block_on(async { while tracking.inner.try_next().await.unwrap().is_some() {} });
+        unsafe { stream_close(ptr) };
+    }
+
+    #[test]
+    fn test_execute_from_ipc_invalid_bytes_returns_error() {
+        let harness = TestHarness::new();
+        // Random garbage with no IPC header.
+        let bad_ipc: Vec<u8> = vec![0u8, 1, 2, 3, 4, 5, 6, 7];
+
+        let err = harness
+            .tokio_rt
+            .block_on(execute_from_ipc(
+                bad_ipc,
+                "SELECT * FROM __exchange_input__",
+                harness.runtime(),
+                harness.cpu_executor.clone(),
+            ))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid Arrow IPC stream")
+                || err.to_string().contains("IPC"),
+            "unexpected error message: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_execute_from_ipc_registers_table_under_expected_name() {
+        let harness = TestHarness::new();
+        let schema = test_schema();
+        let ipc = batches_to_ipc(&schema, &[batch(&[1])]);
+
+        // Query referencing the unique sentinel name — confirms the constant is the
+        // one the SQL must use.
+        let ptr = harness
+            .tokio_rt
+            .block_on(execute_from_ipc(
+                ipc,
+                &format!("SELECT val FROM {}", EXCHANGE_INPUT_TABLE),
+                harness.runtime(),
+                harness.cpu_executor.clone(),
+            ))
+            .unwrap();
+
+        let rows = harness.drain_rows(ptr);
+        assert_eq!(rows, 1);
+        assert_eq!(EXCHANGE_INPUT_TABLE, "__exchange_input__");
+    }
 }
