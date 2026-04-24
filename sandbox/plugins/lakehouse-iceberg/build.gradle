@@ -19,7 +19,7 @@ opensearchplugin {
     name = 'lakehouse-iceberg'
     description = 'Read external Apache Iceberg tables via PPL and SQL'
     classname = 'org.opensearch.lakehouse.LakehousePlugin'
-    extendedPlugins = ['analytics-engine']
+    extendedPlugins = ['analytics-engine', 'analytics-backend-datafusion']
 }
 
 // Guava comes transitively from Calcite (via analytics-engine) — forbidden on
