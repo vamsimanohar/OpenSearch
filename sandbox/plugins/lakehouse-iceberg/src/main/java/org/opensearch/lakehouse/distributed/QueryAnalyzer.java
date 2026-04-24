@@ -198,8 +198,6 @@ public final class QueryAnalyzer {
 
     /**
      * Extracts sort column names from the Sort node's input row type.
-     * These names are used to detect sort columns missing from the SELECT output
-     * and to remap sort indices for TopKMerger.
      */
     static String[] extractSortColumnNames(Sort sort) {
         List<RelFieldCollation> collations = sort.getCollation().getFieldCollations();
