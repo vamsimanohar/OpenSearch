@@ -35,8 +35,17 @@ public enum MergeStrategy {
     TOPK_MERGE,
 
     /**
+     * Two-phase distributed GROUP BY aggregation.
+     * Each worker runs the full GROUP BY query on its local partition, producing partial
+     * grouped results. The coordinator re-aggregates by grouping on the same keys and
+     * applying the correct re-aggregation function per column: SUM for SUM/COUNT,
+     * MIN for MIN, MAX for MAX.
+     */
+    TWO_PHASE_GROUP_BY,
+
+    /**
      * Route the entire query to a single node for execution.
-     * Used for queries that cannot be trivially distributed: GROUP BY, DISTINCT,
+     * Used for queries that cannot be trivially distributed: COUNT DISTINCT,
      * AVG aggregates, JOINs, or any pattern not covered by the other strategies.
      * This is deterministic routing, not an error fallback.
      */

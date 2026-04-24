@@ -64,13 +64,14 @@ public final class QueryAnalyzer {
         classifier.go(relNode);
 
         if (classifier.aggregate != null) {
-            if (!classifier.aggregate.getGroupSet().isEmpty()) {
-                return new AnalysisResult(MergeStrategy.SINGLE_NODE);
-            }
             if (hasDistinctOrAvg(classifier.aggregate)) {
                 return new AnalysisResult(MergeStrategy.SINGLE_NODE);
             }
             SqlKind[] aggKinds = extractAggKinds(classifier.aggregate);
+            if (!classifier.aggregate.getGroupSet().isEmpty()) {
+                int groupCount = classifier.aggregate.getGroupSet().cardinality();
+                return new AnalysisResult(MergeStrategy.TWO_PHASE_GROUP_BY, aggKinds, groupCount);
+            }
             return new AnalysisResult(MergeStrategy.GLOBAL_MERGE, aggKinds, null, null, 0);
         }
 
@@ -203,13 +204,18 @@ public final class QueryAnalyzer {
         final int limit;
         final String[] sortColumnNames;
         final int outputColumnCount;
+        final int groupCount;
 
         AnalysisResult(MergeStrategy strategy) {
-            this(strategy, null, null, null, 0, null, 0);
+            this(strategy, null, null, null, 0, null, 0, 0);
         }
 
         AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int[] sortColumns, boolean[] sortAsc, int limit) {
-            this(strategy, aggKinds, sortColumns, sortAsc, limit, null, 0);
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, null, 0, 0);
+        }
+
+        AnalysisResult(MergeStrategy strategy, SqlKind[] aggKinds, int groupCount) {
+            this(strategy, aggKinds, null, null, 0, null, 0, groupCount);
         }
 
         AnalysisResult(
@@ -221,6 +227,19 @@ public final class QueryAnalyzer {
             String[] sortColumnNames,
             int outputColumnCount
         ) {
+            this(strategy, aggKinds, sortColumns, sortAsc, limit, sortColumnNames, outputColumnCount, 0);
+        }
+
+        AnalysisResult(
+            MergeStrategy strategy,
+            SqlKind[] aggKinds,
+            int[] sortColumns,
+            boolean[] sortAsc,
+            int limit,
+            String[] sortColumnNames,
+            int outputColumnCount,
+            int groupCount
+        ) {
             this.strategy = strategy;
             this.aggKinds = aggKinds;
             this.sortColumns = sortColumns;
@@ -228,6 +247,7 @@ public final class QueryAnalyzer {
             this.limit = limit;
             this.sortColumnNames = sortColumnNames;
             this.outputColumnCount = outputColumnCount;
+            this.groupCount = groupCount;
         }
     }
 }

@@ -45,6 +45,15 @@ public class ResultMergerTests extends OpenSearchTestCase {
         assertTrue(ex.getMessage().contains("DataFusion"));
     }
 
+    public void testTwoPhaseGroupByThrowsIllegalState() {
+        WorkerQueryResponse r1 = makeResponse(List.of("grp", "cnt"), List.of("String", "Long"), new Object[][]{{"a"}, {5L}}, 1);
+        IllegalStateException ex = expectThrows(
+            IllegalStateException.class,
+            () -> ResultMerger.merge(List.of(r1), MergeStrategy.TWO_PHASE_GROUP_BY)
+        );
+        assertTrue(ex.getMessage().contains("DataFusion"));
+    }
+
     public void testSingleNodePassthrough() {
         WorkerQueryResponse r1 = makeResponse(List.of("val"), List.of("Integer"), new Object[][]{{42}}, 1);
         WorkerQueryResponse merged = ResultMerger.merge(List.of(r1), MergeStrategy.SINGLE_NODE);

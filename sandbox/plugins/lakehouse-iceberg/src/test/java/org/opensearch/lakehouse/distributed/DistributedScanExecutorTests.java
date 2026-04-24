@@ -113,8 +113,8 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
 
-        // Mock a GroupBy aggregate → SINGLE_NODE
-        RelNode relNode = mockGroupByRelNode();
+        // Mock a GroupBy aggregate with DISTINCT → SINGLE_NODE
+        RelNode relNode = mockGroupByWithDistinctRelNode();
 
         List<Object[]> rows = executeAndWait(
             executor, relNode, "SELECT col, COUNT(*) FROM t GROUP BY col",
@@ -364,6 +364,85 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col_0\" ASC", sql);
     }
 
+    // --- TWO_PHASE_GROUP_BY coordinator SQL tests ---
+
+    public void testBuildTwoPhaseGroupBySingleGroupSingleAgg() {
+        WorkerQueryResponse r = new WorkerQueryResponse(
+            List.of("col_0", "col_1"), List.of("String", "Long"), 2,
+            new Object[][]{{"a", "b"}, {10L, 20L}}
+        );
+        String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
+            List.of(r), 1, new SqlKind[]{SqlKind.COUNT}
+        );
+        assertEquals(
+            "SELECT \"col_0\", SUM(\"col_1\") FROM __exchange_input__ GROUP BY \"col_0\"",
+            sql
+        );
+    }
+
+    public void testBuildTwoPhaseGroupByMultiGroupMultiAgg() {
+        WorkerQueryResponse r = new WorkerQueryResponse(
+            List.of("col_0", "col_1", "col_2", "col_3", "col_4"),
+            List.of("String", "Integer", "Long", "Long", "String"),
+            1,
+            new Object[][]{{"x"}, {1}, {50L}, {100L}, {"2013-07-01"}}
+        );
+        String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
+            List.of(r), 2, new SqlKind[]{SqlKind.COUNT, SqlKind.SUM, SqlKind.MIN}
+        );
+        assertEquals(
+            "SELECT \"col_0\", \"col_1\", SUM(\"col_2\"), SUM(\"col_3\"), MIN(\"col_4\") FROM __exchange_input__ GROUP BY \"col_0\", \"col_1\"",
+            sql
+        );
+    }
+
+    public void testBuildTwoPhaseGroupByMinMax() {
+        WorkerQueryResponse r = new WorkerQueryResponse(
+            List.of("col_0", "col_1", "col_2"),
+            List.of("String", "String", "String"),
+            1,
+            new Object[][]{{"grp"}, {"2013-01-01"}, {"2013-12-31"}}
+        );
+        String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
+            List.of(r), 1, new SqlKind[]{SqlKind.MIN, SqlKind.MAX}
+        );
+        assertEquals(
+            "SELECT \"col_0\", MIN(\"col_1\"), MAX(\"col_2\") FROM __exchange_input__ GROUP BY \"col_0\"",
+            sql
+        );
+    }
+
+    public void testBuildTwoPhaseGroupByDefaultsToSum() {
+        WorkerQueryResponse r = new WorkerQueryResponse(
+            List.of("col_0", "col_1"), List.of("Integer", "Long"), 1,
+            new Object[][]{{1}, {100L}}
+        );
+        String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
+            List.of(r), 1, null
+        );
+        assertEquals(
+            "SELECT \"col_0\", SUM(\"col_1\") FROM __exchange_input__ GROUP BY \"col_0\"",
+            sql
+        );
+    }
+
+    public void testBuildTwoPhaseGroupBySkipsEmptyResponses() {
+        WorkerQueryResponse empty = new WorkerQueryResponse(
+            List.of("col_0", "col_1"), List.of("String", "Long"), 0, new Object[0][]
+        );
+        WorkerQueryResponse nonEmpty = new WorkerQueryResponse(
+            List.of("col_0", "col_1"), List.of("String", "Long"), 1,
+            new Object[][]{{"a"}, {5L}}
+        );
+        String sql = DistributedScanExecutor.buildTwoPhaseGroupByCoordinatorSql(
+            List.of(empty, nonEmpty), 1, new SqlKind[]{SqlKind.COUNT}
+        );
+        assertEquals(
+            "SELECT \"col_0\", SUM(\"col_1\") FROM __exchange_input__ GROUP BY \"col_0\"",
+            sql
+        );
+    }
+
     // --- Helper methods ---
 
     private static DiscoveryNode newNode(String nodeId, Map<String, String> attributes) {
@@ -424,10 +503,17 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         return node;
     }
 
-    private RelNode mockGroupByRelNode() {
+    @SuppressWarnings("deprecation")
+    private RelNode mockGroupByWithDistinctRelNode() {
         org.apache.calcite.rel.core.Aggregate agg = mock(org.apache.calcite.rel.core.Aggregate.class);
         when(agg.getGroupSet()).thenReturn(org.apache.calcite.util.ImmutableBitSet.of(0));
-        when(agg.getAggCallList()).thenReturn(List.of());
+        org.apache.calcite.rel.type.RelDataType bigintType = new org.apache.calcite.sql.type.BasicSqlType(
+            org.apache.calcite.rel.type.RelDataTypeSystem.DEFAULT, org.apache.calcite.sql.type.SqlTypeName.BIGINT
+        );
+        org.apache.calcite.rel.core.AggregateCall distinctCall = new org.apache.calcite.rel.core.AggregateCall(
+            org.apache.calcite.sql.fun.SqlStdOperatorTable.COUNT, true, List.of(), bigintType, null
+        );
+        when(agg.getAggCallList()).thenReturn(List.of(distinctCall));
         when(agg.getInputs()).thenReturn(List.of());
         return agg;
     }

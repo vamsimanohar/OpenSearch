@@ -14,13 +14,14 @@ public class MergeStrategyTests extends OpenSearchTestCase {
 
     public void testAllValuesPresent() {
         MergeStrategy[] values = MergeStrategy.values();
-        assertEquals(4, values.length);
+        assertEquals(5, values.length);
     }
 
     public void testValueOf() {
         assertEquals(MergeStrategy.CONCAT, MergeStrategy.valueOf("CONCAT"));
         assertEquals(MergeStrategy.GLOBAL_MERGE, MergeStrategy.valueOf("GLOBAL_MERGE"));
         assertEquals(MergeStrategy.TOPK_MERGE, MergeStrategy.valueOf("TOPK_MERGE"));
+        assertEquals(MergeStrategy.TWO_PHASE_GROUP_BY, MergeStrategy.valueOf("TWO_PHASE_GROUP_BY"));
         assertEquals(MergeStrategy.SINGLE_NODE, MergeStrategy.valueOf("SINGLE_NODE"));
     }
 

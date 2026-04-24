@@ -424,7 +424,8 @@ public class DistributedScanExecutor {
      * <p>
      * For CONCAT: {@code SELECT * FROM __exchange_input__}<br>
      * For GLOBAL_MERGE: re-aggregate partial results (SUM/MIN/MAX per column)<br>
-     * For TOPK_MERGE: merge-sort and limit ({@code ORDER BY ... LIMIT N})
+     * For TOPK_MERGE: merge-sort and limit ({@code ORDER BY ... LIMIT N})<br>
+     * For TWO_PHASE_GROUP_BY: re-aggregate grouped partial results
      */
     static String buildCoordinatorSql(
         QueryAnalyzer.AnalysisResult analysis,
@@ -437,6 +438,9 @@ public class DistributedScanExecutor {
             case GLOBAL_MERGE -> buildGlobalMergeCoordinatorSql(responses, analysis.aggKinds);
             case TOPK_MERGE -> buildTopKMergeCoordinatorSql(
                 sortColumnIndices, analysis.sortAsc, analysis.limit, outputColumnCount
+            );
+            case TWO_PHASE_GROUP_BY -> buildTwoPhaseGroupByCoordinatorSql(
+                responses, analysis.groupCount, analysis.aggKinds
             );
             case SINGLE_NODE -> throw new IllegalStateException("SINGLE_NODE should not reach coordinator SQL");
         };
@@ -469,6 +473,53 @@ public class DistributedScanExecutor {
             sb.append(func).append("(").append(quotedCol).append(")");
         }
         sb.append(" FROM __exchange_input__");
+        return sb.toString();
+    }
+
+    /**
+     * Builds coordinator SQL for TWO_PHASE_GROUP_BY: re-aggregates partial grouped results.
+     * <p>
+     * Each worker runs the full GROUP BY query on its partition, producing partial grouped
+     * results. The coordinator re-groups by the same keys and applies re-aggregation:
+     * SUM for SUM/COUNT (sum of partial counts = total count), MIN for MIN, MAX for MAX.
+     * <p>
+     * Worker columns are {@code col_0, col_1, ...} where the first {@code groupCount}
+     * columns are group keys and the rest are aggregate values.
+     * <p>
+     * Example: worker SQL {@code SELECT region, COUNT(*), SUM(x) FROM t GROUP BY region}
+     * produces {@code [col_0=region, col_1=count, col_2=sum]}. Coordinator SQL:
+     * {@code SELECT "col_0", SUM("col_1"), SUM("col_2") FROM __exchange_input__ GROUP BY "col_0"}
+     */
+    static String buildTwoPhaseGroupByCoordinatorSql(
+        List<WorkerQueryResponse> responses,
+        int groupCount,
+        SqlKind[] aggKinds
+    ) {
+        WorkerQueryResponse first = responses.stream().filter(r -> r.getRowCount() > 0).findFirst().orElse(responses.get(0));
+        int totalCols = first.getColumnNames().size();
+
+        StringBuilder sb = new StringBuilder("SELECT ");
+        for (int i = 0; i < totalCols; i++) {
+            if (i > 0) sb.append(", ");
+            String quotedCol = "\"col_" + i + "\"";
+            if (i < groupCount) {
+                sb.append(quotedCol);
+            } else {
+                int aggIdx = i - groupCount;
+                SqlKind kind = (aggKinds != null && aggIdx < aggKinds.length) ? aggKinds[aggIdx] : SqlKind.SUM;
+                String func = switch (kind) {
+                    case MIN -> "MIN";
+                    case MAX -> "MAX";
+                    default -> "SUM";
+                };
+                sb.append(func).append("(").append(quotedCol).append(")");
+            }
+        }
+        sb.append(" FROM __exchange_input__ GROUP BY ");
+        for (int i = 0; i < groupCount; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append("\"col_").append(i).append("\"");
+        }
         return sb.toString();
     }
 
