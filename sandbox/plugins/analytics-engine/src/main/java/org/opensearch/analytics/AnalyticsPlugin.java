@@ -14,25 +14,30 @@ import org.apache.calcite.sql.SqlOperatorTable;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.action.ActionRequest;
+import org.opensearch.analytics.exec.AnalyticsSearchService;
 import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
+import org.opensearch.analytics.exec.QueryScheduler;
+import org.opensearch.analytics.exec.Scheduler;
+import org.opensearch.analytics.exec.action.AnalyticsQueryAction;
+import org.opensearch.analytics.planner.CapabilityRegistry;
+import org.opensearch.analytics.planner.FieldStorageResolver;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.analytics.schema.SchemaContributor;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
-import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Module;
 import org.opensearch.common.inject.TypeLiteral;
+import org.opensearch.core.action.ActionResponse;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
-import org.opensearch.action.ActionRequest;
-import org.opensearch.core.action.ActionResponse;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.ExtensiblePlugin;
 import org.opensearch.plugins.Plugin;
@@ -47,7 +52,9 @@ import org.opensearch.watcher.ResourceWatcherService;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -66,33 +73,17 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
      */
     public AnalyticsPlugin() {}
 
-    private final List<SearchExecEngineProvider> shardBackends = new ArrayList<>();
+    private final List<AnalyticsSearchBackendPlugin> backEnds = new ArrayList<>();
     private final List<DataWarehouseQueryEngine> warehouseEngines = new ArrayList<>();
     private final List<SchemaContributor> schemaContributors = new ArrayList<>();
     private SqlOperatorTable operatorTable;
-    // TODO: build CapabilityRegistry once here from backEnds after loadExtensions() completes.
-    // CapabilityRegistry is per-JVM (singleton), not per-query. Per-query planning creates
-    // PlannerContext(registry, clusterState) and passes it into PlannerImpl.
 
     @SuppressWarnings("rawtypes")
     @Override
     public void loadExtensions(ExtensionLoader loader) {
-        List<AnalyticsSearchBackendPlugin> backEnds = loader.loadExtensions(AnalyticsSearchBackendPlugin.class);
-        for (AnalyticsSearchBackendPlugin be : backEnds) {
-            try {
-                shardBackends.add(be.getSearchExecEngineProvider());
-            } catch (UnsupportedOperationException e) {
-                logger.debug("Backend [{}] does not provide a SearchExecEngineProvider", be.name());
-            }
-        }
+        backEnds.addAll(loader.loadExtensions(AnalyticsSearchBackendPlugin.class));
         warehouseEngines.addAll(loader.loadExtensions(DataWarehouseQueryEngine.class));
         schemaContributors.addAll(loader.loadExtensions(SchemaContributor.class));
-        logger.info(
-            "[AnalyticsPlugin] loadExtensions: shardBackends={}, warehouseEngines={}, schemaContributors={}",
-            shardBackends.size(),
-            warehouseEngines.size(),
-            schemaContributors.size()
-        );
         operatorTable = aggregateOperatorTables();
     }
 
@@ -110,15 +101,16 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
-        return List.of(
-            new DefaultPlanExecutor(shardBackends, null/* TODO: pass indices service */, clusterService),
-            new DefaultEngineContext(clusterService, operatorTable, schemaContributors)
-        );
-    }
+        DefaultEngineContext ctx = new DefaultEngineContext(clusterService, operatorTable, schemaContributors);
+        CapabilityRegistry capabilityRegistry = new CapabilityRegistry(backEnds, FieldStorageResolver::new);
 
-    @Override
-    public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
-        return List.of(new ActionHandler<>(UnifiedPPLExecuteAction.INSTANCE, PPLTransportAction.class));
+        Map<String, AnalyticsSearchBackendPlugin> backEndsByName = new LinkedHashMap<>();
+        for (AnalyticsSearchBackendPlugin be : backEnds) {
+            backEndsByName.put(be.name(), be);
+        }
+        AnalyticsSearchService searchService = new AnalyticsSearchService(backEndsByName);
+
+        return List.of(searchService, ctx, capabilityRegistry);
     }
 
     @Override
@@ -128,10 +120,19 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             b.bind(new TypeLiteral<QueryPlanExecutor<RelNode, Iterable<Object[]>>>() {
             }).to(DefaultPlanExecutor.class);
             b.bind(EngineContext.class).to(DefaultEngineContext.class);
+            b.bind(Scheduler.class).to(QueryScheduler.class);
             if (!warehouseEngines.isEmpty()) {
                 b.bind(DataWarehouseQueryEngine.class).toInstance(warehouseEngines.get(0));
             }
         });
+    }
+
+    @Override
+    public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
+        return List.of(
+            new ActionHandler<>(AnalyticsQueryAction.INSTANCE, DefaultPlanExecutor.class),
+            new ActionHandler<>(UnifiedPPLExecuteAction.INSTANCE, PPLTransportAction.class)
+        );
     }
 
     private SqlOperatorTable aggregateOperatorTables() {
@@ -156,12 +157,9 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
                 }
             }
             SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(state, claimedIndices);
-            logger.info("[DefaultEngineContext] Building schema with {} contributors, {} OS tables, {} claimed indices",
-                schemaContributors.size(), schema.getTableNames().size(), claimedIndices.size());
             for (SchemaContributor c : schemaContributors) {
                 c.contributeSchema(schema, state);
             }
-            logger.info("[DefaultEngineContext] Final schema tables: {}", schema.getTableNames());
             return schema;
         }
     }

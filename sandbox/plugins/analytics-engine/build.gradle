@@ -69,9 +69,10 @@ dependencies {
     transitive = false
   }
 
-  // Arrow Flight types reference these at compile/javadoc time.
-  compileOnly "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
-  compileOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+  // Required at runtime by arrow-vector (Schema, ArrowType subclasses reference jackson).
+  // implementation (not compileOnly) so bundlePlugin doesn't strip them.
+  implementation "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+  implementation "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
   // Jackson databind + annotations — needed at runtime by Arrow C Data (SchemaImporter).
   // jackson-core is in server lib; databind and annotations get excluded from bundlePlugin
   // by server BOM constraint. Custom config bypasses this.

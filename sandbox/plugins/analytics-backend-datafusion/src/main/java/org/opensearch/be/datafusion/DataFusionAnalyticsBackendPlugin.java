@@ -17,6 +17,7 @@ import org.opensearch.analytics.spi.ExchangeSinkProvider;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.FilterCapability;
 import org.opensearch.analytics.spi.FilterOperator;
+import org.opensearch.analytics.spi.FragmentConvertor;
 import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.be.datafusion.exchange.DataFusionExchangeSinkProvider;
@@ -128,6 +129,11 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
             dataFusionService = DataFusionPlugin.ensureSharedService();
         }
         return new DataFusionExchangeSinkProvider(dataFusionService);
+    }
+
+    @Override
+    public FragmentConvertor getFragmentConvertor() {
+        return new DataFusionFragmentConvertor(plugin.getSubstraitExtensions());
     }
 
     @Override

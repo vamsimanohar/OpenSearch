@@ -8,64 +8,170 @@
 
 package org.opensearch.analytics.exec;
 
-import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
-import org.apache.calcite.plan.RelOptCluster;
-import org.apache.calcite.plan.RelOptTable;
-import org.apache.calcite.plan.RelTraitSet;
-import org.apache.calcite.plan.hep.HepPlanner;
-import org.apache.calcite.plan.hep.HepProgramBuilder;
-import org.apache.calcite.rel.core.TableScan;
-import org.apache.calcite.rel.type.RelDataType;
-import org.apache.calcite.rel.type.RelDataTypeFactory;
-import org.apache.calcite.rex.RexBuilder;
-import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.opensearch.test.OpenSearchTestCase;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 /**
- * Tests for {@link DefaultPlanExecutor}'s static helper methods.
+ * Tests for {@link DefaultPlanExecutor}'s row-materialization boundary.
+ *
+ * <p>The end-to-end {@code execute(RelNode, Object)} path involves Guice-wired
+ * dependencies (TransportService, Scheduler, TaskManager, CapabilityRegistry,
+ * EngineContext, NodeClient) and is exercised by internal cluster tests.
+ * These unit tests cover the one deterministic piece of behavior that lives
+ * in this class: batches-to-rows conversion at the external API edge.
  */
-@SuppressWarnings("deprecation")
 public class DefaultPlanExecutorTests extends OpenSearchTestCase {
 
-    private final RelDataTypeFactory typeFactory = new JavaTypeFactoryImpl();
-    private final RelOptCluster cluster = RelOptCluster.create(
-        new HepPlanner(new HepProgramBuilder().build()),
-        new RexBuilder(typeFactory)
-    );
+    private BufferAllocator allocator;
 
-    public void testExtractTableNameFromTableScan() {
-        RelOptTable table = mock(RelOptTable.class);
-        when(table.getQualifiedName()).thenReturn(List.of("my_index"));
-        when(table.getRowType()).thenReturn(buildRowType(1));
-
-        TableScan scan = new StubTableScan(cluster, cluster.traitSet(), table);
-        assertEquals("my_index", DefaultPlanExecutor.extractTableName(scan));
+    @Override
+    public void setUp() throws Exception {
+        super.setUp();
+        allocator = new RootAllocator();
     }
 
-    public void testExtractTableNameThrowsForNoTableScan() {
-        expectThrows(IllegalArgumentException.class, () -> {
-            DefaultPlanExecutor.extractTableName(
-                new org.apache.calcite.rel.AbstractRelNode(cluster, cluster.traitSet()) {}
-            );
-        });
+    @Override
+    public void tearDown() throws Exception {
+        allocator.close();
+        super.tearDown();
     }
 
-    private RelDataType buildRowType(int fieldCount) {
-        RelDataTypeFactory.Builder builder = typeFactory.builder();
-        for (int i = 0; i < fieldCount; i++) {
-            builder.add("field_" + i, SqlTypeName.VARCHAR);
+    public void testBatchesToRowsEmpty() {
+        Iterable<Object[]> rows = DefaultPlanExecutor.batchesToRows(List.of());
+        assertFalse("no batches → no rows", rows.iterator().hasNext());
+    }
+
+    public void testBatchesToRowsSingleBatchIntegers() {
+        VectorSchemaRoot batch = makeIntBatch("x", 10, 20, 30);
+        List<Object[]> rows = toList(DefaultPlanExecutor.batchesToRows(List.of(batch)));
+        assertEquals(3, rows.size());
+        assertArrayEquals(new Object[] { 10 }, rows.get(0));
+        assertArrayEquals(new Object[] { 20 }, rows.get(1));
+        assertArrayEquals(new Object[] { 30 }, rows.get(2));
+    }
+
+    public void testBatchesToRowsMultipleBatchesPreservesOrder() {
+        VectorSchemaRoot batch1 = makeIntBatch("x", 1, 2);
+        VectorSchemaRoot batch2 = makeIntBatch("x", 3);
+        VectorSchemaRoot batch3 = makeIntBatch("x", 4, 5);
+        List<Object[]> rows = toList(DefaultPlanExecutor.batchesToRows(List.of(batch1, batch2, batch3)));
+        assertEquals(5, rows.size());
+        assertEquals(1, rows.get(0)[0]);
+        assertEquals(2, rows.get(1)[0]);
+        assertEquals(3, rows.get(2)[0]);
+        assertEquals(4, rows.get(3)[0]);
+        assertEquals(5, rows.get(4)[0]);
+    }
+
+    public void testBatchesToRowsMultipleColumns() {
+        Schema schema = new Schema(
+            List.of(
+                new Field("id", FieldType.nullable(new ArrowType.Int(64, true)), null),
+                new Field("name", FieldType.nullable(ArrowType.Utf8.INSTANCE), null)
+            )
+        );
+        VectorSchemaRoot batch = VectorSchemaRoot.create(schema, allocator);
+        batch.allocateNew();
+        BigIntVector ids = (BigIntVector) batch.getVector(0);
+        VarCharVector names = (VarCharVector) batch.getVector(1);
+        ids.setSafe(0, 100L);
+        ids.setSafe(1, 200L);
+        names.setSafe(0, "alice".getBytes(StandardCharsets.UTF_8));
+        names.setSafe(1, "bob".getBytes(StandardCharsets.UTF_8));
+        batch.setRowCount(2);
+
+        List<Object[]> rows = toList(DefaultPlanExecutor.batchesToRows(List.of(batch)));
+        assertEquals(2, rows.size());
+        assertEquals(100L, rows.get(0)[0]);
+        assertEquals("alice", rows.get(0)[1]);
+        assertEquals(200L, rows.get(1)[0]);
+        assertEquals("bob", rows.get(1)[1]);
+    }
+
+    public void testBatchesToRowsHandlesNulls() {
+        VectorSchemaRoot batch = VectorSchemaRoot.create(
+            new Schema(List.of(new Field("x", FieldType.nullable(new ArrowType.Int(32, true)), null))),
+            allocator
+        );
+        batch.allocateNew();
+        IntVector vec = (IntVector) batch.getVector(0);
+        vec.setSafe(0, 1);
+        vec.setNull(1);
+        vec.setSafe(2, 3);
+        batch.setRowCount(3);
+
+        List<Object[]> rows = toList(DefaultPlanExecutor.batchesToRows(List.of(batch)));
+        assertEquals(3, rows.size());
+        assertEquals(1, rows.get(0)[0]);
+        assertNull(rows.get(1)[0]);
+        assertEquals(3, rows.get(2)[0]);
+    }
+
+    public void testBatchesToRowsVarCharDecodedAsString() {
+        VectorSchemaRoot batch = VectorSchemaRoot.create(
+            new Schema(List.of(new Field("s", FieldType.nullable(ArrowType.Utf8.INSTANCE), null))),
+            allocator
+        );
+        batch.allocateNew();
+        VarCharVector vec = (VarCharVector) batch.getVector(0);
+        vec.setSafe(0, "hello".getBytes(StandardCharsets.UTF_8));
+        vec.setSafe(1, "world".getBytes(StandardCharsets.UTF_8));
+        batch.setRowCount(2);
+
+        List<Object[]> rows = toList(DefaultPlanExecutor.batchesToRows(List.of(batch)));
+        assertEquals("hello", rows.get(0)[0]);
+        assertEquals("world", rows.get(1)[0]);
+        assertTrue(rows.get(0)[0] instanceof String);
+    }
+
+    public void testBatchesToRowsClosesBatches() {
+        BufferAllocator child = allocator.newChildAllocator("test", 0, Long.MAX_VALUE);
+        VectorSchemaRoot batch = makeIntBatch(child, "x", 1, 2);
+        long before = child.getAllocatedMemory();
+        assertTrue("batch should hold allocated memory", before > 0);
+        DefaultPlanExecutor.batchesToRows(List.of(batch));
+        assertEquals("batch buffers should be released after batchesToRows", 0, child.getAllocatedMemory());
+        child.close();
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────
+
+    private VectorSchemaRoot makeIntBatch(String fieldName, int... values) {
+        return makeIntBatch(allocator, fieldName, values);
+    }
+
+    private VectorSchemaRoot makeIntBatch(BufferAllocator alloc, String fieldName, int... values) {
+        Field field = new Field(fieldName, FieldType.nullable(new ArrowType.Int(32, true)), null);
+        Schema schema = new Schema(List.of(field));
+        VectorSchemaRoot vsr = VectorSchemaRoot.create(schema, alloc);
+        vsr.allocateNew();
+        IntVector vec = (IntVector) vsr.getVector(0);
+        for (int i = 0; i < values.length; i++) {
+            vec.setSafe(i, values[i]);
         }
-        return builder.build();
+        vsr.setRowCount(values.length);
+        return vsr;
     }
 
-    private static class StubTableScan extends TableScan {
-        StubTableScan(RelOptCluster cluster, RelTraitSet traitSet, RelOptTable table) {
-            super(cluster, traitSet, List.of(), table);
-        }
+    private static <T> List<T> toList(Iterable<T> it) {
+        List<T> out = new ArrayList<>();
+        Iterator<T> iter = it.iterator();
+        while (iter.hasNext())
+            out.add(iter.next());
+        return out;
     }
 }
