@@ -22,12 +22,12 @@ import java.util.List;
  *
  * @opensearch.internal
  */
-public final class FragmentedPlan {
+public final class SubPlan {
 
     private final List<PlanFragment> stages;
     private final boolean singleNode;
 
-    private FragmentedPlan(List<PlanFragment> stages, boolean singleNode) {
+    private SubPlan(List<PlanFragment> stages, boolean singleNode) {
         this.stages = stages;
         this.singleNode = singleNode;
     }
@@ -37,18 +37,18 @@ public final class FragmentedPlan {
      *
      * @param stages ordered list of plan fragments (stage 0 = leaf, last = coordinator)
      */
-    public static FragmentedPlan distributed(List<PlanFragment> stages) {
+    public static SubPlan distributed(List<PlanFragment> stages) {
         if (stages == null || stages.isEmpty()) {
             throw new IllegalArgumentException("Distributed plan requires at least one stage");
         }
-        return new FragmentedPlan(List.copyOf(stages), false);
+        return new SubPlan(List.copyOf(stages), false);
     }
 
     /**
      * Creates a single-node plan indicating the query cannot be distributed.
      */
-    public static FragmentedPlan singleNode() {
-        return new FragmentedPlan(List.of(), true);
+    public static SubPlan singleNode() {
+        return new SubPlan(List.of(), true);
     }
 
     public List<PlanFragment> getStages() {
@@ -83,8 +83,8 @@ public final class FragmentedPlan {
     @Override
     public String toString() {
         if (singleNode) {
-            return "FragmentedPlan{SINGLE_NODE}";
+            return "SubPlan{SINGLE_NODE}";
         }
-        return "FragmentedPlan{stages=" + stages.size() + ", " + stages + "}";
+        return "SubPlan{stages=" + stages.size() + ", " + stages + "}";
     }
 }

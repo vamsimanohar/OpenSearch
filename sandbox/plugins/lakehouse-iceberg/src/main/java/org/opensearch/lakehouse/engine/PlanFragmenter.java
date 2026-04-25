@@ -21,7 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Decomposes a Calcite logical plan into a multi-stage {@link FragmentedPlan}.
+ * Decomposes a Calcite logical plan into a multi-stage {@link SubPlan}.
  * <p>
  * Walks the RelNode tree to classify the query and produces an ordered list of
  * {@link PlanFragment} stages connected by {@link ExchangeType} exchanges.
@@ -51,7 +51,7 @@ public final class PlanFragmenter {
      * @param sql     the SQL query string (used for SQL rewriting on workers)
      * @return the fragmented plan
      */
-    public static FragmentedPlan fragment(RelNode relNode, String sql) {
+    public static SubPlan fragment(RelNode relNode, String sql) {
         PlanVisitor visitor = new PlanVisitor();
         visitor.go(relNode);
 
@@ -66,11 +66,11 @@ public final class PlanFragmenter {
         return fragmentScan(sql);
     }
 
-    private static FragmentedPlan fragmentAggregate(PlanVisitor visitor, String sql, RelNode relNode) {
+    private static SubPlan fragmentAggregate(PlanVisitor visitor, String sql, RelNode relNode) {
         Aggregate aggregate = visitor.aggregate;
 
         if (hasDistinct(aggregate)) {
-            return FragmentedPlan.singleNode();
+            return SubPlan.singleNode();
         }
 
         boolean hasGroupBy = !aggregate.getGroupSet().isEmpty();
@@ -82,7 +82,7 @@ public final class PlanFragmenter {
             if (hasAvg && !hasLimit) {
                 // GROUP BY + AVG without LIMIT: could decompose AVG but adds complexity.
                 // Keep as single-node for now — can be optimized later.
-                return FragmentedPlan.singleNode();
+                return SubPlan.singleNode();
             }
 
             if (hasLimit) {
@@ -104,7 +104,7 @@ public final class PlanFragmenter {
      *     GROUP BY + ORDER BY + LIMIT. Because groups are disjoint, LIMIT is correct.
      * Stage 2 (final): GATHER all intermediate results, CONCAT (each intermediate already applied LIMIT).
      */
-    private static FragmentedPlan fragmentGroupByWithLimit(
+    private static SubPlan fragmentGroupByWithLimit(
         Aggregate aggregate,
         Sort sort,
         String sql,
@@ -128,14 +128,14 @@ public final class PlanFragmenter {
         // Stage 2: coordinator just concatenates — each intermediate already applied correct LIMIT
         PlanFragment finalStage = PlanFragment.intermediate(2, "SELECT * FROM __exchange_input__", ExchangeType.NONE, null);
 
-        return FragmentedPlan.distributed(List.of(leafStage, intermediateStage, finalStage));
+        return SubPlan.distributed(List.of(leafStage, intermediateStage, finalStage));
     }
 
     /**
      * GROUP BY without LIMIT: 2-stage plan with GATHER exchange.
      * Workers run full GROUP BY; coordinator re-aggregates.
      */
-    private static FragmentedPlan fragmentGroupByNoLimit(Aggregate aggregate, Sort sort, String sql, SqlKind[] aggKinds) {
+    private static SubPlan fragmentGroupByNoLimit(Aggregate aggregate, Sort sort, String sql, SqlKind[] aggKinds) {
         int groupCount = aggregate.getGroupSet().cardinality();
 
         String workerSql = sql;
@@ -148,30 +148,30 @@ public final class PlanFragmenter {
         String coordinatorSql = buildTwoPhaseGroupByCoordinatorSql(groupCount, aggKinds, sort);
         PlanFragment finalStage = PlanFragment.intermediate(1, coordinatorSql, ExchangeType.NONE, null);
 
-        return FragmentedPlan.distributed(List.of(leafStage, finalStage));
+        return SubPlan.distributed(List.of(leafStage, finalStage));
     }
 
     /**
      * Global aggregation: 2-stage plan with GATHER exchange.
      * Workers compute partial aggregates; coordinator re-aggregates.
      */
-    private static FragmentedPlan fragmentGlobalAggregate(String sql, SqlKind[] aggKinds, boolean hasAvg) {
+    private static SubPlan fragmentGlobalAggregate(String sql, SqlKind[] aggKinds, boolean hasAvg) {
         String workerSql = hasAvg ? decomposeAvg(sql) : sql;
         PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.GATHER, null);
 
         String coordinatorSql = buildGlobalMergeCoordinatorSql(aggKinds, hasAvg);
         PlanFragment finalStage = PlanFragment.intermediate(1, coordinatorSql, ExchangeType.NONE, null);
 
-        return FragmentedPlan.distributed(List.of(leafStage, finalStage));
+        return SubPlan.distributed(List.of(leafStage, finalStage));
     }
 
     /**
      * ORDER BY + LIMIT: 2-stage plan with GATHER exchange (top-K merge).
      * ORDER BY without LIMIT: single-node (can't merge unsorted partitions correctly).
      */
-    private static FragmentedPlan fragmentSort(Sort sort, String sql, RelNode relNode) {
+    private static SubPlan fragmentSort(Sort sort, String sql, RelNode relNode) {
         if (sort.fetch == null) {
-            return FragmentedPlan.singleNode();
+            return SubPlan.singleNode();
         }
 
         int limit = extractLimit(sort);
@@ -183,18 +183,18 @@ public final class PlanFragmenter {
         String coordinatorSql = buildTopKCoordinatorSql(sortCols, sortAsc, limit);
         PlanFragment finalStage = PlanFragment.intermediate(1, coordinatorSql, ExchangeType.NONE, null);
 
-        return FragmentedPlan.distributed(List.of(leafStage, finalStage));
+        return SubPlan.distributed(List.of(leafStage, finalStage));
     }
 
     /**
      * Simple scan/filter/project: 2-stage plan with GATHER + CONCAT.
      */
-    private static FragmentedPlan fragmentScan(String sql) {
+    private static SubPlan fragmentScan(String sql) {
         PlanFragment leafStage = PlanFragment.leaf(0, sql, ExchangeType.GATHER, null);
         PlanFragment finalStage = PlanFragment.intermediate(
             1, "SELECT * FROM __exchange_input__", ExchangeType.NONE, null
         );
-        return FragmentedPlan.distributed(List.of(leafStage, finalStage));
+        return SubPlan.distributed(List.of(leafStage, finalStage));
     }
 
     // ---- SQL Builders ----

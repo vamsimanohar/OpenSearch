@@ -47,7 +47,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
 
     public void testSimpleScanReturnsConcat() {
         RelNode scan = mockSimpleNode();
-        FragmentedPlan plan = PlanFragmenter.fragment(scan, "SELECT * FROM t");
+        SubPlan plan = PlanFragmenter.fragment(scan, "SELECT * FROM t");
 
         assertFalse(plan.isSingleNode());
         assertEquals(2, plan.getStageCount());
@@ -65,7 +65,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
 
     public void testGlobalCountReturnsGatherMerge() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
-        FragmentedPlan plan = PlanFragmenter.fragment(agg, "SELECT COUNT(*) FROM t");
+        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT COUNT(*) FROM t");
 
         assertFalse(plan.isSingleNode());
         assertEquals(2, plan.getStageCount());
@@ -75,7 +75,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
 
     public void testGlobalAvgDecomposesInLeafSql() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
-        FragmentedPlan plan = PlanFragmenter.fragment(agg, "SELECT AVG(x) FROM t");
+        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT AVG(x) FROM t");
 
         assertFalse(plan.isSingleNode());
         assertEquals(2, plan.getStageCount());
@@ -95,7 +95,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         AggregateCall avgCall = makeAggCall(SqlStdOperatorTable.AVG, false);
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(sumCall, avgCall, countCall));
-        FragmentedPlan plan = PlanFragmenter.fragment(agg, "SELECT SUM(a), AVG(b), COUNT(*) FROM t");
+        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT SUM(a), AVG(b), COUNT(*) FROM t");
 
         assertFalse(plan.isSingleNode());
         String leafSql = plan.getLeafStage().getSql();
@@ -107,7 +107,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         AggregateCall minCall = makeAggCall(SqlStdOperatorTable.MIN, false);
         AggregateCall maxCall = makeAggCall(SqlStdOperatorTable.MAX, false);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(minCall, maxCall));
-        FragmentedPlan plan = PlanFragmenter.fragment(agg, "SELECT MIN(x), MAX(y) FROM t");
+        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT MIN(x), MAX(y) FROM t");
 
         assertFalse(plan.isSingleNode());
         String coordSql = plan.getFinalStage().getSql();
@@ -117,7 +117,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
 
     public void testTopKMergeWithSortAndLimit() {
         Sort sort = makeSort(true, true);
-        FragmentedPlan plan = PlanFragmenter.fragment(sort, "SELECT * FROM t ORDER BY col0 ASC LIMIT 10");
+        SubPlan plan = PlanFragmenter.fragment(sort, "SELECT * FROM t ORDER BY col0 ASC LIMIT 10");
 
         assertFalse(plan.isSingleNode());
         assertEquals(2, plan.getStageCount());
@@ -129,13 +129,13 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
 
     public void testSortWithoutLimitReturnsSingleNode() {
         Sort sort = makeSort(true, false);
-        FragmentedPlan plan = PlanFragmenter.fragment(sort, "SELECT * FROM t ORDER BY col0");
+        SubPlan plan = PlanFragmenter.fragment(sort, "SELECT * FROM t ORDER BY col0");
         assertTrue(plan.isSingleNode());
     }
 
     public void testGroupByNoLimitReturnsTwoPhaseGather() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
-        FragmentedPlan plan = PlanFragmenter.fragment(agg, "SELECT region, COUNT(*) FROM t GROUP BY region");
+        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT region, COUNT(*) FROM t GROUP BY region");
 
         assertFalse(plan.isSingleNode());
         assertEquals(2, plan.getStageCount());
@@ -152,7 +152,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInput(wrapper, true);
 
-        FragmentedPlan plan = PlanFragmenter.fragment(sort,
+        SubPlan plan = PlanFragmenter.fragment(sort,
             "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY COUNT(*) DESC LIMIT 10");
 
         assertFalse(plan.isSingleNode());
@@ -188,7 +188,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInput(wrapper, true);
 
-        FragmentedPlan plan = PlanFragmenter.fragment(sort,
+        SubPlan plan = PlanFragmenter.fragment(sort,
             "SELECT region, AVG(price), COUNT(*) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 5");
 
         assertFalse(plan.isSingleNode());
@@ -207,26 +207,26 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
 
     public void testCountDistinctReturnsSingleNode() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
-        FragmentedPlan plan = PlanFragmenter.fragment(agg, "SELECT COUNT(DISTINCT x) FROM t");
+        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT COUNT(DISTINCT x) FROM t");
         assertTrue(plan.isSingleNode());
     }
 
     public void testGroupByDistinctReturnsSingleNode() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.SUM, true)));
-        FragmentedPlan plan = PlanFragmenter.fragment(agg, "SELECT region, SUM(DISTINCT x) FROM t GROUP BY region");
+        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT region, SUM(DISTINCT x) FROM t GROUP BY region");
         assertTrue(plan.isSingleNode());
     }
 
     public void testGroupByAvgNoLimitReturnsSingleNode() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
-        FragmentedPlan plan = PlanFragmenter.fragment(agg, "SELECT region, AVG(x) FROM t GROUP BY region");
+        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT region, AVG(x) FROM t GROUP BY region");
         assertTrue(plan.isSingleNode());
     }
 
     public void testNestedAggregateDetected() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.SUM, false)));
         RelNode project = mockNodeWithInput(agg);
-        FragmentedPlan plan = PlanFragmenter.fragment(project, "SELECT SUM(x) FROM t");
+        SubPlan plan = PlanFragmenter.fragment(project, "SELECT SUM(x) FROM t");
         assertFalse(plan.isSingleNode());
         assertEquals(2, plan.getStageCount());
     }
@@ -234,7 +234,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
     public void testNestedSortDetected() {
         Sort sort = makeSort(true, true);
         RelNode project = mockNodeWithInput(sort);
-        FragmentedPlan plan = PlanFragmenter.fragment(project, "SELECT * FROM t ORDER BY col0 LIMIT 10");
+        SubPlan plan = PlanFragmenter.fragment(project, "SELECT * FROM t ORDER BY col0 LIMIT 10");
         assertFalse(plan.isSingleNode());
         assertEquals(2, plan.getStageCount());
     }
