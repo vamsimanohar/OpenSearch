@@ -160,10 +160,9 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         PlanFragment leaf = plan.getStages().get(0);
         assertTrue(leaf.isLeaf());
         assertEquals(ExchangeType.GATHER, leaf.getOutputExchange());
-        assertFalse("Workers must strip ORDER BY — coordinator re-aggregates all groups",
+        assertTrue("Workers keep ORDER BY+LIMIT for local top-K",
             leaf.getSql().toUpperCase().contains("ORDER BY"));
-        assertFalse("Workers must strip LIMIT — coordinator applies global LIMIT",
-            leaf.getSql().toUpperCase().contains("LIMIT"));
+        assertTrue(leaf.getSql().toUpperCase().contains("LIMIT"));
 
         PlanFragment fin = plan.getFinalStage();
         assertTrue(fin.getSql().contains("GROUP BY"));
@@ -214,50 +213,31 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             () -> PlanFragmenter.fragment(agg, "SELECT region, SUM(DISTINCT x) FROM t GROUP BY region"));
     }
 
-    public void testMixedCountDistinctWithOtherAggsDecomposes() {
+    public void testMixedCountDistinctWithOtherAggsThrows() {
         AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
         AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(sumCall, countDistinctCall));
-        SubPlan plan = PlanFragmenter.fragment(agg,
-            "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region");
-
-        assertEquals(2, plan.getStageCount());
-
-        String leafSql = plan.getLeafStage().getSql();
-        assertFalse("Workers strip COUNT(DISTINCT)", leafSql.contains("COUNT(DISTINCT"));
-        assertTrue("Workers include deduped col", leafSql.contains("userid"));
-        assertTrue("Workers GROUP BY dedup col", leafSql.toUpperCase().contains("GROUP BY REGION, USERID"));
-
-        String coordSql = plan.getFinalStage().getSql();
-        assertTrue("Coordinator re-aggregates SUM", coordSql.contains("SUM("));
-        assertTrue("Coordinator computes COUNT(DISTINCT)", coordSql.contains("COUNT(DISTINCT"));
+        expectThrows(UnsupportedOperationException.class,
+            () -> PlanFragmenter.fragment(agg,
+                "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region"));
     }
 
-    public void testMixedCountDistinctWithAvgAndLimitDecomposes() {
-        AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
+    public void testGroupByWithHavingThrows() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
+        expectThrows(UnsupportedOperationException.class,
+            () -> PlanFragmenter.fragment(agg,
+                "SELECT region, COUNT(*) FROM t GROUP BY region HAVING COUNT(*) > 100"));
+    }
+
+    public void testGroupByWithOffsetThrows() {
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
-        AggregateCall avgCall = makeAggCall(SqlStdOperatorTable.AVG, false);
-        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
-        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(sumCall, countCall, avgCall, countDistinctCall));
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countCall));
         RelNode wrapper = mockNodeWithInput(agg);
-        Sort sort = makeSortWithInput(wrapper, true);
+        Sort sort = makeSortWithInputAndOffset(wrapper, 10, 100);
 
-        SubPlan plan = PlanFragmenter.fragment(sort,
-            "SELECT regionid, SUM(advengineid), COUNT(*) AS c, AVG(resolutionwidth), COUNT(DISTINCT userid) FROM hits GROUP BY regionid ORDER BY c DESC LIMIT 10");
-
-        assertEquals(2, plan.getStageCount());
-
-        String leafSql = plan.getLeafStage().getSql();
-        assertFalse("Workers strip COUNT(DISTINCT)", leafSql.contains("COUNT(DISTINCT"));
-        assertTrue("Workers decompose AVG to SUM+COUNT", leafSql.contains("SUM(CAST("));
-        assertFalse("Workers strip ORDER BY", leafSql.toUpperCase().contains("ORDER BY"));
-        assertFalse("Workers strip LIMIT", leafSql.toUpperCase().contains("LIMIT"));
-
-        String coordSql = plan.getFinalStage().getSql();
-        assertTrue("Coordinator re-aggregates SUM", coordSql.contains("SUM("));
-        assertTrue("Coordinator recombines AVG", coordSql.contains("CAST(SUM("));
-        assertTrue("Coordinator computes COUNT(DISTINCT)", coordSql.contains("COUNT(DISTINCT"));
-        assertTrue("Coordinator applies LIMIT", coordSql.contains("LIMIT 10"));
+        expectThrows(UnsupportedOperationException.class,
+            () -> PlanFragmenter.fragment(sort,
+                "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 10 OFFSET 100"));
     }
 
     public void testGroupByCountDistinctWithLimitDecomposes() {
@@ -836,6 +816,27 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         when(input.getRowType()).thenReturn(rowType);
         when(input.getInputs()).thenReturn(List.of());
         return new StubSort(cluster, traitSet, input, collation, null, fetchNode);
+    }
+
+    private Sort makeSortWithInputAndOffset(RelNode input, int limitValue, int offsetValue) {
+        RelFieldCollation fieldCollation = new RelFieldCollation(0, RelFieldCollation.Direction.DESCENDING);
+        RelCollation collation = RelCollations.of(fieldCollation);
+        RelDataTypeFactory typeFactory = new SqlTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
+        org.apache.calcite.rex.RexBuilder rexBuilder = new org.apache.calcite.rex.RexBuilder(typeFactory);
+        RexNode fetchNode = rexBuilder.makeExactLiteral(
+            BigDecimal.valueOf(limitValue), typeFactory.createSqlType(SqlTypeName.INTEGER)
+        );
+        RexNode offsetNode = rexBuilder.makeExactLiteral(
+            BigDecimal.valueOf(offsetValue), typeFactory.createSqlType(SqlTypeName.INTEGER)
+        );
+        RelOptCluster cluster = mock(RelOptCluster.class);
+        RelTraitSet traitSet = RelTraitSet.createEmpty().plus(collation);
+        RelDataType rowType = mock(RelDataType.class);
+        when(rowType.getFieldNames()).thenReturn(List.of("col0", "col1"));
+        when(rowType.getFieldCount()).thenReturn(2);
+        when(input.getRowType()).thenReturn(rowType);
+        when(input.getInputs()).thenReturn(List.of());
+        return new StubSort(cluster, traitSet, input, collation, offsetNode, fetchNode);
     }
 
     private Sort makeSortWithLimit(int limitValue) {

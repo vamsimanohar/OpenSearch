@@ -93,9 +93,11 @@ public final class PlanFragmenter {
                 "DISTINCT aggregates other than COUNT are not distributable — only COUNT(DISTINCT) is supported"
             );
         }
-        // Mixed COUNT(DISTINCT) with other aggregates is handled:
-        // workers dedup by (group keys + distinct cols), coordinator re-aggregates
-        // non-distinct aggs and computes COUNT(DISTINCT) over deduped values.
+        if (hasCountDistinct && hasNonDistinctAgg) {
+            throw new UnsupportedOperationException(
+                "Mixed COUNT(DISTINCT) with other aggregates is not yet distributable"
+            );
+        }
 
         boolean hasGroupBy = !aggregate.getGroupSet().isEmpty();
         boolean hasAvg = hasAvg(aggregate);
@@ -104,6 +106,12 @@ public final class PlanFragmenter {
         SqlKind[] aggKinds = extractAggKinds(aggregate);
         boolean[] isDistinct = extractIsDistinct(aggregate);
         boolean[] isPassthrough = extractIsPassthrough(aggregate);
+
+        if (hasGroupBy && findKeyword(sql.toUpperCase(), "HAVING") >= 0) {
+            throw new UnsupportedOperationException(
+                "GROUP BY with HAVING is not distributable — HAVING conditions apply to partial worker data"
+            );
+        }
 
         if (hasGroupBy) {
             return fragmentGroupByNoLimit(aggregate, visitor.sort, sql, aggKinds, hasAvg, hasDistinctAgg, isDistinct, isPassthrough);
@@ -170,7 +178,18 @@ public final class PlanFragmenter {
     ) {
         int groupCount = aggregate.getGroupSet().cardinality();
 
-        String workerSql = stripOrderByLimitOffset(sql);
+        boolean hasSort = sort != null && sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
+        boolean hasLimit = sort != null && sort.fetch != null;
+        boolean hasOffset = sort != null && sort.offset != null;
+
+        if (hasOffset) {
+            throw new UnsupportedOperationException("GROUP BY with OFFSET is not distributable");
+        }
+
+        String workerSql = sql;
+        if (hasDistinct || (hasSort && !hasLimit)) {
+            workerSql = stripOrderByLimitOffset(sql);
+        }
         if (hasDistinct) {
             workerSql = decomposeDistinctToDedup(workerSql, aggregate);
         }

@@ -97,7 +97,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         assertEquals(2, rows.size());
     }
 
-    public void testUnsupportedQueryThrows() throws Exception {
+    public void testUnsupportedQueryFallsBackToSingleNode() throws Exception {
         DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{42});
         DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
@@ -106,30 +106,15 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
 
-        // GroupBy with SUM(DISTINCT) → PlanFragmenter throws UnsupportedOperationException
         RelNode relNode = mockGroupByWithDistinctSumRelNode();
 
-        CountDownLatch latch = new CountDownLatch(1);
-        AtomicReference<Exception> errorRef = new AtomicReference<>();
-
-        executor.executeAsync(relNode, "SELECT col, SUM(DISTINCT col) FROM t GROUP BY col",
+        List<Object[]> rows = executeAndWait(
+            executor, relNode, "SELECT col, SUM(DISTINCT col) FROM t GROUP BY col",
             List.of("f1", "f2"), new long[]{100, 200},
-            Map.of("localMode", "true"), "t", new ActionListener<>() {
-                @Override
-                public void onResponse(Iterable<Object[]> result) {
-                    latch.countDown();
-                }
+            Map.of("localMode", "true"), "t"
+        );
 
-                @Override
-                public void onFailure(Exception e) {
-                    errorRef.set(e);
-                    latch.countDown();
-                }
-            });
-
-        assertTrue("Timed out", latch.await(10, TimeUnit.SECONDS));
-        assertNotNull("Expected UnsupportedOperationException", errorRef.get());
-        assertTrue(errorRef.get() instanceof UnsupportedOperationException);
+        assertEquals("Undistributable query should fall back to single-node execution", 1, rows.size());
     }
 
     public void testNoEligibleNodesExecutesLocally() throws Exception {
