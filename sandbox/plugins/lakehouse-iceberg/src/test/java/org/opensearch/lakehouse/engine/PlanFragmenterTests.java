@@ -160,9 +160,10 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         PlanFragment leaf = plan.getStages().get(0);
         assertTrue(leaf.isLeaf());
         assertEquals(ExchangeType.GATHER, leaf.getOutputExchange());
-        assertTrue("Workers keep ORDER BY+LIMIT for local top-K",
+        assertFalse("Workers must strip ORDER BY — coordinator re-aggregates all groups",
             leaf.getSql().toUpperCase().contains("ORDER BY"));
-        assertTrue(leaf.getSql().toUpperCase().contains("LIMIT"));
+        assertFalse("Workers must strip LIMIT — coordinator applies global LIMIT",
+            leaf.getSql().toUpperCase().contains("LIMIT"));
 
         PlanFragment fin = plan.getFinalStage();
         assertTrue(fin.getSql().contains("GROUP BY"));
@@ -213,13 +214,50 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             () -> PlanFragmenter.fragment(agg, "SELECT region, SUM(DISTINCT x) FROM t GROUP BY region"));
     }
 
-    public void testMixedCountDistinctWithOtherAggsThrows() {
+    public void testMixedCountDistinctWithOtherAggsDecomposes() {
         AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
         AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(sumCall, countDistinctCall));
-        expectThrows(UnsupportedOperationException.class,
-            () -> PlanFragmenter.fragment(agg,
-                "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region"));
+        SubPlan plan = PlanFragmenter.fragment(agg,
+            "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region");
+
+        assertEquals(2, plan.getStageCount());
+
+        String leafSql = plan.getLeafStage().getSql();
+        assertFalse("Workers strip COUNT(DISTINCT)", leafSql.contains("COUNT(DISTINCT"));
+        assertTrue("Workers include deduped col", leafSql.contains("userid"));
+        assertTrue("Workers GROUP BY dedup col", leafSql.toUpperCase().contains("GROUP BY REGION, USERID"));
+
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue("Coordinator re-aggregates SUM", coordSql.contains("SUM("));
+        assertTrue("Coordinator computes COUNT(DISTINCT)", coordSql.contains("COUNT(DISTINCT"));
+    }
+
+    public void testMixedCountDistinctWithAvgAndLimitDecomposes() {
+        AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall avgCall = makeAggCall(SqlStdOperatorTable.AVG, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(sumCall, countCall, avgCall, countDistinctCall));
+        RelNode wrapper = mockNodeWithInput(agg);
+        Sort sort = makeSortWithInput(wrapper, true);
+
+        SubPlan plan = PlanFragmenter.fragment(sort,
+            "SELECT regionid, SUM(advengineid), COUNT(*) AS c, AVG(resolutionwidth), COUNT(DISTINCT userid) FROM hits GROUP BY regionid ORDER BY c DESC LIMIT 10");
+
+        assertEquals(2, plan.getStageCount());
+
+        String leafSql = plan.getLeafStage().getSql();
+        assertFalse("Workers strip COUNT(DISTINCT)", leafSql.contains("COUNT(DISTINCT"));
+        assertTrue("Workers decompose AVG to SUM+COUNT", leafSql.contains("SUM(CAST("));
+        assertFalse("Workers strip ORDER BY", leafSql.toUpperCase().contains("ORDER BY"));
+        assertFalse("Workers strip LIMIT", leafSql.toUpperCase().contains("LIMIT"));
+
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue("Coordinator re-aggregates SUM", coordSql.contains("SUM("));
+        assertTrue("Coordinator recombines AVG", coordSql.contains("CAST(SUM("));
+        assertTrue("Coordinator computes COUNT(DISTINCT)", coordSql.contains("COUNT(DISTINCT"));
+        assertTrue("Coordinator applies LIMIT", coordSql.contains("LIMIT 10"));
     }
 
     public void testGroupByCountDistinctWithLimitDecomposes() {

@@ -93,11 +93,9 @@ public final class PlanFragmenter {
                 "DISTINCT aggregates other than COUNT are not distributable — only COUNT(DISTINCT) is supported"
             );
         }
-        if (hasCountDistinct && hasNonDistinctAgg) {
-            throw new UnsupportedOperationException(
-                "Mixed COUNT(DISTINCT) with other aggregates is not yet distributable — needs separate decomposition paths"
-            );
-        }
+        // Mixed COUNT(DISTINCT) with other aggregates is handled:
+        // workers dedup by (group keys + distinct cols), coordinator re-aggregates
+        // non-distinct aggs and computes COUNT(DISTINCT) over deduped values.
 
         boolean hasGroupBy = !aggregate.getGroupSet().isEmpty();
         boolean hasAvg = hasAvg(aggregate);
@@ -172,12 +170,7 @@ public final class PlanFragmenter {
     ) {
         int groupCount = aggregate.getGroupSet().cardinality();
 
-        String workerSql = sql;
-        boolean hasSort = sort != null && sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
-        boolean hasLimit = sort != null && sort.fetch != null;
-        if (hasDistinct || (hasSort && !hasLimit)) {
-            workerSql = stripOrderByLimitOffset(sql);
-        }
+        String workerSql = stripOrderByLimitOffset(sql);
         if (hasDistinct) {
             workerSql = decomposeDistinctToDedup(workerSql, aggregate);
         }
@@ -844,7 +837,7 @@ public final class PlanFragmenter {
 
     private static String reAggFunction(SqlKind kind) {
         return switch (kind) {
-            case MIN -> "MIN";
+            case MIN, ANY_VALUE -> "MIN";
             case MAX -> "MAX";
             default -> "SUM";
         };
