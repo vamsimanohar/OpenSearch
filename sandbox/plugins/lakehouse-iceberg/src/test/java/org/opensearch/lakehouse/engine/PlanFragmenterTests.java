@@ -147,7 +147,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue(coordSql.contains("SUM("));
     }
 
-    public void testGroupByWithLimitReturnsThreeStageHash() {
+    public void testGroupByWithLimitReturnsTwoStageGather() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInput(wrapper, true);
@@ -155,54 +155,40 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         SubPlan plan = PlanFragmenter.fragment(sort,
             "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY COUNT(*) DESC LIMIT 10");
 
+        assertEquals(2, plan.getStageCount());
 
-        assertEquals(3, plan.getStageCount());
-
-        // Stage 0: leaf with HASH exchange on group keys
         PlanFragment leaf = plan.getStages().get(0);
         assertTrue(leaf.isLeaf());
-        assertEquals(ExchangeType.HASH, leaf.getOutputExchange());
-        assertNotNull(leaf.getHashColumns());
-        assertArrayEquals(new int[] { 0 }, leaf.getHashColumns());
-        // Worker SQL should have ORDER BY/LIMIT stripped
+        assertEquals(ExchangeType.GATHER, leaf.getOutputExchange());
         assertFalse(leaf.getSql().toUpperCase().contains("ORDER BY"));
         assertFalse(leaf.getSql().toUpperCase().contains("LIMIT"));
 
-        // Stage 1: intermediate with GATHER exchange
-        PlanFragment mid = plan.getStages().get(1);
-        assertFalse(mid.isLeaf());
-        assertEquals(ExchangeType.GATHER, mid.getOutputExchange());
-        assertTrue(mid.getSql().contains("GROUP BY"));
-        assertTrue(mid.getSql().contains("LIMIT 10"));
-
-        // Stage 2: final CONCAT
-        PlanFragment fin = plan.getStages().get(2);
-        assertEquals(ExchangeType.NONE, fin.getOutputExchange());
-        assertEquals("SELECT * FROM __exchange_input__", fin.getSql());
+        PlanFragment fin = plan.getFinalStage();
+        assertTrue(fin.getSql().contains("GROUP BY"));
+        assertTrue(fin.getSql().contains("ORDER BY"));
+        assertTrue(fin.getSql().contains("LIMIT 10"));
     }
 
-    public void testGroupByWithLimitAndAvgReturnsThreeStageHash() {
+    public void testGroupByWithLimitAndAvgReturnsTwoStageGather() {
         AggregateCall avgCall = makeAggCall(SqlStdOperatorTable.AVG, false);
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(avgCall, countCall));
         RelNode wrapper = mockNodeWithInput(agg);
-        Sort sort = makeSortWithInput(wrapper, true);
+        Sort sort = makeSortWithInput(wrapper, true, 5);
 
         SubPlan plan = PlanFragmenter.fragment(sort,
             "SELECT region, AVG(price), COUNT(*) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 5");
 
+        assertEquals(2, plan.getStageCount());
 
-        assertEquals(3, plan.getStageCount());
-
-        // Leaf SQL should decompose AVG
         String leafSql = plan.getLeafStage().getSql();
         assertTrue(leafSql.contains("SUM(CAST("));
         assertFalse(leafSql.contains("AVG("));
 
-        // Intermediate SQL should recombine AVG
-        String midSql = plan.getStages().get(1).getSql();
-        assertTrue(midSql.contains("CAST(SUM("));
-        assertTrue(midSql.contains("/ SUM("));
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue(coordSql.contains("CAST(SUM("));
+        assertTrue(coordSql.contains("/ SUM("));
+        assertTrue(coordSql.contains("LIMIT 5"));
     }
 
     public void testGlobalCountDistinctDecomposes() {
@@ -244,7 +230,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         SubPlan plan = PlanFragmenter.fragment(sort,
             "SELECT region, COUNT(DISTINCT userid) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 10");
 
-        assertEquals(3, plan.getStageCount());
+        assertEquals(2, plan.getStageCount());
 
         String leafSql = plan.getLeafStage().getSql();
         assertFalse(leafSql.contains("COUNT(DISTINCT"));
@@ -252,8 +238,9 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue("Worker should GROUP BY distinct col for dedup",
             leafSql.toUpperCase().contains("GROUP BY REGION, USERID"));
 
-        String midSql = plan.getStages().get(1).getSql();
-        assertTrue(midSql.contains("COUNT(DISTINCT"));
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue(coordSql.contains("COUNT(DISTINCT"));
+        assertTrue(coordSql.contains("LIMIT 10"));
     }
 
     public void testGroupByAvgNoLimitDecomposes() {

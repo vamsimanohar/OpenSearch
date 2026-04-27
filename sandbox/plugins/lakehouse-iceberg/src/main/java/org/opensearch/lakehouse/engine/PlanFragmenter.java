@@ -106,10 +106,10 @@ public final class PlanFragmenter {
         boolean[] isDistinct = extractIsDistinct(aggregate);
 
         if (hasGroupBy) {
-            if (hasLimit) {
-                return fragmentGroupByWithLimit(aggregate, visitor.sort, sql, aggKinds, hasAvg, hasDistinctAgg, isDistinct);
-            }
-
+            // P1: All GROUP BY queries use 2-stage GATHER plan. Workers run full GROUP BY,
+            // coordinator re-aggregates with GROUP BY + ORDER BY + LIMIT. The 3-stage HASH
+            // plan (fragmentGroupByWithLimit) is available but not yet safe for high-cardinality
+            // GROUP BY — workers produce too many partial groups, exceeding memory limits.
             return fragmentGroupByNoLimit(aggregate, visitor.sort, sql, aggKinds, hasAvg, hasDistinctAgg, isDistinct);
         }
 
@@ -155,8 +155,9 @@ public final class PlanFragmenter {
     }
 
     /**
-     * GROUP BY without LIMIT: 2-stage plan with GATHER exchange.
-     * Workers run full GROUP BY; coordinator re-aggregates.
+     * GROUP BY: 2-stage plan with GATHER exchange.
+     * Workers run full GROUP BY (without ORDER BY/LIMIT); coordinator re-aggregates
+     * with GROUP BY + ORDER BY + LIMIT.
      * AVG is decomposed into SUM+COUNT on workers and recombined on coordinator.
      * COUNT DISTINCT is decomposed: workers dedup by (group keys + distinct cols),
      * coordinator counts the deduped rows per group.
@@ -173,7 +174,9 @@ public final class PlanFragmenter {
         int groupCount = aggregate.getGroupSet().cardinality();
 
         String workerSql = sql;
-        if (sort != null && sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty()) {
+        boolean hasSort = sort != null && sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
+        boolean hasLimit = sort != null && sort.fetch != null;
+        if (hasSort || hasLimit) {
             workerSql = stripOrderByLimitOffset(sql);
         }
         if (hasDistinct) {
@@ -365,7 +368,7 @@ public final class PlanFragmenter {
     }
 
     /**
-     * Builds coordinator SQL for two-phase GROUP BY without LIMIT.
+     * Builds coordinator SQL for two-phase GROUP BY (with or without LIMIT).
      * Handles AVG decomposition (SUM+COUNT) and COUNT DISTINCT (workers emit deduped
      * rows; coordinator counts distinct values per group).
      */
@@ -419,6 +422,17 @@ public final class PlanFragmenter {
                 if (i > 0) sb.append(", ");
                 sb.append(sortCols[i] + 1);
                 sb.append(sortAsc[i] ? " ASC" : " DESC");
+            }
+        }
+
+        if (sort != null) {
+            int limit = extractLimit(sort);
+            if (limit > 0) {
+                sb.append(" LIMIT ").append(limit);
+            }
+            int offset = extractOffset(sort);
+            if (offset > 0) {
+                sb.append(" OFFSET ").append(offset);
             }
         }
 
