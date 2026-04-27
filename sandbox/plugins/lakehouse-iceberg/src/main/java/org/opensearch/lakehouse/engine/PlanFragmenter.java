@@ -564,16 +564,45 @@ public final class PlanFragmenter {
     }
 
     /**
-     * Rewrites a global COUNT(DISTINCT col) query to emit raw distinct values.
-     * Workers run: SELECT DISTINCT col FROM t (instead of COUNT(DISTINCT col)).
-     * The coordinator then runs COUNT(DISTINCT col_N) over the collected raw values.
-     * <p>
-     * For mixed queries like {@code SELECT SUM(a), COUNT(DISTINCT b) FROM t}, only the
-     * COUNT(DISTINCT ...) calls are decomposed; other aggregates remain as-is on workers.
-     * <p>
-     * Global-only: for GROUP BY queries, use {@link #decomposeDistinctToDedup}.
+     * Rewrites a global COUNT(DISTINCT col) query so workers emit locally-unique values.
+     * Replaces {@code COUNT(DISTINCT col)} with just {@code col} and inserts the
+     * {@code DISTINCT} keyword after {@code SELECT} to deduplicate on each worker.
+     * The coordinator then runs {@code COUNT(DISTINCT col_N)} over the pre-deduped results.
      */
     static String decomposeGlobalDistinctToRawValues(String sql) {
+        List<String> found = new ArrayList<>();
+        String stripped = stripCountDistinct(sql, found);
+        if (found.isEmpty()) {
+            return stripped;
+        }
+        String upperStripped = stripped.toUpperCase();
+        int selectIdx = upperStripped.indexOf("SELECT ");
+        if (selectIdx >= 0) {
+            stripped = stripped.substring(0, selectIdx + 7) + "DISTINCT " + stripped.substring(selectIdx + 7);
+        }
+        return stripped;
+    }
+
+    /**
+     * Rewrites a GROUP BY query's COUNT(DISTINCT col) to plain col and appends
+     * the distinct column names to the GROUP BY clause. This makes workers dedup
+     * by (group keys + distinct cols) so the intermediate/coordinator stage can
+     * compute exact COUNT(DISTINCT) per group.
+     */
+    static String decomposeDistinctToDedup(String sql, Aggregate aggregate) {
+        List<String> distinctCols = new ArrayList<>();
+        String stripped = stripCountDistinct(sql, distinctCols);
+        if (!distinctCols.isEmpty()) {
+            stripped = appendToGroupBy(stripped, distinctCols);
+        }
+        return stripped;
+    }
+
+    private static String stripCountDistinct(String sql) {
+        return stripCountDistinct(sql, null);
+    }
+
+    private static String stripCountDistinct(String sql, List<String> extractedCols) {
         String upper = sql.toUpperCase();
         StringBuilder result = new StringBuilder();
         int pos = 0;
@@ -603,6 +632,9 @@ public final class PlanFragmenter {
                 break;
             }
             String innerExpr = sql.substring(cdIdx + 15, closeIdx);
+            if (extractedCols != null) {
+                extractedCols.add(innerExpr.trim());
+            }
             result.append(sql, pos, cdIdx);
             result.append(innerExpr);
             pos = closeIdx + 1;
@@ -610,47 +642,29 @@ public final class PlanFragmenter {
         return result.toString();
     }
 
-    /**
-     * Rewrites a GROUP BY query's COUNT(DISTINCT col) to plain col (dedup).
-     * Workers run GROUP BY (group keys + distinct columns) to deduplicate locally.
-     * The intermediate/coordinator stage then computes COUNT(DISTINCT col) over
-     * the pre-deduped rows.
-     */
-    static String decomposeDistinctToDedup(String sql, Aggregate aggregate) {
+    private static String appendToGroupBy(String sql, List<String> columns) {
         String upper = sql.toUpperCase();
-        StringBuilder result = new StringBuilder();
-        int pos = 0;
-
-        while (pos < sql.length()) {
-            int cdIdx = upper.indexOf("COUNT(DISTINCT ", pos);
-            if (cdIdx < 0) {
-                result.append(sql, pos, sql.length());
-                break;
-            }
-            if (cdIdx > 0 && Character.isLetterOrDigit(sql.charAt(cdIdx - 1))) {
-                result.append(sql, pos, cdIdx + 15);
-                pos = cdIdx + 15;
-                continue;
-            }
-            int parenDepth = 0;
-            int closeIdx = -1;
-            for (int i = cdIdx + 5; i < sql.length(); i++) {
-                if (sql.charAt(i) == '(') parenDepth++;
-                else if (sql.charAt(i) == ')') {
-                    parenDepth--;
-                    if (parenDepth == 0) { closeIdx = i; break; }
-                }
-            }
-            if (closeIdx < 0) {
-                result.append(sql, pos, sql.length());
-                break;
-            }
-            String innerExpr = sql.substring(cdIdx + 15, closeIdx);
-            result.append(sql, pos, cdIdx);
-            result.append(innerExpr);
-            pos = closeIdx + 1;
+        int groupByIdx = findKeyword(upper, "GROUP BY");
+        if (groupByIdx < 0) {
+            return sql;
         }
-        return result.toString();
+        int afterGroupBy = groupByIdx + 8;
+        int endIdx = sql.length();
+        int havingIdx = findKeyword(upper, "HAVING");
+        int orderIdx = findKeyword(upper, "ORDER BY");
+        int limitIdx = findKeyword(upper, "LIMIT");
+        if (havingIdx >= 0) endIdx = Math.min(endIdx, havingIdx);
+        if (orderIdx >= 0) endIdx = Math.min(endIdx, orderIdx);
+        if (limitIdx >= 0) endIdx = Math.min(endIdx, limitIdx);
+
+        StringBuilder sb = new StringBuilder(sql.substring(0, endIdx).stripTrailing());
+        for (String col : columns) {
+            sb.append(", ").append(col);
+        }
+        if (endIdx < sql.length()) {
+            sb.append(" ").append(sql.substring(endIdx));
+        }
+        return sb.toString();
     }
 
     static String stripOrderByLimitOffset(String sql) {

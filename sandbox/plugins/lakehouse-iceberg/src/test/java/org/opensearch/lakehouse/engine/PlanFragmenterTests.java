@@ -212,6 +212,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertEquals(2, plan.getStageCount());
 
         String leafSql = plan.getLeafStage().getSql();
+        assertTrue(leafSql.contains("DISTINCT"));
         assertTrue(leafSql.contains("userid"));
         assertFalse(leafSql.contains("COUNT(DISTINCT"));
 
@@ -239,6 +240,8 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         String leafSql = plan.getLeafStage().getSql();
         assertFalse(leafSql.contains("COUNT(DISTINCT"));
         assertTrue(leafSql.contains("userid"));
+        assertTrue("Worker should GROUP BY distinct col for dedup",
+            leafSql.toUpperCase().contains("GROUP BY REGION, USERID"));
 
         String midSql = plan.getStages().get(1).getSql();
         assertTrue(midSql.contains("COUNT(DISTINCT"));
@@ -502,14 +505,14 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         String result = PlanFragmenter.decomposeGlobalDistinctToRawValues(
             "SELECT COUNT(DISTINCT userid) FROM t"
         );
-        assertEquals("SELECT userid FROM t", result);
+        assertEquals("SELECT DISTINCT userid FROM t", result);
     }
 
     public void testDecomposeGlobalDistinctToRawValuesMixed() {
         String result = PlanFragmenter.decomposeGlobalDistinctToRawValues(
             "SELECT SUM(a), COUNT(DISTINCT b), COUNT(*) FROM t"
         );
-        assertEquals("SELECT SUM(a), b, COUNT(*) FROM t", result);
+        assertEquals("SELECT DISTINCT SUM(a), b, COUNT(*) FROM t", result);
     }
 
     public void testDecomposeGlobalDistinctSkipsPartOfIdentifier() {
@@ -522,7 +525,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         String result = PlanFragmenter.decomposeDistinctToDedup(
             "SELECT region, COUNT(DISTINCT userid) FROM t GROUP BY region", agg
         );
-        assertEquals("SELECT region, userid FROM t GROUP BY region", result);
+        assertEquals("SELECT region, userid FROM t GROUP BY region, userid", result);
     }
 
     public void testExtractIsDistinct() {
