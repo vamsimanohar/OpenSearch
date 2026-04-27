@@ -16,20 +16,15 @@ import java.util.List;
  * Stages execute in order: stage 0 (leaf) runs first on all workers, its output
  * flows via the specified exchange to stage 1, and so on. The last stage runs on
  * the coordinator and produces the final result.
- * <p>
- * A plan with {@code singleNode=true} means the query cannot be distributed and
- * must execute on a single node. In this case, the fragment list is empty.
  *
  * @opensearch.internal
  */
 public final class SubPlan {
 
     private final List<PlanFragment> stages;
-    private final boolean singleNode;
 
-    private SubPlan(List<PlanFragment> stages, boolean singleNode) {
+    private SubPlan(List<PlanFragment> stages) {
         this.stages = stages;
-        this.singleNode = singleNode;
     }
 
     /**
@@ -41,36 +36,25 @@ public final class SubPlan {
         if (stages == null || stages.isEmpty()) {
             throw new IllegalArgumentException("Distributed plan requires at least one stage");
         }
-        return new SubPlan(List.copyOf(stages), false);
-    }
-
-    /**
-     * Creates a single-node plan indicating the query cannot be distributed.
-     */
-    public static SubPlan singleNode() {
-        return new SubPlan(List.of(), true);
+        return new SubPlan(List.copyOf(stages));
     }
 
     public List<PlanFragment> getStages() {
         return stages;
     }
 
-    public boolean isSingleNode() {
-        return singleNode;
-    }
-
     /**
-     * Returns the leaf (first) fragment, or null if single-node.
+     * Returns the leaf (first) fragment.
      */
     public PlanFragment getLeafStage() {
-        return singleNode ? null : stages.get(0);
+        return stages.get(0);
     }
 
     /**
-     * Returns the final (coordinator) fragment, or null if single-node.
+     * Returns the final (coordinator) fragment.
      */
     public PlanFragment getFinalStage() {
-        return singleNode ? null : stages.get(stages.size() - 1);
+        return stages.get(stages.size() - 1);
     }
 
     /**
@@ -82,9 +66,6 @@ public final class SubPlan {
 
     @Override
     public String toString() {
-        if (singleNode) {
-            return "SubPlan{SINGLE_NODE}";
-        }
         return "SubPlan{stages=" + stages.size() + ", " + stages + "}";
     }
 }

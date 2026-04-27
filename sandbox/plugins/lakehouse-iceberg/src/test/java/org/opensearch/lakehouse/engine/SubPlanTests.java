@@ -19,7 +19,6 @@ public class SubPlanTests extends OpenSearchTestCase {
         PlanFragment fin = PlanFragment.intermediate(1, "SELECT * FROM __exchange_input__", ExchangeType.NONE, null);
         SubPlan plan = SubPlan.distributed(List.of(leaf, fin));
 
-        assertFalse(plan.isSingleNode());
         assertEquals(2, plan.getStageCount());
         assertEquals(2, plan.getStages().size());
         assertSame(leaf, plan.getLeafStage());
@@ -32,19 +31,9 @@ public class SubPlanTests extends OpenSearchTestCase {
         PlanFragment fin = PlanFragment.intermediate(2, "SELECT * FROM __exchange_input__", ExchangeType.NONE, null);
         SubPlan plan = SubPlan.distributed(List.of(leaf, mid, fin));
 
-        assertFalse(plan.isSingleNode());
         assertEquals(3, plan.getStageCount());
         assertSame(leaf, plan.getLeafStage());
         assertSame(fin, plan.getFinalStage());
-    }
-
-    public void testSingleNodePlan() {
-        SubPlan plan = SubPlan.singleNode();
-        assertTrue(plan.isSingleNode());
-        assertEquals(0, plan.getStageCount());
-        assertTrue(plan.getStages().isEmpty());
-        assertNull(plan.getLeafStage());
-        assertNull(plan.getFinalStage());
     }
 
     public void testDistributedPlanRequiresNonEmptyStages() {
@@ -61,11 +50,6 @@ public class SubPlanTests extends OpenSearchTestCase {
         expectThrows(UnsupportedOperationException.class, () -> plan.getStages().add(
             PlanFragment.intermediate(1, "more sql", ExchangeType.NONE, null)
         ));
-    }
-
-    public void testToStringSingleNode() {
-        SubPlan plan = SubPlan.singleNode();
-        assertEquals("SubPlan{SINGLE_NODE}", plan.toString());
     }
 
     public void testToStringDistributed() {

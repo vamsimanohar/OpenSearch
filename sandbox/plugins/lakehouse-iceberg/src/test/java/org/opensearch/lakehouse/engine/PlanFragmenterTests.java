@@ -49,7 +49,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         RelNode scan = mockSimpleNode();
         SubPlan plan = PlanFragmenter.fragment(scan, "SELECT * FROM t");
 
-        assertFalse(plan.isSingleNode());
+
         assertEquals(2, plan.getStageCount());
 
         PlanFragment leaf = plan.getLeafStage();
@@ -67,7 +67,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
         SubPlan plan = PlanFragmenter.fragment(agg, "SELECT COUNT(*) FROM t");
 
-        assertFalse(plan.isSingleNode());
+
         assertEquals(2, plan.getStageCount());
         assertEquals(ExchangeType.GATHER, plan.getLeafStage().getOutputExchange());
         assertNull(plan.getLeafStage().getHashColumns());
@@ -77,7 +77,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
         SubPlan plan = PlanFragmenter.fragment(agg, "SELECT AVG(x) FROM t");
 
-        assertFalse(plan.isSingleNode());
+
         assertEquals(2, plan.getStageCount());
 
         String leafSql = plan.getLeafStage().getSql();
@@ -97,7 +97,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(sumCall, avgCall, countCall));
         SubPlan plan = PlanFragmenter.fragment(agg, "SELECT SUM(a), AVG(b), COUNT(*) FROM t");
 
-        assertFalse(plan.isSingleNode());
+
         String leafSql = plan.getLeafStage().getSql();
         assertTrue(leafSql.contains("SUM(CAST("));
         assertTrue(leafSql.contains("COUNT("));
@@ -109,7 +109,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(minCall, maxCall));
         SubPlan plan = PlanFragmenter.fragment(agg, "SELECT MIN(x), MAX(y) FROM t");
 
-        assertFalse(plan.isSingleNode());
+
         String coordSql = plan.getFinalStage().getSql();
         assertTrue(coordSql.contains("MIN("));
         assertTrue(coordSql.contains("MAX("));
@@ -119,7 +119,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         Sort sort = makeSort(true, true);
         SubPlan plan = PlanFragmenter.fragment(sort, "SELECT * FROM t ORDER BY col0 ASC LIMIT 10");
 
-        assertFalse(plan.isSingleNode());
+
         assertEquals(2, plan.getStageCount());
         assertEquals(ExchangeType.GATHER, plan.getLeafStage().getOutputExchange());
 
@@ -127,17 +127,17 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue(coordSql.contains("ORDER BY"));
     }
 
-    public void testSortWithoutLimitReturnsSingleNode() {
+    public void testSortWithoutLimitThrows() {
         Sort sort = makeSort(true, false);
-        SubPlan plan = PlanFragmenter.fragment(sort, "SELECT * FROM t ORDER BY col0");
-        assertTrue(plan.isSingleNode());
+        expectThrows(UnsupportedOperationException.class,
+            () -> PlanFragmenter.fragment(sort, "SELECT * FROM t ORDER BY col0"));
     }
 
     public void testGroupByNoLimitReturnsTwoPhaseGather() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
         SubPlan plan = PlanFragmenter.fragment(agg, "SELECT region, COUNT(*) FROM t GROUP BY region");
 
-        assertFalse(plan.isSingleNode());
+
         assertEquals(2, plan.getStageCount());
         assertEquals(ExchangeType.GATHER, plan.getLeafStage().getOutputExchange());
         assertNull(plan.getLeafStage().getHashColumns());
@@ -155,7 +155,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         SubPlan plan = PlanFragmenter.fragment(sort,
             "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY COUNT(*) DESC LIMIT 10");
 
-        assertFalse(plan.isSingleNode());
+
         assertEquals(3, plan.getStageCount());
 
         // Stage 0: leaf with HASH exchange on group keys
@@ -191,7 +191,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         SubPlan plan = PlanFragmenter.fragment(sort,
             "SELECT region, AVG(price), COUNT(*) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 5");
 
-        assertFalse(plan.isSingleNode());
+
         assertEquals(3, plan.getStageCount());
 
         // Leaf SQL should decompose AVG
@@ -205,29 +205,66 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue(midSql.contains("/ SUM("));
     }
 
-    public void testCountDistinctReturnsSingleNode() {
+    public void testGlobalCountDistinctDecomposes() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
-        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT COUNT(DISTINCT x) FROM t");
-        assertTrue(plan.isSingleNode());
+        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT COUNT(DISTINCT userid) FROM t");
+
+        assertEquals(2, plan.getStageCount());
+
+        String leafSql = plan.getLeafStage().getSql();
+        assertTrue(leafSql.contains("userid"));
+        assertFalse(leafSql.contains("COUNT(DISTINCT"));
+
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue(coordSql.contains("COUNT(DISTINCT"));
     }
 
-    public void testGroupByDistinctReturnsSingleNode() {
+    public void testGroupByDistinctSumThrows() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.SUM, true)));
-        SubPlan plan = PlanFragmenter.fragment(agg, "SELECT region, SUM(DISTINCT x) FROM t GROUP BY region");
-        assertTrue(plan.isSingleNode());
+        expectThrows(UnsupportedOperationException.class,
+            () -> PlanFragmenter.fragment(agg, "SELECT region, SUM(DISTINCT x) FROM t GROUP BY region"));
     }
 
-    public void testGroupByAvgNoLimitReturnsSingleNode() {
+    public void testGroupByCountDistinctWithLimitDecomposes() {
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countDistinctCall));
+        RelNode wrapper = mockNodeWithInput(agg);
+        Sort sort = makeSortWithInput(wrapper, true);
+
+        SubPlan plan = PlanFragmenter.fragment(sort,
+            "SELECT region, COUNT(DISTINCT userid) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 10");
+
+        assertEquals(3, plan.getStageCount());
+
+        String leafSql = plan.getLeafStage().getSql();
+        assertFalse(leafSql.contains("COUNT(DISTINCT"));
+        assertTrue(leafSql.contains("userid"));
+
+        String midSql = plan.getStages().get(1).getSql();
+        assertTrue(midSql.contains("COUNT(DISTINCT"));
+    }
+
+    public void testGroupByAvgNoLimitDecomposes() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.AVG, false)));
         SubPlan plan = PlanFragmenter.fragment(agg, "SELECT region, AVG(x) FROM t GROUP BY region");
-        assertTrue(plan.isSingleNode());
+
+        assertEquals(2, plan.getStageCount());
+
+        String leafSql = plan.getLeafStage().getSql();
+        assertTrue(leafSql.contains("SUM(CAST("));
+        assertTrue(leafSql.contains("COUNT("));
+        assertFalse(leafSql.contains("AVG("));
+
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue(coordSql.contains("CAST(SUM("));
+        assertTrue(coordSql.contains("/ SUM("));
     }
 
     public void testNestedAggregateDetected() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(makeAggCall(SqlStdOperatorTable.SUM, false)));
         RelNode project = mockNodeWithInput(agg);
         SubPlan plan = PlanFragmenter.fragment(project, "SELECT SUM(x) FROM t");
-        assertFalse(plan.isSingleNode());
+
         assertEquals(2, plan.getStageCount());
     }
 
@@ -235,7 +272,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         Sort sort = makeSort(true, true);
         RelNode project = mockNodeWithInput(sort);
         SubPlan plan = PlanFragmenter.fragment(project, "SELECT * FROM t ORDER BY col0 LIMIT 10");
-        assertFalse(plan.isSingleNode());
+
         assertEquals(2, plan.getStageCount());
     }
 
@@ -243,21 +280,21 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
 
     public void testBuildGlobalMergeCoordinatorSqlSumCount() {
         String sql = PlanFragmenter.buildGlobalMergeCoordinatorSql(
-            new SqlKind[] { SqlKind.SUM, SqlKind.COUNT }, false
+            new SqlKind[] { SqlKind.SUM, SqlKind.COUNT }, false, new boolean[] { false, false }
         );
         assertEquals("SELECT SUM(\"col_0\"), SUM(\"col_1\") FROM __exchange_input__", sql);
     }
 
     public void testBuildGlobalMergeCoordinatorSqlMinMax() {
         String sql = PlanFragmenter.buildGlobalMergeCoordinatorSql(
-            new SqlKind[] { SqlKind.MIN, SqlKind.MAX }, false
+            new SqlKind[] { SqlKind.MIN, SqlKind.MAX }, false, new boolean[] { false, false }
         );
         assertEquals("SELECT MIN(\"col_0\"), MAX(\"col_1\") FROM __exchange_input__", sql);
     }
 
     public void testBuildGlobalMergeCoordinatorSqlWithAvg() {
         String sql = PlanFragmenter.buildGlobalMergeCoordinatorSql(
-            new SqlKind[] { SqlKind.SUM, SqlKind.AVG }, true
+            new SqlKind[] { SqlKind.SUM, SqlKind.AVG }, true, new boolean[] { false, false }
         );
         // SUM takes col_0, AVG takes col_1 (SUM) and col_2 (COUNT)
         assertEquals(
@@ -266,19 +303,26 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         );
     }
 
+    public void testBuildGlobalMergeCoordinatorSqlWithCountDistinct() {
+        String sql = PlanFragmenter.buildGlobalMergeCoordinatorSql(
+            new SqlKind[] { SqlKind.COUNT }, false, new boolean[] { true }
+        );
+        assertEquals("SELECT COUNT(DISTINCT \"col_0\") FROM __exchange_input__", sql);
+    }
+
     public void testBuildGlobalMergeCoordinatorSqlNullKinds() {
-        String sql = PlanFragmenter.buildGlobalMergeCoordinatorSql(null, false);
+        String sql = PlanFragmenter.buildGlobalMergeCoordinatorSql(null, false, null);
         assertEquals("SELECT * FROM __exchange_input__", sql);
     }
 
     public void testBuildGlobalMergeCoordinatorSqlEmptyKinds() {
-        String sql = PlanFragmenter.buildGlobalMergeCoordinatorSql(new SqlKind[] {}, false);
+        String sql = PlanFragmenter.buildGlobalMergeCoordinatorSql(new SqlKind[] {}, false, new boolean[] {});
         assertEquals("SELECT * FROM __exchange_input__", sql);
     }
 
     public void testBuildTwoPhaseGroupByCoordinatorSql() {
         String sql = PlanFragmenter.buildTwoPhaseGroupByCoordinatorSql(
-            1, new SqlKind[] { SqlKind.COUNT, SqlKind.SUM }, null
+            1, new SqlKind[] { SqlKind.COUNT, SqlKind.SUM }, null, false, new boolean[] { false, false }
         );
         assertEquals(
             "SELECT \"col_0\", SUM(\"col_1\"), SUM(\"col_2\") FROM __exchange_input__ GROUP BY \"col_0\"",
@@ -289,14 +333,14 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
     public void testBuildTwoPhaseGroupByCoordinatorSqlWithSort() {
         Sort sort = makeSort(true, false);
         String sql = PlanFragmenter.buildTwoPhaseGroupByCoordinatorSql(
-            1, new SqlKind[] { SqlKind.COUNT }, sort
+            1, new SqlKind[] { SqlKind.COUNT }, sort, false, new boolean[] { false }
         );
         assertTrue(sql.contains("ORDER BY 1 ASC"));
     }
 
     public void testBuildTwoPhaseGroupByCoordinatorSqlMinMax() {
         String sql = PlanFragmenter.buildTwoPhaseGroupByCoordinatorSql(
-            2, new SqlKind[] { SqlKind.MIN, SqlKind.MAX }, null
+            2, new SqlKind[] { SqlKind.MIN, SqlKind.MAX }, null, false, new boolean[] { false, false }
         );
         assertEquals(
             "SELECT \"col_0\", \"col_1\", MIN(\"col_2\"), MAX(\"col_3\") FROM __exchange_input__ GROUP BY \"col_0\", \"col_1\"",
@@ -304,10 +348,30 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         );
     }
 
+    public void testBuildTwoPhaseGroupByCoordinatorSqlWithCountDistinct() {
+        String sql = PlanFragmenter.buildTwoPhaseGroupByCoordinatorSql(
+            1, new SqlKind[] { SqlKind.COUNT, SqlKind.COUNT }, null, false, new boolean[] { false, true }
+        );
+        assertEquals(
+            "SELECT \"col_0\", SUM(\"col_1\"), COUNT(DISTINCT \"col_2\") FROM __exchange_input__ GROUP BY \"col_0\"",
+            sql
+        );
+    }
+
+    public void testBuildTwoPhaseGroupByCoordinatorSqlWithAvgAndCountDistinct() {
+        String sql = PlanFragmenter.buildTwoPhaseGroupByCoordinatorSql(
+            1, new SqlKind[] { SqlKind.AVG, SqlKind.COUNT }, null, true, new boolean[] { false, true }
+        );
+        assertEquals(
+            "SELECT \"col_0\", CAST(SUM(\"col_1\") AS DOUBLE) / SUM(\"col_2\"), COUNT(DISTINCT \"col_3\") FROM __exchange_input__ GROUP BY \"col_0\"",
+            sql
+        );
+    }
+
     public void testBuildIntermediateGroupBySql() {
         Sort sort = makeSortWithLimit(10);
         String sql = PlanFragmenter.buildIntermediateGroupBySql(
-            1, new SqlKind[] { SqlKind.COUNT, SqlKind.SUM }, sort, false
+            1, new SqlKind[] { SqlKind.COUNT, SqlKind.SUM }, sort, false, new boolean[] { false, false }
         );
         assertTrue(sql.contains("\"col_0\""));
         assertTrue(sql.contains("SUM(\"col_1\")"));
@@ -320,7 +384,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
     public void testBuildIntermediateGroupBySqlWithAvg() {
         Sort sort = makeSortWithLimit(5);
         String sql = PlanFragmenter.buildIntermediateGroupBySql(
-            1, new SqlKind[] { SqlKind.AVG, SqlKind.COUNT }, sort, true
+            1, new SqlKind[] { SqlKind.AVG, SqlKind.COUNT }, sort, true, new boolean[] { false, false }
         );
         // AVG takes 2 worker cols (SUM+COUNT)
         assertTrue(sql.contains("CAST(SUM(\"col_1\") AS DOUBLE) / SUM(\"col_2\")"));
@@ -329,21 +393,67 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue(sql.contains("LIMIT 5"));
     }
 
+    public void testBuildIntermediateGroupBySqlWithCountDistinct() {
+        Sort sort = makeSortWithLimit(10);
+        String sql = PlanFragmenter.buildIntermediateGroupBySql(
+            1, new SqlKind[] { SqlKind.COUNT, SqlKind.COUNT }, sort, false, new boolean[] { false, true }
+        );
+        assertTrue(sql.contains("SUM(\"col_1\")"));
+        assertTrue(sql.contains("COUNT(DISTINCT \"col_2\")"));
+        assertTrue(sql.contains("LIMIT 10"));
+    }
+
     public void testBuildTopKCoordinatorSql() {
-        String sql = PlanFragmenter.buildTopKCoordinatorSql(new int[] { 2 }, new boolean[] { false }, 20);
+        String sql = PlanFragmenter.buildTopKCoordinatorSql(new int[] { 2 }, new boolean[] { false }, 20, 0);
         assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col_2\" DESC LIMIT 20", sql);
     }
 
     public void testBuildTopKCoordinatorSqlMultipleSortColumns() {
         String sql = PlanFragmenter.buildTopKCoordinatorSql(
-            new int[] { 0, 3 }, new boolean[] { true, false }, 50
+            new int[] { 0, 3 }, new boolean[] { true, false }, 50, 0
         );
         assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col_0\" ASC, \"col_3\" DESC LIMIT 50", sql);
     }
 
     public void testBuildTopKCoordinatorSqlNoLimit() {
-        String sql = PlanFragmenter.buildTopKCoordinatorSql(new int[] { 1 }, new boolean[] { true }, 0);
+        String sql = PlanFragmenter.buildTopKCoordinatorSql(new int[] { 1 }, new boolean[] { true }, 0, 0);
         assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col_1\" ASC", sql);
+    }
+
+    public void testBuildTopKCoordinatorSqlWithExtraColumns() {
+        // Sort column 1 >= outputColumnCount=1 → needs subquery stripping
+        String sql = PlanFragmenter.buildTopKCoordinatorSql(
+            new int[] { 1 }, new boolean[] { true }, 10, 1
+        );
+        assertEquals(
+            "SELECT \"col_0\" FROM (SELECT * FROM __exchange_input__ ORDER BY \"col_1\" ASC LIMIT 10)",
+            sql
+        );
+    }
+
+    public void testBuildTopKCoordinatorSqlAllColumnsInOutput() {
+        // Sort column 1 < outputColumnCount=3 → no stripping
+        String sql = PlanFragmenter.buildTopKCoordinatorSql(
+            new int[] { 1 }, new boolean[] { true }, 10, 3
+        );
+        assertEquals("SELECT * FROM __exchange_input__ ORDER BY \"col_1\" ASC LIMIT 10", sql);
+    }
+
+    public void testAddColumnsToSelectSingleColumn() {
+        String sql = "SELECT \"a\" FROM \"t\" ORDER BY \"b\" LIMIT 10";
+        String result = PlanFragmenter.addColumnsToSelect(sql, List.of("b"));
+        assertEquals("SELECT \"a\", \"b\" FROM \"t\" ORDER BY \"b\" LIMIT 10", result);
+    }
+
+    public void testAddColumnsToSelectMultiLine() {
+        String sql = "SELECT \"a\"\nFROM \"t\"\nORDER BY \"b\"\nLIMIT 10";
+        String result = PlanFragmenter.addColumnsToSelect(sql, List.of("b"));
+        assertEquals("SELECT \"a\", \"b\"\nFROM \"t\"\nORDER BY \"b\"\nLIMIT 10", result);
+    }
+
+    public void testAddColumnsToSelectNoFromReturnsOriginal() {
+        String sql = "INVALID SQL WITHOUT FROM";
+        assertEquals(sql, PlanFragmenter.addColumnsToSelect(sql, List.of("col")));
     }
 
     // ==== SQL rewriting tests ====
@@ -386,6 +496,43 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
     public void testStripNoClause() {
         String sql = "SELECT a, COUNT(*) FROM t GROUP BY a";
         assertEquals(sql, PlanFragmenter.stripOrderByLimitOffset(sql));
+    }
+
+    public void testDecomposeGlobalDistinctToRawValues() {
+        String result = PlanFragmenter.decomposeGlobalDistinctToRawValues(
+            "SELECT COUNT(DISTINCT userid) FROM t"
+        );
+        assertEquals("SELECT userid FROM t", result);
+    }
+
+    public void testDecomposeGlobalDistinctToRawValuesMixed() {
+        String result = PlanFragmenter.decomposeGlobalDistinctToRawValues(
+            "SELECT SUM(a), COUNT(DISTINCT b), COUNT(*) FROM t"
+        );
+        assertEquals("SELECT SUM(a), b, COUNT(*) FROM t", result);
+    }
+
+    public void testDecomposeGlobalDistinctSkipsPartOfIdentifier() {
+        String sql = "SELECT XCOUNT(DISTINCT x) FROM t";
+        assertEquals(sql, PlanFragmenter.decomposeGlobalDistinctToRawValues(sql));
+    }
+
+    public void testDecomposeDistinctToDedupGroupBy() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, true)));
+        String result = PlanFragmenter.decomposeDistinctToDedup(
+            "SELECT region, COUNT(DISTINCT userid) FROM t GROUP BY region", agg
+        );
+        assertEquals("SELECT region, userid FROM t GROUP BY region", result);
+    }
+
+    public void testExtractIsDistinct() {
+        AggregateCall regular = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall distinct = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(), List.of(regular, distinct));
+        boolean[] result = PlanFragmenter.extractIsDistinct(agg);
+        assertEquals(2, result.length);
+        assertFalse(result[0]);
+        assertTrue(result[1]);
     }
 
     // ==== RelNode extraction tests ====
