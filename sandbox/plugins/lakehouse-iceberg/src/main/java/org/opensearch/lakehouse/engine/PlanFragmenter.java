@@ -73,12 +73,29 @@ public final class PlanFragmenter {
     private static SubPlan fragmentAggregate(PlanVisitor visitor, String sql, RelNode relNode) {
         Aggregate aggregate = visitor.aggregate;
 
+        boolean hasNonCountDistinct = false;
+        boolean hasCountDistinct = false;
+        boolean hasNonDistinctAgg = false;
         for (AggregateCall call : aggregate.getAggCallList()) {
-            if (call.isDistinct() && call.getAggregation().getKind() != SqlKind.COUNT) {
-                throw new UnsupportedOperationException(
-                    "DISTINCT aggregates other than COUNT are not distributable — only COUNT(DISTINCT) is supported"
-                );
+            if (call.isDistinct()) {
+                if (call.getAggregation().getKind() != SqlKind.COUNT) {
+                    hasNonCountDistinct = true;
+                } else {
+                    hasCountDistinct = true;
+                }
+            } else {
+                hasNonDistinctAgg = true;
             }
+        }
+        if (hasNonCountDistinct) {
+            throw new UnsupportedOperationException(
+                "DISTINCT aggregates other than COUNT are not distributable — only COUNT(DISTINCT) is supported"
+            );
+        }
+        if (hasCountDistinct && hasNonDistinctAgg) {
+            throw new UnsupportedOperationException(
+                "Mixed COUNT(DISTINCT) with other aggregates is not yet distributable — needs separate decomposition paths"
+            );
         }
 
         boolean hasGroupBy = !aggregate.getGroupSet().isEmpty();

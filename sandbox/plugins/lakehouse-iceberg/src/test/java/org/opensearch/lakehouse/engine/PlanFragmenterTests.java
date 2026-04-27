@@ -226,6 +226,15 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             () -> PlanFragmenter.fragment(agg, "SELECT region, SUM(DISTINCT x) FROM t GROUP BY region"));
     }
 
+    public void testMixedCountDistinctWithOtherAggsThrows() {
+        AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(sumCall, countDistinctCall));
+        expectThrows(UnsupportedOperationException.class,
+            () -> PlanFragmenter.fragment(agg,
+                "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region"));
+    }
+
     public void testGroupByCountDistinctWithLimitDecomposes() {
         AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countDistinctCall));
