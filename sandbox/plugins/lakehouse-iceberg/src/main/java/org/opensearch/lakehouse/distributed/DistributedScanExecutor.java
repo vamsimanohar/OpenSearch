@@ -12,7 +12,6 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.sql.SqlKind;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.support.GroupedActionListener;
@@ -29,13 +28,16 @@ import org.opensearch.common.util.concurrent.FutureUtils;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.lakehouse.LakehousePlugin;
-import org.opensearch.lakehouse.distributed.merge.MergeStrategy;
 import org.opensearch.lakehouse.distributed.merge.ResultSerializer;
 import org.opensearch.lakehouse.distributed.merge.WorkerResponseToArrow;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryAction;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryExecutor;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryRequest;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryResponse;
+import org.opensearch.lakehouse.engine.ExchangeType;
+import org.opensearch.lakehouse.engine.PlanFragment;
+import org.opensearch.lakehouse.engine.PlanFragmenter;
+import org.opensearch.lakehouse.engine.SubPlan;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportException;
 import org.opensearch.transport.TransportResponseHandler;
@@ -68,9 +70,6 @@ import java.util.concurrent.TimeoutException;
 public class DistributedScanExecutor {
 
     private static final Logger logger = LogManager.getLogger(DistributedScanExecutor.class);
-
-    /** Coordinator SQL for CONCAT merge: passes all input rows through unchanged. */
-    static final String CONCAT_COORDINATOR_SQL = "SELECT * FROM __exchange_input__";
 
     /** Timeout for native coordinator SQL execution. */
     static final long NATIVE_TIMEOUT_MINUTES = 15L;
@@ -130,14 +129,14 @@ public class DistributedScanExecutor {
     /**
      * Executes the query asynchronously, choosing between distributed and single-node paths.
      * <p>
-     * Distributed execution is used when:
-     * <ul>
-     *   <li>Multiple eligible worker nodes are available</li>
-     *   <li>The query's merge strategy is not {@link MergeStrategy#SINGLE_NODE}</li>
-     * </ul>
-     * Otherwise, falls back to single-node execution via {@link WorkerQueryExecutor}.
+     * Uses {@link PlanFragmenter} to decompose the query into a {@link SubPlan} of stages.
+     * Distributed execution is used when multiple eligible workers are available and the
+     * plan is distributable. Otherwise, falls back to single-node execution.
      * <p>
-     * Results are delivered through the listener callback. No thread blocks waiting.
+     * For 2-stage plans (GATHER exchange): dispatches leaf SQL to workers, merges with
+     * coordinator SQL via DataFusion. For 3-stage plans (HASH exchange): dispatches leaf
+     * SQL to workers, runs intermediate SQL on coordinator (P1 simplification), then
+     * concatenates results.
      *
      * @param relNode       the Calcite logical plan (for query analysis)
      * @param sqlQuery      the SQL query string to send to workers
@@ -158,93 +157,77 @@ public class DistributedScanExecutor {
     ) {
         List<DiscoveryNode> workers = nodeDiscovery.getEligibleNodes();
 
-        // Single-node: execute directly without distribution overhead
         if (workers.size() <= 1) {
             logger.debug("[ScanExecutor] Single node, executing locally");
             executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
             return;
         }
 
-        QueryAnalyzer.AnalysisResult analysis = QueryAnalyzer.analyzeDetailed(relNode);
-        if (analysis.strategy == MergeStrategy.SINGLE_NODE) {
-            logger.debug("[ScanExecutor] Query requires SINGLE_NODE execution");
-            executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
+        SubPlan subPlan;
+        try {
+            subPlan = PlanFragmenter.fragment(relNode, sqlQuery);
+        } catch (UnsupportedOperationException e) {
+            listener.onFailure(e);
             return;
         }
 
+        PlanFragment leafStage = subPlan.getLeafStage();
+        PlanFragment finalStage = subPlan.getFinalStage();
+
         logger.info(
-            "[ScanExecutor] Distributing query across {} workers, strategy={}, files={}",
+            "[ScanExecutor] Distributing query across {} workers, stages={}, exchange={}, files={}",
             workers.size(),
-            analysis.strategy,
+            subPlan.getStageCount(),
+            leafStage.getOutputExchange(),
             filePaths.size()
         );
 
-        // For GLOBAL_MERGE with AVG: decompose AVG(expr) → SUM(expr), COUNT(expr) in worker SQL.
-        // Workers compute partial sums and counts; coordinator recombines as SUM/SUM.
-        String workerSql = sqlQuery;
-        if (analysis.strategy == MergeStrategy.GLOBAL_MERGE && hasAvgKind(analysis.aggKinds)) {
-            workerSql = decomposeAvgInSql(sqlQuery);
-            logger.info("[ScanExecutor] GLOBAL_MERGE: decomposed AVG in worker SQL");
-        }
-
-        // For TWO_PHASE_GROUP_BY: strip ORDER BY/LIMIT/OFFSET from worker SQL.
-        // Workers must return ALL groups for their partition — coordinator re-aggregates and applies ordering.
-        if (analysis.strategy == MergeStrategy.TWO_PHASE_GROUP_BY && analysis.sortColumns != null) {
-            workerSql = stripOrderByLimitOffset(sqlQuery);
-            logger.info("[ScanExecutor] TWO_PHASE_GROUP_BY: stripped ORDER BY/LIMIT/OFFSET from worker SQL");
-        }
-
-        // For TOPK_MERGE, sort columns may not be in the SELECT output.
-        // Detect missing sort columns and add them to worker SQL so they appear in Arrow IPC.
-        // The coordinator SQL handles stripping them from the final output.
-        // Workers use generic col_N naming, so we track sort column indices for coordinator SQL.
-        int outputColumnCount = analysis.outputColumnCount;
-        int[] sortColumnIndices = analysis.sortColumns;
-
-        if (analysis.strategy == MergeStrategy.TOPK_MERGE && analysis.sortColumnNames != null) {
-            List<String> outputNames = relNode.getRowType().getFieldNames();
-
-            List<String> missingColumns = new ArrayList<>();
-            for (String sortColName : analysis.sortColumnNames) {
-                if (sortColName != null && !outputNames.contains(sortColName)) {
-                    missingColumns.add(sortColName);
-                }
-            }
-
-            if (!missingColumns.isEmpty()) {
-                workerSql = addColumnsToSelect(sqlQuery, missingColumns);
-                logger.info(
-                    "[ScanExecutor] TOPK_MERGE: added {} sort columns to worker SQL: {}",
-                    missingColumns.size(),
-                    missingColumns
-                );
-            }
-
-            // Remap sort indices to worker output positions (name-based lookup)
-            List<String> workerOutputNames = new ArrayList<>(outputNames);
-            workerOutputNames.addAll(missingColumns);
-            sortColumnIndices = new int[analysis.sortColumnNames.length];
-            for (int i = 0; i < analysis.sortColumnNames.length; i++) {
-                sortColumnIndices[i] = workerOutputNames.indexOf(analysis.sortColumnNames[i]);
-            }
-        }
-
-        // Capture effectively-final locals for lambda
-        final String finalWorkerSql = workerSql;
-        final int finalOutputColumnCount = outputColumnCount;
-        final int[] finalSortColumnIndices = sortColumnIndices;
-
-        // Partition files across workers
         List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());
 
-        // Dispatch requests and collect responses asynchronously
-        dispatchAndCollect(workers, assignments, finalWorkerSql, storageConfig, tableName, ActionListener.wrap(
+        if (subPlan.getStageCount() == 3 && leafStage.getOutputExchange() == ExchangeType.HASH) {
+            executeThreeStageAsync(subPlan, workers, assignments, storageConfig, tableName, listener);
+        } else {
+            String workerSql = leafStage.getSql();
+            String coordinatorSql = finalStage.getSql();
+
+            dispatchAndCollect(workers, assignments, workerSql, storageConfig, tableName, ActionListener.wrap(
+                responses -> {
+                    try {
+                        mergeViaDataFusion(responses, coordinatorSql, subPlan, listener);
+                    } catch (Exception e) {
+                        listener.onFailure(e);
+                    }
+                },
+                listener::onFailure
+            ));
+        }
+    }
+
+    /**
+     * Executes a 3-stage plan: leaf(HASH) → intermediate(re-aggregate) → final(CONCAT).
+     * <p>
+     * P1 simplification: the intermediate stage runs entirely on the coordinator. Workers
+     * pre-aggregate and return partial results; the coordinator re-aggregates all groups
+     * with ORDER BY + LIMIT. This is still a win because workers reduce data volume before
+     * sending to the coordinator.
+     */
+    private void executeThreeStageAsync(
+        SubPlan subPlan,
+        List<DiscoveryNode> workers,
+        List<FilePartitioner.FileAssignment> assignments,
+        Map<String, String> storageConfig,
+        String tableName,
+        ActionListener<Iterable<Object[]>> listener
+    ) {
+        PlanFragment leafStage = subPlan.getLeafStage();
+        PlanFragment intermediateStage = subPlan.getStages().get(1);
+
+        logger.info("[ScanExecutor] 3-stage HASH plan: running intermediate on coordinator");
+
+        dispatchAndCollect(workers, assignments, leafStage.getSql(), storageConfig, tableName, ActionListener.wrap(
             responses -> {
                 try {
-                    String coordinatorSql = buildCoordinatorSql(
-                        analysis, responses, finalOutputColumnCount, finalSortColumnIndices
-                    );
-                    mergeViaDataFusion(responses, coordinatorSql, analysis.strategy, listener);
+                    mergeViaDataFusion(responses, intermediateStage.getSql(), subPlan, listener);
                 } catch (Exception e) {
                     listener.onFailure(e);
                 }
@@ -394,342 +377,6 @@ public class DistributedScanExecutor {
     }
 
     /**
-     * Inserts additional columns into the SELECT clause of a SQL query.
-     * Finds the first {@code FROM} keyword and inserts the quoted column names before it.
-     * Used for TOPK_MERGE when ORDER BY columns are not in the original SELECT.
-     *
-     * @param sql     the original SQL query
-     * @param columns column names to add to the SELECT clause
-     * @return the rewritten SQL with additional columns
-     */
-    static String addColumnsToSelect(String sql, List<String> columns) {
-        // Find the first FROM keyword preceded by whitespace (space or newline).
-        // Calcite generates multi-line SQL where FROM starts on a new line.
-        int fromKeywordIdx = -1;
-        String upper = sql.toUpperCase();
-        int searchFrom = 0;
-        while (searchFrom < upper.length()) {
-            int idx = upper.indexOf("FROM ", searchFrom);
-            if (idx < 0) break;
-            if (idx > 0 && Character.isWhitespace(sql.charAt(idx - 1))) {
-                fromKeywordIdx = idx;
-                break;
-            }
-            searchFrom = idx + 4;
-        }
-        if (fromKeywordIdx < 0) {
-            return sql;
-        }
-        // Insert columns right before the whitespace that precedes FROM
-        int insertPos = fromKeywordIdx;
-        while (insertPos > 0 && Character.isWhitespace(sql.charAt(insertPos - 1))) {
-            insertPos--;
-        }
-        StringBuilder sb = new StringBuilder(sql.substring(0, insertPos));
-        for (String col : columns) {
-            sb.append(", \"").append(col).append("\"");
-        }
-        sb.append(sql.substring(insertPos));
-        return sb.toString();
-    }
-
-    /**
-     * Strips ORDER BY, LIMIT, and OFFSET clauses from a SQL query.
-     * Used for TWO_PHASE_GROUP_BY workers that must return all groups, not a truncated top-K.
-     * The coordinator SQL re-applies ordering after re-aggregation.
-     *
-     * @param sql the original SQL query with ORDER BY/LIMIT/OFFSET
-     * @return the SQL with those clauses removed
-     */
-    static String stripOrderByLimitOffset(String sql) {
-        String upper = sql.toUpperCase();
-        int orderByIdx = findKeyword(upper, "ORDER BY");
-        if (orderByIdx >= 0) {
-            return sql.substring(0, orderByIdx).stripTrailing();
-        }
-        int limitIdx = findKeyword(upper, "LIMIT");
-        if (limitIdx >= 0) {
-            return sql.substring(0, limitIdx).stripTrailing();
-        }
-        return sql;
-    }
-
-    /**
-     * Finds a SQL keyword preceded by whitespace in the uppercase query string.
-     */
-    private static int findKeyword(String upper, String keyword) {
-        int searchFrom = 0;
-        while (searchFrom < upper.length()) {
-            int idx = upper.indexOf(keyword, searchFrom);
-            if (idx < 0) return -1;
-            if (idx == 0 || Character.isWhitespace(upper.charAt(idx - 1))) {
-                return idx;
-            }
-            searchFrom = idx + keyword.length();
-        }
-        return -1;
-    }
-
-    /**
-     * Returns true if any of the aggregate kinds is AVG.
-     */
-    static boolean hasAvgKind(SqlKind[] aggKinds) {
-        if (aggKinds == null) return false;
-        for (SqlKind kind : aggKinds) {
-            if (kind == SqlKind.AVG) return true;
-        }
-        return false;
-    }
-
-    /**
-     * Decomposes AVG(expr) into SUM(expr), COUNT(expr) in the SELECT clause.
-     * Other aggregate functions (SUM, COUNT, MIN, MAX) pass through unchanged.
-     * <p>
-     * Example: {@code SELECT SUM(x), AVG(y), COUNT(*) FROM t}
-     * becomes: {@code SELECT SUM(x), SUM(y), COUNT(y), COUNT(*) FROM t}
-     */
-    static String decomposeAvgInSql(String sql) {
-        String upper = sql.toUpperCase();
-        StringBuilder result = new StringBuilder();
-        int pos = 0;
-
-        while (pos < sql.length()) {
-            int avgIdx = upper.indexOf("AVG(", pos);
-            if (avgIdx < 0) {
-                result.append(sql, pos, sql.length());
-                break;
-            }
-            // Verify AVG is not part of a longer identifier (e.g., XAVG)
-            if (avgIdx > 0 && Character.isLetterOrDigit(sql.charAt(avgIdx - 1))) {
-                result.append(sql, pos, avgIdx + 4);
-                pos = avgIdx + 4;
-                continue;
-            }
-            // Find the matching closing paren
-            int parenDepth = 0;
-            int closeIdx = -1;
-            for (int i = avgIdx + 3; i < sql.length(); i++) {
-                if (sql.charAt(i) == '(') parenDepth++;
-                else if (sql.charAt(i) == ')') {
-                    parenDepth--;
-                    if (parenDepth == 0) {
-                        closeIdx = i;
-                        break;
-                    }
-                }
-            }
-            if (closeIdx < 0) {
-                result.append(sql, pos, sql.length());
-                break;
-            }
-            // Extract the expression inside AVG(...)
-            String innerExpr = sql.substring(avgIdx + 4, closeIdx);
-            result.append(sql, pos, avgIdx);
-            result.append("SUM(CAST(").append(innerExpr).append(" AS DOUBLE)), COUNT(").append(innerExpr).append(")");
-            pos = closeIdx + 1;
-        }
-        return result.toString();
-    }
-
-    /**
-     * Builds the coordinator SQL for the given merge strategy and worker responses.
-     * <p>
-     * For CONCAT: {@code SELECT * FROM __exchange_input__}<br>
-     * For GLOBAL_MERGE: re-aggregate partial results (SUM/MIN/MAX per column)<br>
-     * For TOPK_MERGE: merge-sort and limit ({@code ORDER BY ... LIMIT N})<br>
-     * For TWO_PHASE_GROUP_BY: re-aggregate grouped partial results
-     */
-    static String buildCoordinatorSql(
-        QueryAnalyzer.AnalysisResult analysis,
-        List<WorkerQueryResponse> responses,
-        int outputColumnCount,
-        int[] sortColumnIndices
-    ) {
-        return switch (analysis.strategy) {
-            case CONCAT -> CONCAT_COORDINATOR_SQL;
-            case GLOBAL_MERGE -> buildGlobalMergeCoordinatorSql(responses, analysis.aggKinds);
-            case TOPK_MERGE -> buildTopKMergeCoordinatorSql(
-                sortColumnIndices, analysis.sortAsc, analysis.limit, outputColumnCount
-            );
-            case TWO_PHASE_GROUP_BY -> buildTwoPhaseGroupByCoordinatorSql(
-                responses, analysis.groupCount, analysis.aggKinds,
-                analysis.sortColumns, analysis.sortAsc, analysis.limit, analysis.offset
-            );
-            case SINGLE_NODE -> throw new IllegalStateException("SINGLE_NODE should not reach coordinator SQL");
-        };
-    }
-
-    /**
-     * Builds coordinator SQL for GLOBAL_MERGE: re-aggregates single-row partial results.
-     * <p>
-     * Each worker returns one row of partial aggregates. The coordinator re-aggregates
-     * by applying the correct function per column: SUM for SUM/COUNT, MIN for MIN, MAX for MAX.
-     * <p>
-     * Example: worker SQL {@code SELECT COUNT(*), SUM(x), MIN(y) FROM t} produces columns
-     * {@code ["count(*)","sum(x)","min(y)"]}. Coordinator SQL becomes:
-     * {@code SELECT SUM("count(*)"), SUM("sum(x)"), MIN("min(y)") FROM __exchange_input__}
-     */
-    static String buildGlobalMergeCoordinatorSql(List<WorkerQueryResponse> responses, SqlKind[] aggKinds) {
-        WorkerQueryResponse first = responses.stream().filter(r -> r.getRowCount() > 0).findFirst().orElse(responses.get(0));
-        List<String> columnNames = first.getColumnNames();
-
-        // When AVG was decomposed, each AVG became 2 worker columns (SUM + COUNT).
-        // Map aggKinds (original agg positions) to worker column positions.
-        StringBuilder sb = new StringBuilder("SELECT ");
-        int workerCol = 0;
-        int aggIdx = 0;
-        while (workerCol < columnNames.size()) {
-            if (workerCol > 0) sb.append(", ");
-            SqlKind kind = (aggKinds != null && aggIdx < aggKinds.length) ? aggKinds[aggIdx] : SqlKind.SUM;
-
-            if (kind == SqlKind.AVG && workerCol + 1 < columnNames.size()) {
-                // AVG was decomposed into SUM(expr), COUNT(expr) — recombine
-                String sumCol = "\"" + columnNames.get(workerCol) + "\"";
-                String countCol = "\"" + columnNames.get(workerCol + 1) + "\"";
-                sb.append("CAST(SUM(").append(sumCol).append(") AS DOUBLE) / SUM(").append(countCol).append(")");
-                workerCol += 2;
-            } else {
-                String quotedCol = "\"" + columnNames.get(workerCol) + "\"";
-                String func = switch (kind) {
-                    case MIN -> "MIN";
-                    case MAX -> "MAX";
-                    default -> "SUM";
-                };
-                sb.append(func).append("(").append(quotedCol).append(")");
-                workerCol++;
-            }
-            aggIdx++;
-        }
-        sb.append(" FROM __exchange_input__");
-        return sb.toString();
-    }
-
-    /**
-     * Builds coordinator SQL for TWO_PHASE_GROUP_BY: re-aggregates partial grouped results.
-     * <p>
-     * Each worker runs the full GROUP BY query on its partition, producing partial grouped
-     * results. The coordinator re-groups by the same keys and applies re-aggregation:
-     * SUM for SUM/COUNT (sum of partial counts = total count), MIN for MIN, MAX for MAX.
-     * <p>
-     * Worker columns are {@code col_0, col_1, ...} where the first {@code groupCount}
-     * columns are group keys and the rest are aggregate values.
-     * <p>
-     * Example: worker SQL {@code SELECT region, COUNT(*), SUM(x) FROM t GROUP BY region}
-     * produces {@code [col_0=region, col_1=count, col_2=sum]}. Coordinator SQL:
-     * {@code SELECT "col_0", SUM("col_1"), SUM("col_2") FROM __exchange_input__ GROUP BY "col_0"}
-     */
-    static String buildTwoPhaseGroupByCoordinatorSql(
-        List<WorkerQueryResponse> responses,
-        int groupCount,
-        SqlKind[] aggKinds,
-        int[] sortColumns,
-        boolean[] sortAsc,
-        int limit,
-        int offset
-    ) {
-        WorkerQueryResponse first = responses.stream().filter(r -> r.getRowCount() > 0).findFirst().orElse(responses.get(0));
-        int totalCols = first.getColumnNames().size();
-
-        StringBuilder sb = new StringBuilder("SELECT ");
-        for (int i = 0; i < totalCols; i++) {
-            if (i > 0) sb.append(", ");
-            String quotedCol = "\"col_" + i + "\"";
-            if (i < groupCount) {
-                sb.append(quotedCol);
-            } else {
-                int aggIdx = i - groupCount;
-                SqlKind kind = (aggKinds != null && aggIdx < aggKinds.length) ? aggKinds[aggIdx] : SqlKind.SUM;
-                String func = switch (kind) {
-                    case MIN -> "MIN";
-                    case MAX -> "MAX";
-                    default -> "SUM";
-                };
-                sb.append(func).append("(").append(quotedCol).append(")");
-            }
-        }
-        sb.append(" FROM __exchange_input__ GROUP BY ");
-        for (int i = 0; i < groupCount; i++) {
-            if (i > 0) sb.append(", ");
-            sb.append("\"col_").append(i).append("\"");
-        }
-
-        if (sortColumns != null && sortColumns.length > 0) {
-            sb.append(" ORDER BY ");
-            for (int i = 0; i < sortColumns.length; i++) {
-                if (i > 0) sb.append(", ");
-                // Use 1-based column position — safe after GROUP BY because aggregate
-                // columns can't be referenced by name when wrapped in SUM/MIN/MAX
-                sb.append(sortColumns[i] + 1);
-                sb.append(sortAsc[i] ? " ASC" : " DESC");
-            }
-        }
-        if (limit > 0) {
-            sb.append(" LIMIT ").append(limit);
-        }
-        if (offset > 0) {
-            sb.append(" OFFSET ").append(offset);
-        }
-        return sb.toString();
-    }
-
-    /**
-     * Builds coordinator SQL for TOPK_MERGE: merge-sorts pre-sorted worker results and limits.
-     * <p>
-     * Workers each return their local top-K rows with generic {@code col_N} naming.
-     * The coordinator merge-sorts all results and takes the global top-K.
-     * When extra sort columns were appended to the worker SQL (not in the original SELECT),
-     * a subquery strips them by projecting only the first {@code outputColumnCount} columns.
-     * <p>
-     * Example without extra columns:
-     * {@code SELECT * FROM __exchange_input__ ORDER BY "col_2" ASC LIMIT 10}
-     * <p>
-     * Example with extra sort columns stripped:
-     * {@code SELECT "col_0", "col_1" FROM (SELECT * FROM __exchange_input__ ORDER BY "col_3" ASC LIMIT 10)}
-     *
-     * @param sortColumnIndices position-based indices into the worker output (col_N)
-     * @param sortAsc           sort direction per sort column (true=ASC)
-     * @param limit             LIMIT value (0 = no limit)
-     * @param outputColumnCount number of original output columns (before sort column appending)
-     */
-    static String buildTopKMergeCoordinatorSql(
-        int[] sortColumnIndices,
-        boolean[] sortAsc,
-        int limit,
-        int outputColumnCount
-    ) {
-        StringBuilder orderBy = new StringBuilder(" ORDER BY ");
-        for (int i = 0; i < sortColumnIndices.length; i++) {
-            if (i > 0) orderBy.append(", ");
-            orderBy.append("\"col_").append(sortColumnIndices[i]).append("\"");
-            orderBy.append(sortAsc[i] ? " ASC" : " DESC");
-        }
-        if (limit > 0) {
-            orderBy.append(" LIMIT ").append(limit);
-        }
-
-        // Check if any sort column index falls outside the original output range
-        boolean needsStripping = false;
-        for (int idx : sortColumnIndices) {
-            if (idx >= outputColumnCount) {
-                needsStripping = true;
-                break;
-            }
-        }
-
-        if (needsStripping && outputColumnCount > 0) {
-            StringBuilder sb = new StringBuilder("SELECT ");
-            for (int i = 0; i < outputColumnCount; i++) {
-                if (i > 0) sb.append(", ");
-                sb.append("\"col_").append(i).append("\"");
-            }
-            sb.append(" FROM (SELECT * FROM __exchange_input__").append(orderBy).append(")");
-            return sb.toString();
-        }
-
-        return "SELECT * FROM __exchange_input__" + orderBy;
-    }
-
-    /**
      * Merges worker responses via the native DataFusion runtime.
      * <p>
      * Converts all non-empty worker responses to Arrow VectorSchemaRoots, serializes them
@@ -743,13 +390,13 @@ public class DistributedScanExecutor {
      *
      * @param responses      worker responses to merge
      * @param coordinatorSql SQL to run over the accumulated input (e.g. {@code SELECT * FROM __exchange_input__})
-     * @param strategy       the merge strategy (for logging)
+     * @param subPlan        the execution plan (for logging)
      * @param listener       callback for the merged row-major result
      */
     void mergeViaDataFusion(
         List<WorkerQueryResponse> responses,
         String coordinatorSql,
-        MergeStrategy strategy,
+        SubPlan subPlan,
         ActionListener<Iterable<Object[]>> listener
     ) {
         // Filter out empty responses
@@ -772,7 +419,7 @@ public class DistributedScanExecutor {
 
             logger.info(
                 "[ScanExecutor] {} merge via DataFusion: {} responses, {} bytes IPC, sql={}",
-                strategy, nonEmpty.size(), ipc.length, coordinatorSql
+                subPlan, nonEmpty.size(), ipc.length, coordinatorSql
             );
 
             // 2. Call NativeBridge.executeFromIpcAsync to get a stream pointer
@@ -798,16 +445,16 @@ public class DistributedScanExecutor {
             } catch (TimeoutException e) {
                 FutureUtils.cancel(future);
                 listener.onFailure(new RuntimeException(
-                    "DataFusion " + strategy + " merge timed out after " + NATIVE_TIMEOUT_MINUTES + " minutes", e));
+                    "DataFusion " + subPlan + " merge timed out after " + NATIVE_TIMEOUT_MINUTES + " minutes", e));
                 return;
             } catch (ExecutionException e) {
                 Throwable cause = e.getCause();
                 listener.onFailure(new RuntimeException(
-                    "DataFusion " + strategy + " merge failed", cause != null ? cause : e));
+                    "DataFusion " + subPlan + " merge failed", cause != null ? cause : e));
                 return;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                listener.onFailure(new RuntimeException("DataFusion " + strategy + " merge interrupted", e));
+                listener.onFailure(new RuntimeException("DataFusion " + subPlan + " merge interrupted", e));
                 return;
             }
 
