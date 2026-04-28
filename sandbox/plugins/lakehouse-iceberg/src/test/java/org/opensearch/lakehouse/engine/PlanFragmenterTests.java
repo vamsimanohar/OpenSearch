@@ -205,20 +205,13 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             () -> PlanFragmenter.fragment(agg, "SELECT region, SUM(DISTINCT x) FROM t GROUP BY region"));
     }
 
-    public void testMixedCountDistinctWithOtherAggsDistributes() {
+    public void testMixedCountDistinctWithOtherAggsThrows() {
         AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
         AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(sumCall, countDistinctCall));
-        SubPlan plan = PlanFragmenter.fragment(agg,
-            "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region");
-
-        assertEquals(2, plan.getStageCount());
-        String leafSql = plan.getLeafStage().getSql();
-        assertTrue("Worker should dedup distinct column", leafSql.contains("userid"));
-
-        String coordSql = plan.getFinalStage().getSql();
-        assertTrue(coordSql.contains("COUNT(DISTINCT"));
-        assertTrue(coordSql.contains("SUM("));
+        expectThrows(UnsupportedOperationException.class,
+            () -> PlanFragmenter.fragment(agg,
+                "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region"));
     }
 
     public void testGroupByWithNonPassthroughAnyValueDistributes() {
@@ -308,7 +301,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue(intermediateSql.contains("LIMIT 25"));
     }
 
-    public void testMixedCountDistinctWithLimitReturnsThreeStageHash() {
+    public void testMixedCountDistinctWithLimitThrows() {
         AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         AggregateCall avgCall = makeAggCall(SqlStdOperatorTable.AVG, false);
@@ -317,15 +310,9 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInput(wrapper, true);
 
-        SubPlan plan = PlanFragmenter.fragment(sort,
-            "SELECT regionid, SUM(advengineid), COUNT(*) AS c, AVG(resolutionwidth), COUNT(DISTINCT userid) FROM t GROUP BY regionid ORDER BY c DESC LIMIT 10");
-
-        assertEquals(3, plan.getStageCount());
-        assertEquals(ExchangeType.HASH, plan.getLeafStage().getOutputExchange());
-
-        String intermediateSql = plan.getStages().get(1).getSql();
-        assertTrue(intermediateSql.contains("COUNT(DISTINCT"));
-        assertTrue(intermediateSql.contains("LIMIT 10"));
+        expectThrows(UnsupportedOperationException.class,
+            () -> PlanFragmenter.fragment(sort,
+                "SELECT regionid, SUM(advengineid), COUNT(*) AS c, AVG(resolutionwidth), COUNT(DISTINCT userid) FROM t GROUP BY regionid ORDER BY c DESC LIMIT 10"));
     }
 
     public void testGroupByAvgNoLimitDecomposes() {

@@ -97,8 +97,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         assertEquals(2, rows.size());
     }
 
-    @SuppressWarnings("unchecked")
-    public void testUnsupportedDistinctSumThrowsException() {
+    public void testUnsupportedQueryFallsBackToSingleNode() throws Exception {
         DataWarehouseQueryEngine mockBackend = setupMockBackend(new Object[]{42});
         DiscoveryNode node1 = newNode("n1", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
         DiscoveryNode node2 = newNode("n2", Map.of(NodeDiscovery.LAKEHOUSE_WORKER_ATTR, "true"));
@@ -106,13 +105,16 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         TransportService transportService = mockTransportServiceWithThreadPool();
 
         DistributedScanExecutor executor = new DistributedScanExecutor(transportService, clusterService, mockBackend);
-        RelNode relNode = mockGroupByWithDistinctSumRelNode();
-        ActionListener<Iterable<Object[]>> listener = mock(ActionListener.class);
 
-        expectThrows(UnsupportedOperationException.class,
-            () -> executor.executeAsync(relNode, "SELECT col, SUM(DISTINCT col) FROM t GROUP BY col",
-                List.of("f1", "f2"), new long[]{100, 200},
-                Map.of("localMode", "true"), "t", listener));
+        RelNode relNode = mockGroupByWithDistinctSumRelNode();
+
+        List<Object[]> rows = executeAndWait(
+            executor, relNode, "SELECT col, SUM(DISTINCT col) FROM t GROUP BY col",
+            List.of("f1", "f2"), new long[]{100, 200},
+            Map.of("localMode", "true"), "t"
+        );
+
+        assertEquals("Undistributable query should fall back to single-node execution", 1, rows.size());
     }
 
     public void testNoEligibleNodesExecutesLocally() throws Exception {

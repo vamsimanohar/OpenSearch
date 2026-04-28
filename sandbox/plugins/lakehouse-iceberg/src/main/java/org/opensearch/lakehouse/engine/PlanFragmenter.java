@@ -93,6 +93,12 @@ public final class PlanFragmenter {
                 "DISTINCT aggregates other than COUNT are not distributable — only COUNT(DISTINCT) is supported"
             );
         }
+        if (hasCountDistinct && hasNonDistinctAgg) {
+            throw new UnsupportedOperationException(
+                "Mixed COUNT(DISTINCT) with other aggregates requires dedup expansion that exceeds memory limits"
+            );
+        }
+
         boolean hasGroupBy = !aggregate.getGroupSet().isEmpty();
         boolean hasAvg = hasAvg(aggregate);
         boolean hasDistinctAgg = hasDistinct(aggregate);
