@@ -52,6 +52,18 @@ public class SubPlanTests extends OpenSearchTestCase {
         ));
     }
 
+    public void testGlobalOffsetDefault() {
+        PlanFragment leaf = PlanFragment.leaf(0, "sql", ExchangeType.GATHER, null);
+        SubPlan plan = SubPlan.distributed(List.of(leaf));
+        assertEquals(0, plan.getGlobalOffset());
+    }
+
+    public void testGlobalOffsetExplicit() {
+        PlanFragment leaf = PlanFragment.leaf(0, "sql", ExchangeType.GATHER, null);
+        SubPlan plan = SubPlan.distributed(List.of(leaf), 1000);
+        assertEquals(1000, plan.getGlobalOffset());
+    }
+
     public void testToStringDistributed() {
         PlanFragment leaf = PlanFragment.leaf(0, "sql", ExchangeType.GATHER, null);
         PlanFragment fin = PlanFragment.intermediate(1, "more sql", ExchangeType.NONE, null);

@@ -461,6 +461,15 @@ public class DistributedScanExecutor {
 
             // 3. Drain the result stream — swap TCCL for Arrow C-Data imports
             List<Object[]> rows = drainStreamToRows(streamPtr, runtimeHandle, dfService);
+
+            // 4. Apply global offset in Java (DataFusion's OFFSET corrupts VarChar Arrow buffers)
+            int globalOffset = subPlan.getGlobalOffset();
+            if (globalOffset > 0 && globalOffset < rows.size()) {
+                rows = rows.subList(globalOffset, rows.size());
+            } else if (globalOffset >= rows.size()) {
+                rows = List.of();
+            }
+
             listener.onResponse(rows);
 
         } catch (Exception e) {

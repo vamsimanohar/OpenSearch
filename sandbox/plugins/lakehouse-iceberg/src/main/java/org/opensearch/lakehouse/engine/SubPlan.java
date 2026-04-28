@@ -22,9 +22,11 @@ import java.util.List;
 public final class SubPlan {
 
     private final List<PlanFragment> stages;
+    private final int globalOffset;
 
-    private SubPlan(List<PlanFragment> stages) {
+    private SubPlan(List<PlanFragment> stages, int globalOffset) {
         this.stages = stages;
+        this.globalOffset = globalOffset;
     }
 
     /**
@@ -33,10 +35,18 @@ public final class SubPlan {
      * @param stages ordered list of plan fragments (stage 0 = leaf, last = coordinator)
      */
     public static SubPlan distributed(List<PlanFragment> stages) {
+        return distributed(stages, 0);
+    }
+
+    public static SubPlan distributed(List<PlanFragment> stages, int globalOffset) {
         if (stages == null || stages.isEmpty()) {
             throw new IllegalArgumentException("Distributed plan requires at least one stage");
         }
-        return new SubPlan(List.copyOf(stages));
+        return new SubPlan(List.copyOf(stages), globalOffset);
+    }
+
+    public int getGlobalOffset() {
+        return globalOffset;
     }
 
     public List<PlanFragment> getStages() {

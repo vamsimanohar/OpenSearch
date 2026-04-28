@@ -261,8 +261,9 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertFalse("Workers should not have OFFSET", leafSql.toUpperCase().contains("OFFSET"));
 
         String coordSql = plan.getFinalStage().getSql();
-        assertTrue(coordSql.contains("LIMIT 10"));
-        assertTrue(coordSql.contains("OFFSET 100"));
+        assertTrue("Coordinator LIMIT should be limit+offset", coordSql.contains("LIMIT 110"));
+        assertFalse("Coordinator should not have OFFSET (applied in Java)", coordSql.toUpperCase().contains("OFFSET"));
+        assertEquals("Global offset should be stored in SubPlan", 100, plan.getGlobalOffset());
     }
 
     public void testGroupByCountDistinctWithLimitReturnsThreeStageHash() {

@@ -174,6 +174,8 @@ public final class PlanFragmenter {
             workerSql = decomposeAvg(workerSql);
         }
 
+        int globalOffset = sort != null ? extractOffset(sort) : 0;
+
         if (hasLimit && needsDecomposition) {
             int[] groupKeyIndices = groupKeyIndices(groupCount);
             PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.HASH, groupKeyIndices);
@@ -183,7 +185,7 @@ public final class PlanFragmenter {
 
             PlanFragment finalStage = PlanFragment.intermediate(2, "SELECT * FROM __exchange_input__", ExchangeType.NONE, null);
 
-            return SubPlan.distributed(List.of(leafStage, intermediateStage, finalStage));
+            return SubPlan.distributed(List.of(leafStage, intermediateStage, finalStage), globalOffset);
         }
 
         PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.GATHER, null);
@@ -191,7 +193,7 @@ public final class PlanFragmenter {
         String coordinatorSql = buildTwoPhaseGroupByCoordinatorSql(groupCount, aggKinds, sort, hasAvg, isDistinct, isPassthrough, havingClause);
         PlanFragment finalStage = PlanFragment.intermediate(1, coordinatorSql, ExchangeType.NONE, null);
 
-        return SubPlan.distributed(List.of(leafStage, finalStage));
+        return SubPlan.distributed(List.of(leafStage, finalStage), globalOffset);
     }
 
     /**
@@ -471,12 +473,10 @@ public final class PlanFragmenter {
 
         if (sort != null) {
             int limit = extractLimit(sort);
-            if (limit > 0) {
-                sb.append(" LIMIT ").append(limit);
-            }
             int offset = extractOffset(sort);
-            if (offset > 0) {
-                sb.append(" OFFSET ").append(offset);
+            int effectiveLimit = limit + offset;
+            if (effectiveLimit > 0) {
+                sb.append(" LIMIT ").append(effectiveLimit);
             }
         }
 
@@ -572,13 +572,10 @@ public final class PlanFragmenter {
         }
 
         int limit = extractLimit(sort);
-        if (limit > 0) {
-            sb.append(" LIMIT ").append(limit);
-        }
-
         int offset = extractOffset(sort);
-        if (offset > 0) {
-            sb.append(" OFFSET ").append(offset);
+        int effectiveLimit = limit + offset;
+        if (effectiveLimit > 0) {
+            sb.append(" LIMIT ").append(effectiveLimit);
         }
 
         return sb.toString();
