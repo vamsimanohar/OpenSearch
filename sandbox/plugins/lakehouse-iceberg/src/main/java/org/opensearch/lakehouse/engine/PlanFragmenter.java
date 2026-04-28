@@ -93,92 +93,41 @@ public final class PlanFragmenter {
                 "DISTINCT aggregates other than COUNT are not distributable — only COUNT(DISTINCT) is supported"
             );
         }
-        if (hasCountDistinct && hasNonDistinctAgg) {
-            throw new UnsupportedOperationException(
-                "Mixed COUNT(DISTINCT) with other aggregates is not yet distributable"
-            );
-        }
-
         boolean hasGroupBy = !aggregate.getGroupSet().isEmpty();
         boolean hasAvg = hasAvg(aggregate);
         boolean hasDistinctAgg = hasDistinct(aggregate);
-        boolean hasLimit = visitor.sort != null && visitor.sort.fetch != null;
         SqlKind[] aggKinds = extractAggKinds(aggregate);
         boolean[] isDistinct = extractIsDistinct(aggregate);
         boolean[] isPassthrough = extractIsPassthrough(aggregate);
 
+        String havingClause = null;
+        String workingSql = sql;
         if (hasGroupBy && findKeyword(sql.toUpperCase(), "HAVING") >= 0) {
-            throw new UnsupportedOperationException(
-                "GROUP BY with HAVING is not distributable — HAVING conditions apply to partial worker data"
-            );
-        }
-
-        if (hasGroupBy && hasNonPassthroughAnyValue(aggregate, isPassthrough)) {
-            throw new UnsupportedOperationException(
-                "GROUP BY with non-group-key expressions (constants) is not distributable"
-            );
-        }
-
-        if (hasGroupBy && hasLimit) {
-            throw new UnsupportedOperationException(
-                "GROUP BY with LIMIT is not distributable — workers can't produce correct global top-K"
-            );
+            havingClause = extractHavingClause(sql);
+            workingSql = stripHaving(sql);
         }
 
         if (hasGroupBy) {
-            return fragmentGroupByNoLimit(aggregate, visitor.sort, sql, aggKinds, hasAvg, hasDistinctAgg, isDistinct, isPassthrough);
+            return fragmentGroupBy(aggregate, visitor.sort, workingSql, aggKinds, hasAvg, hasDistinctAgg, isDistinct, isPassthrough, havingClause);
         }
 
         // Global aggregation (no GROUP BY)
-        return fragmentGlobalAggregate(sql, aggKinds, hasAvg, hasDistinctAgg, isDistinct);
+        return fragmentGlobalAggregate(workingSql, aggKinds, hasAvg, hasDistinctAgg, isDistinct);
     }
 
     /**
-     * GROUP BY + LIMIT: 3-stage plan with HASH exchange.
+     * Unified GROUP BY handler for all cases: with/without LIMIT, HAVING, OFFSET,
+     * mixed COUNT DISTINCT, AVG, constant expressions.
      * <p>
-     * Stage 0 (leaf): Execute partial GROUP BY on workers, HASH-partition output by group keys.
-     * Stage 1 (intermediate): Each task receives a disjoint set of group keys, runs full
-     *     GROUP BY + ORDER BY + LIMIT. Because groups are disjoint, LIMIT is correct.
-     * Stage 2 (final): GATHER all intermediate results, CONCAT (each intermediate already applied LIMIT).
+     * Uses 3-stage HASH plan when LIMIT is present (to avoid sending all partial groups
+     * to coordinator, which OOMs on high-cardinality GROUP BY). Workers pre-aggregate,
+     * intermediate stage (on coordinator) re-aggregates disjoint group subsets with
+     * ORDER BY + LIMIT. Uses 2-stage GATHER plan otherwise.
+     * <p>
+     * HAVING is stripped from workers and applied on the coordinator/intermediate stage
+     * after full re-aggregation. OFFSET is applied globally on coordinator.
      */
-    private static SubPlan fragmentGroupByWithLimit(
-        Aggregate aggregate,
-        Sort sort,
-        String sql,
-        SqlKind[] aggKinds,
-        boolean hasAvg,
-        boolean hasDistinct,
-        boolean[] isDistinct
-    ) {
-        int groupCount = aggregate.getGroupSet().cardinality();
-        int[] groupKeyIndices = groupKeyIndices(groupCount);
-
-        String workerSql = stripOrderByLimitOffset(sql);
-        if (hasDistinct) {
-            workerSql = decomposeDistinctToDedup(workerSql, aggregate);
-        }
-        if (hasAvg) {
-            workerSql = decomposeAvg(workerSql);
-        }
-        PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.HASH, groupKeyIndices);
-
-        String intermediateSql = buildIntermediateGroupBySql(groupCount, aggKinds, sort, hasAvg, isDistinct);
-        PlanFragment intermediateStage = PlanFragment.intermediate(1, intermediateSql, ExchangeType.GATHER, null);
-
-        PlanFragment finalStage = PlanFragment.intermediate(2, "SELECT * FROM __exchange_input__", ExchangeType.NONE, null);
-
-        return SubPlan.distributed(List.of(leafStage, intermediateStage, finalStage));
-    }
-
-    /**
-     * GROUP BY: 2-stage plan with GATHER exchange.
-     * Workers run full GROUP BY (without ORDER BY/LIMIT); coordinator re-aggregates
-     * with GROUP BY + ORDER BY + LIMIT.
-     * AVG is decomposed into SUM+COUNT on workers and recombined on coordinator.
-     * COUNT DISTINCT is decomposed: workers dedup by (group keys + distinct cols),
-     * coordinator counts the deduped rows per group.
-     */
-    private static SubPlan fragmentGroupByNoLimit(
+    private static SubPlan fragmentGroupBy(
         Aggregate aggregate,
         Sort sort,
         String sql,
@@ -186,9 +135,11 @@ public final class PlanFragmenter {
         boolean hasAvg,
         boolean hasDistinct,
         boolean[] isDistinct,
-        boolean[] isPassthrough
+        boolean[] isPassthrough,
+        String havingClause
     ) {
         int groupCount = aggregate.getGroupSet().cardinality();
+        boolean hasLimit = sort != null && sort.fetch != null;
 
         String workerSql = stripOrderByLimitOffset(sql);
         if (hasDistinct) {
@@ -198,9 +149,21 @@ public final class PlanFragmenter {
             workerSql = decomposeAvg(workerSql);
         }
 
+        if (hasLimit) {
+            int[] groupKeyIndices = groupKeyIndices(groupCount);
+            PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.HASH, groupKeyIndices);
+
+            String intermediateSql = buildIntermediateGroupBySql(groupCount, aggKinds, sort, hasAvg, isDistinct, isPassthrough, havingClause);
+            PlanFragment intermediateStage = PlanFragment.intermediate(1, intermediateSql, ExchangeType.GATHER, null);
+
+            PlanFragment finalStage = PlanFragment.intermediate(2, "SELECT * FROM __exchange_input__", ExchangeType.NONE, null);
+
+            return SubPlan.distributed(List.of(leafStage, intermediateStage, finalStage));
+        }
+
         PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.GATHER, null);
 
-        String coordinatorSql = buildTwoPhaseGroupByCoordinatorSql(groupCount, aggKinds, sort, hasAvg, isDistinct, isPassthrough);
+        String coordinatorSql = buildTwoPhaseGroupByCoordinatorSql(groupCount, aggKinds, sort, hasAvg, isDistinct, isPassthrough, havingClause);
         PlanFragment finalStage = PlanFragment.intermediate(1, coordinatorSql, ExchangeType.NONE, null);
 
         return SubPlan.distributed(List.of(leafStage, finalStage));
@@ -395,7 +358,7 @@ public final class PlanFragmenter {
         boolean hasAvg,
         boolean[] isDistinct
     ) {
-        return buildTwoPhaseGroupByCoordinatorSql(groupCount, aggKinds, sort, hasAvg, isDistinct, null);
+        return buildTwoPhaseGroupByCoordinatorSql(groupCount, aggKinds, sort, hasAvg, isDistinct, null, null);
     }
 
     static String buildTwoPhaseGroupByCoordinatorSql(
@@ -405,6 +368,18 @@ public final class PlanFragmenter {
         boolean hasAvg,
         boolean[] isDistinct,
         boolean[] isPassthrough
+    ) {
+        return buildTwoPhaseGroupByCoordinatorSql(groupCount, aggKinds, sort, hasAvg, isDistinct, isPassthrough, null);
+    }
+
+    static String buildTwoPhaseGroupByCoordinatorSql(
+        int groupCount,
+        SqlKind[] aggKinds,
+        Sort sort,
+        boolean hasAvg,
+        boolean[] isDistinct,
+        boolean[] isPassthrough,
+        String havingClause
     ) {
         StringBuilder sb = new StringBuilder("SELECT ");
         int totalAggs = aggKinds != null ? aggKinds.length : 0;
@@ -444,6 +419,10 @@ public final class PlanFragmenter {
             sb.append("\"col_").append(i).append("\"");
         }
 
+        if (havingClause != null) {
+            sb.append(" HAVING ").append(havingClause);
+        }
+
         boolean hasOrderBy = sort != null && sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
         boolean wrapInSubquery = hasAvg && hasOrderBy;
 
@@ -478,6 +457,16 @@ public final class PlanFragmenter {
         return sb.toString();
     }
 
+    static String buildIntermediateGroupBySql(
+        int groupCount,
+        SqlKind[] aggKinds,
+        Sort sort,
+        boolean hasAvg,
+        boolean[] isDistinct
+    ) {
+        return buildIntermediateGroupBySql(groupCount, aggKinds, sort, hasAvg, isDistinct, null, null);
+    }
+
     /**
      * Builds intermediate stage SQL for GROUP BY + LIMIT with HASH exchange.
      * The intermediate task owns a disjoint set of groups (from HASH partitioning),
@@ -489,7 +478,9 @@ public final class PlanFragmenter {
         SqlKind[] aggKinds,
         Sort sort,
         boolean hasAvg,
-        boolean[] isDistinct
+        boolean[] isDistinct,
+        boolean[] isPassthrough,
+        String havingClause
     ) {
         StringBuilder sb = new StringBuilder("SELECT ");
         int totalAggs = aggKinds != null ? aggKinds.length : 0;
@@ -502,6 +493,9 @@ public final class PlanFragmenter {
         }
 
         for (int i = 0; i < totalAggs; i++) {
+            if (isPassthrough != null && isPassthrough[i]) {
+                continue;
+            }
             sb.append(", ");
             SqlKind kind = aggKinds[i];
             if (kind == SqlKind.AVG && hasAvg) {
@@ -526,13 +520,26 @@ public final class PlanFragmenter {
             sb.append("\"col_").append(i).append("\"");
         }
 
-        if (sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty()) {
+        if (havingClause != null) {
+            sb.append(" HAVING ").append(havingClause);
+        }
+
+        boolean hasOrderBy = sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
+        boolean wrapInSubquery = hasAvg && hasOrderBy;
+
+        if (wrapInSubquery) {
+            sb.insert(0, "SELECT * FROM (");
+            sb.append(")");
+        }
+
+        if (hasOrderBy) {
             int[] sortCols = extractSortColumns(sort);
             boolean[] sortAsc = extractSortDirections(sort);
             sb.append(" ORDER BY ");
             for (int i = 0; i < sortCols.length; i++) {
                 if (i > 0) sb.append(", ");
-                sb.append(sortCols[i] + 1);
+                int remapped = remapSortPosition(sortCols[i], groupCount, isPassthrough);
+                sb.append(remapped + 1);
                 sb.append(sortAsc[i] ? " ASC" : " DESC");
             }
         }
@@ -735,6 +742,34 @@ public final class PlanFragmenter {
             sb.append(" ").append(sql.substring(endIdx));
         }
         return sb.toString();
+    }
+
+    static String extractHavingClause(String sql) {
+        String upper = sql.toUpperCase();
+        int havingIdx = findKeyword(upper, "HAVING");
+        if (havingIdx < 0) return null;
+        int afterHaving = havingIdx + 7;
+        int endIdx = sql.length();
+        int orderIdx = findKeyword(upper, "ORDER BY");
+        int limitIdx = findKeyword(upper, "LIMIT");
+        if (orderIdx >= 0 && orderIdx > havingIdx) endIdx = Math.min(endIdx, orderIdx);
+        if (limitIdx >= 0 && limitIdx > havingIdx) endIdx = Math.min(endIdx, limitIdx);
+        return sql.substring(afterHaving, endIdx).strip();
+    }
+
+    static String stripHaving(String sql) {
+        String upper = sql.toUpperCase();
+        int havingIdx = findKeyword(upper, "HAVING");
+        if (havingIdx < 0) return sql;
+        int endIdx = sql.length();
+        int orderIdx = findKeyword(upper, "ORDER BY");
+        int limitIdx = findKeyword(upper, "LIMIT");
+        if (orderIdx >= 0 && orderIdx > havingIdx) endIdx = orderIdx;
+        else if (limitIdx >= 0 && limitIdx > havingIdx) endIdx = limitIdx;
+        else endIdx = sql.length();
+        String before = sql.substring(0, havingIdx).stripTrailing();
+        String after = endIdx < sql.length() ? " " + sql.substring(endIdx) : "";
+        return before + after;
     }
 
     static String stripOrderByLimitOffset(String sql) {

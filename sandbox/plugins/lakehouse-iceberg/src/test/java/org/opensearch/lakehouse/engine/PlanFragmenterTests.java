@@ -147,26 +147,41 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue(coordSql.contains("SUM("));
     }
 
-    public void testGroupByWithLimitThrowsForSingleNodeFallback() {
+    public void testGroupByWithLimitReturnsThreeStageHash() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInput(wrapper, true);
 
-        expectThrows(UnsupportedOperationException.class,
-            () -> PlanFragmenter.fragment(sort,
-                "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY COUNT(*) DESC LIMIT 10"));
+        SubPlan plan = PlanFragmenter.fragment(sort,
+            "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY COUNT(*) DESC LIMIT 10");
+
+        assertEquals(3, plan.getStageCount());
+        assertEquals(ExchangeType.HASH, plan.getLeafStage().getOutputExchange());
+        assertNotNull(plan.getLeafStage().getHashColumns());
+
+        String intermediateSql = plan.getStages().get(1).getSql();
+        assertTrue(intermediateSql.contains("GROUP BY"));
+        assertTrue(intermediateSql.contains("LIMIT 10"));
     }
 
-    public void testGroupByWithLimitAndAvgThrowsForSingleNodeFallback() {
+    public void testGroupByWithLimitAndAvgReturnsThreeStageHash() {
         AggregateCall avgCall = makeAggCall(SqlStdOperatorTable.AVG, false);
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(avgCall, countCall));
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInput(wrapper, true, 5);
 
-        expectThrows(UnsupportedOperationException.class,
-            () -> PlanFragmenter.fragment(sort,
-                "SELECT region, AVG(price), COUNT(*) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 5"));
+        SubPlan plan = PlanFragmenter.fragment(sort,
+            "SELECT region, AVG(price), COUNT(*) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 5");
+
+        assertEquals(3, plan.getStageCount());
+        assertEquals(ExchangeType.HASH, plan.getLeafStage().getOutputExchange());
+
+        String leafSql = plan.getLeafStage().getSql();
+        assertTrue("Worker should decompose AVG", leafSql.contains("SUM(CAST("));
+
+        String intermediateSql = plan.getStages().get(1).getSql();
+        assertTrue(intermediateSql.contains("LIMIT 5"));
     }
 
     public void testGlobalCountDistinctDecomposes() {
@@ -190,52 +205,127 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             () -> PlanFragmenter.fragment(agg, "SELECT region, SUM(DISTINCT x) FROM t GROUP BY region"));
     }
 
-    public void testMixedCountDistinctWithOtherAggsThrows() {
+    public void testMixedCountDistinctWithOtherAggsDistributes() {
         AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
         AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(sumCall, countDistinctCall));
-        expectThrows(UnsupportedOperationException.class,
-            () -> PlanFragmenter.fragment(agg,
-                "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region"));
+        SubPlan plan = PlanFragmenter.fragment(agg,
+            "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region");
+
+        assertEquals(2, plan.getStageCount());
+        String leafSql = plan.getLeafStage().getSql();
+        assertTrue("Worker should dedup distinct column", leafSql.contains("userid"));
+
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue(coordSql.contains("COUNT(DISTINCT"));
+        assertTrue(coordSql.contains("SUM("));
     }
 
-    public void testGroupByWithNonPassthroughAnyValueThrows() {
-        // ANY_VALUE on non-group-key column (e.g., constant expression like SELECT 1 AS one, ...)
+    public void testGroupByWithNonPassthroughAnyValueDistributes() {
         AggregateCall anyValueCall = makeAggCallWithArgs(SqlStdOperatorTable.ANY_VALUE, false, List.of(0));
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(1), List.of(anyValueCall, countCall));
-        expectThrows(UnsupportedOperationException.class,
-            () -> PlanFragmenter.fragment(agg,
-                "SELECT 1 AS one, url, COUNT(*) FROM t GROUP BY url"));
+        SubPlan plan = PlanFragmenter.fragment(agg,
+            "SELECT 1 AS one, url, COUNT(*) FROM t GROUP BY url");
+
+        assertEquals(2, plan.getStageCount());
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue(coordSql.contains("GROUP BY"));
+        assertTrue(coordSql.contains("MIN("));
     }
 
-    public void testGroupByWithHavingThrows() {
+    public void testGroupByWithHavingDistributes() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
-        expectThrows(UnsupportedOperationException.class,
-            () -> PlanFragmenter.fragment(agg,
-                "SELECT region, COUNT(*) FROM t GROUP BY region HAVING COUNT(*) > 100"));
+        SubPlan plan = PlanFragmenter.fragment(agg,
+            "SELECT region, COUNT(*) FROM t GROUP BY region HAVING COUNT(*) > 100");
+
+        assertEquals(2, plan.getStageCount());
+        String leafSql = plan.getLeafStage().getSql();
+        assertFalse("Worker SQL should not have HAVING", leafSql.toUpperCase().contains("HAVING"));
+
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue("Coordinator should apply HAVING", coordSql.contains("HAVING"));
+        assertTrue(coordSql.contains("COUNT(*) > 100"));
     }
 
-    public void testGroupByWithOffsetThrows() {
+    public void testGroupByWithOffsetReturnsThreeStageHash() {
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countCall));
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInputAndOffset(wrapper, 10, 100);
 
-        expectThrows(UnsupportedOperationException.class,
-            () -> PlanFragmenter.fragment(sort,
-                "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 10 OFFSET 100"));
+        SubPlan plan = PlanFragmenter.fragment(sort,
+            "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 10 OFFSET 100");
+
+        assertEquals(3, plan.getStageCount());
+        assertEquals(ExchangeType.HASH, plan.getLeafStage().getOutputExchange());
+
+        String intermediateSql = plan.getStages().get(1).getSql();
+        assertTrue(intermediateSql.contains("LIMIT 10"));
+        assertTrue(intermediateSql.contains("OFFSET 100"));
     }
 
-    public void testGroupByCountDistinctWithLimitThrowsForSingleNodeFallback() {
+    public void testGroupByCountDistinctWithLimitReturnsThreeStageHash() {
         AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countDistinctCall));
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInput(wrapper, true);
 
-        expectThrows(UnsupportedOperationException.class,
-            () -> PlanFragmenter.fragment(sort,
-                "SELECT region, COUNT(DISTINCT userid) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 10"));
+        SubPlan plan = PlanFragmenter.fragment(sort,
+            "SELECT region, COUNT(DISTINCT userid) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 10");
+
+        assertEquals(3, plan.getStageCount());
+        assertEquals(ExchangeType.HASH, plan.getLeafStage().getOutputExchange());
+
+        String leafSql = plan.getLeafStage().getSql();
+        assertTrue("Worker should dedup", leafSql.contains("userid"));
+
+        String intermediateSql = plan.getStages().get(1).getSql();
+        assertTrue(intermediateSql.contains("COUNT(DISTINCT"));
+        assertTrue(intermediateSql.contains("LIMIT 10"));
+    }
+
+    public void testGroupByWithHavingAndLimitReturnsThreeStageHash() {
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(
+            makeAggCall(SqlStdOperatorTable.AVG, false),
+            makeAggCall(SqlStdOperatorTable.COUNT, false)
+        ));
+        RelNode wrapper = mockNodeWithInput(agg);
+        Sort sort = makeSortWithInput(wrapper, true, 25);
+
+        SubPlan plan = PlanFragmenter.fragment(sort,
+            "SELECT counterid, AVG(CHAR_LENGTH(url)) AS l, COUNT(*) AS c FROM t GROUP BY counterid HAVING COUNT(*) > 100000 ORDER BY l DESC LIMIT 25");
+
+        assertEquals(3, plan.getStageCount());
+        assertEquals(ExchangeType.HASH, plan.getLeafStage().getOutputExchange());
+
+        String leafSql = plan.getLeafStage().getSql();
+        assertFalse("Worker should not have HAVING", leafSql.toUpperCase().contains("HAVING"));
+        assertTrue("Worker should decompose AVG", leafSql.contains("SUM(CAST("));
+
+        String intermediateSql = plan.getStages().get(1).getSql();
+        assertTrue("Intermediate should have HAVING", intermediateSql.contains("HAVING"));
+        assertTrue(intermediateSql.contains("LIMIT 25"));
+    }
+
+    public void testMixedCountDistinctWithLimitReturnsThreeStageHash() {
+        AggregateCall sumCall = makeAggCall(SqlStdOperatorTable.SUM, false);
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        AggregateCall avgCall = makeAggCall(SqlStdOperatorTable.AVG, false);
+        AggregateCall countDistinctCall = makeAggCall(SqlStdOperatorTable.COUNT, true);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(sumCall, countCall, avgCall, countDistinctCall));
+        RelNode wrapper = mockNodeWithInput(agg);
+        Sort sort = makeSortWithInput(wrapper, true);
+
+        SubPlan plan = PlanFragmenter.fragment(sort,
+            "SELECT regionid, SUM(advengineid), COUNT(*) AS c, AVG(resolutionwidth), COUNT(DISTINCT userid) FROM t GROUP BY regionid ORDER BY c DESC LIMIT 10");
+
+        assertEquals(3, plan.getStageCount());
+        assertEquals(ExchangeType.HASH, plan.getLeafStage().getOutputExchange());
+
+        String intermediateSql = plan.getStages().get(1).getSql();
+        assertTrue(intermediateSql.contains("COUNT(DISTINCT"));
+        assertTrue(intermediateSql.contains("LIMIT 10"));
     }
 
     public void testGroupByAvgNoLimitDecomposes() {
@@ -482,6 +572,89 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
     public void testAddColumnsToSelectNoFromReturnsOriginal() {
         String sql = "INVALID SQL WITHOUT FROM";
         assertEquals(sql, PlanFragmenter.addColumnsToSelect(sql, List.of("col")));
+    }
+
+    public void testBuildTwoPhaseGroupByCoordinatorSqlWithHaving() {
+        String sql = PlanFragmenter.buildTwoPhaseGroupByCoordinatorSql(
+            1, new SqlKind[] { SqlKind.COUNT }, null, false,
+            new boolean[] { false }, null, "COUNT(*) > 100"
+        );
+        assertTrue(sql.contains("HAVING COUNT(*) > 100"));
+        assertTrue(sql.contains("GROUP BY"));
+    }
+
+    public void testBuildIntermediateGroupBySqlWithPassthrough() {
+        Sort sort = makeSortWithLimit(10);
+        String sql = PlanFragmenter.buildIntermediateGroupBySql(
+            3, new SqlKind[] { SqlKind.ANY_VALUE, SqlKind.COUNT }, sort, false,
+            new boolean[] { false, false }, new boolean[] { true, false }, null
+        );
+        assertTrue(sql.contains("GROUP BY"));
+        assertTrue(sql.contains("LIMIT 10"));
+        assertFalse("Passthrough agg should be skipped", sql.contains("MIN("));
+    }
+
+    public void testBuildIntermediateGroupBySqlWithHaving() {
+        Sort sort = makeSortWithLimit(25);
+        String sql = PlanFragmenter.buildIntermediateGroupBySql(
+            1, new SqlKind[] { SqlKind.COUNT }, sort, false,
+            new boolean[] { false }, null, "COUNT(*) > 100000"
+        );
+        assertTrue(sql.contains("HAVING COUNT(*) > 100000"));
+        assertTrue(sql.contains("LIMIT 25"));
+    }
+
+    public void testBuildIntermediateGroupBySqlWithAvgWrapsSubquery() {
+        Sort sort = makeSortWithLimit(10);
+        String sql = PlanFragmenter.buildIntermediateGroupBySql(
+            1, new SqlKind[] { SqlKind.AVG, SqlKind.COUNT }, sort, true,
+            new boolean[] { false, false }, null, null
+        );
+        assertTrue("AVG + ORDER BY should wrap in subquery", sql.startsWith("SELECT * FROM (SELECT"));
+        assertTrue(sql.contains("CAST(SUM("));
+    }
+
+    // ==== HAVING extraction/stripping tests ====
+
+    public void testExtractHavingClause() {
+        String having = PlanFragmenter.extractHavingClause(
+            "SELECT a, COUNT(*) FROM t GROUP BY a HAVING COUNT(*) > 100 ORDER BY 2 DESC LIMIT 25"
+        );
+        assertEquals("COUNT(*) > 100", having);
+    }
+
+    public void testExtractHavingClauseNoHaving() {
+        assertNull(PlanFragmenter.extractHavingClause(
+            "SELECT a, COUNT(*) FROM t GROUP BY a ORDER BY 2 DESC LIMIT 25"
+        ));
+    }
+
+    public void testExtractHavingClauseAtEnd() {
+        String having = PlanFragmenter.extractHavingClause(
+            "SELECT a, COUNT(*) FROM t GROUP BY a HAVING COUNT(*) > 100"
+        );
+        assertEquals("COUNT(*) > 100", having);
+    }
+
+    public void testStripHavingRemovesClause() {
+        String result = PlanFragmenter.stripHaving(
+            "SELECT a, COUNT(*) FROM t GROUP BY a HAVING COUNT(*) > 100 ORDER BY 2 DESC LIMIT 25"
+        );
+        assertFalse(result.toUpperCase().contains("HAVING"));
+        assertTrue(result.contains("ORDER BY"));
+        assertTrue(result.contains("LIMIT 25"));
+    }
+
+    public void testStripHavingNoHavingUnchanged() {
+        String sql = "SELECT a, COUNT(*) FROM t GROUP BY a ORDER BY 2 DESC";
+        assertEquals(sql, PlanFragmenter.stripHaving(sql));
+    }
+
+    public void testStripHavingAtEnd() {
+        String result = PlanFragmenter.stripHaving(
+            "SELECT a, COUNT(*) FROM t GROUP BY a HAVING COUNT(*) > 100"
+        );
+        assertEquals("SELECT a, COUNT(*) FROM t GROUP BY a", result);
     }
 
     // ==== SQL rewriting tests ====

@@ -163,14 +163,7 @@ public class DistributedScanExecutor {
             return;
         }
 
-        SubPlan subPlan;
-        try {
-            subPlan = PlanFragmenter.fragment(relNode, sqlQuery);
-        } catch (UnsupportedOperationException e) {
-            logger.info("[ScanExecutor] Query not distributable ({}), falling back to single-node", e.getMessage());
-            executeSingleNodeAsync(sqlQuery, filePaths, fileSizes, storageConfig, tableName, listener);
-            return;
-        }
+        SubPlan subPlan = PlanFragmenter.fragment(relNode, sqlQuery);
 
         PlanFragment leafStage = subPlan.getLeafStage();
         PlanFragment finalStage = subPlan.getFinalStage();
