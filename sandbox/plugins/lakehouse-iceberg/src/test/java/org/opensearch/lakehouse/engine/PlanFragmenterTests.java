@@ -159,7 +159,8 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertEquals(ExchangeType.GATHER, plan.getLeafStage().getOutputExchange());
 
         String leafSql = plan.getLeafStage().getSql();
-        assertFalse("Workers should strip ORDER BY+LIMIT", leafSql.contains("LIMIT"));
+        assertTrue("Workers keep ORDER BY with expanded LIMIT", leafSql.contains("LIMIT 1000"));
+        assertFalse("Workers should not have OFFSET", leafSql.toUpperCase().contains("OFFSET"));
 
         String coordSql = plan.getFinalStage().getSql();
         assertTrue(coordSql.contains("GROUP BY"));
@@ -255,7 +256,8 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertEquals(ExchangeType.GATHER, plan.getLeafStage().getOutputExchange());
 
         String leafSql = plan.getLeafStage().getSql();
-        assertFalse("Workers should strip ORDER BY+LIMIT+OFFSET", leafSql.contains("LIMIT"));
+        assertTrue("Workers expand LIMIT to max(LIMIT+OFFSET, LIMIT*100)", leafSql.contains("LIMIT 1000"));
+        assertFalse("Workers should not have OFFSET", leafSql.toUpperCase().contains("OFFSET"));
 
         String coordSql = plan.getFinalStage().getSql();
         assertTrue(coordSql.contains("LIMIT 10"));

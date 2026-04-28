@@ -148,7 +148,20 @@ public final class PlanFragmenter {
         boolean hasLimit = sort != null && sort.fetch != null;
         boolean needsDecomposition = hasAvg || hasDistinct;
 
-        String workerSql = stripOrderByLimitOffset(sql);
+        String workerSql;
+        if (hasLimit && !needsDecomposition) {
+            // Workers keep ORDER BY with expanded LIMIT to bound output while
+            // maintaining high accuracy. Without this, high-cardinality GROUP BY
+            // sends millions of groups per worker, causing OOM during Arrow IPC
+            // serialization on the coordinator.
+            int limit = extractLimit(sort);
+            int offset = sort != null ? extractOffset(sort) : 0;
+            int workerLimit = Math.max(limit + offset, limit * 100);
+            workerSql = stripOffset(sql);
+            workerSql = adjustLimit(workerSql, workerLimit);
+        } else {
+            workerSql = stripOrderByLimitOffset(sql);
+        }
         if (hasDistinct) {
             workerSql = decomposeDistinctToDedup(workerSql, aggregate);
         }
