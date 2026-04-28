@@ -147,7 +147,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue(coordSql.contains("SUM("));
     }
 
-    public void testGroupByWithLimitReturnsTwoStageLocalTopK() {
+    public void testGroupByWithLimitReturnsTwoPhaseGather() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInput(wrapper, true);
@@ -159,10 +159,11 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertEquals(ExchangeType.GATHER, plan.getLeafStage().getOutputExchange());
 
         String leafSql = plan.getLeafStage().getSql();
-        assertTrue("Workers should keep ORDER BY+LIMIT", leafSql.contains("LIMIT 10"));
+        assertFalse("Workers should strip ORDER BY+LIMIT", leafSql.contains("LIMIT"));
 
         String coordSql = plan.getFinalStage().getSql();
         assertTrue(coordSql.contains("GROUP BY"));
+        assertTrue(coordSql.contains("LIMIT 10"));
     }
 
     public void testGroupByWithLimitAndAvgReturnsThreeStageHash() {
@@ -238,11 +239,10 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertFalse("Worker SQL should not have HAVING", leafSql.toUpperCase().contains("HAVING"));
 
         String coordSql = plan.getFinalStage().getSql();
-        assertTrue("Coordinator wraps in subquery for HAVING", coordSql.contains("SELECT * FROM ("));
-        assertTrue(coordSql.contains("WHERE COUNT(*) > 100"));
+        assertTrue("Coordinator HAVING should use re-aggregated SUM", coordSql.contains("HAVING SUM("));
     }
 
-    public void testGroupByWithOffsetReturnsTwoStageLocalTopK() {
+    public void testGroupByWithOffsetReturnsTwoPhaseGather() {
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countCall));
         RelNode wrapper = mockNodeWithInput(agg);
@@ -255,10 +255,10 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertEquals(ExchangeType.GATHER, plan.getLeafStage().getOutputExchange());
 
         String leafSql = plan.getLeafStage().getSql();
-        assertTrue("Workers should expand LIMIT to LIMIT+OFFSET", leafSql.contains("LIMIT 110"));
-        assertFalse("Workers should not have OFFSET", leafSql.toUpperCase().contains("OFFSET"));
+        assertFalse("Workers should strip ORDER BY+LIMIT+OFFSET", leafSql.contains("LIMIT"));
 
         String coordSql = plan.getFinalStage().getSql();
+        assertTrue(coordSql.contains("LIMIT 10"));
         assertTrue(coordSql.contains("OFFSET 100"));
     }
 
@@ -301,8 +301,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue("Worker should decompose AVG", leafSql.contains("SUM(CAST("));
 
         String intermediateSql = plan.getStages().get(1).getSql();
-        assertTrue("Intermediate wraps in subquery for HAVING", intermediateSql.contains("SELECT * FROM ("));
-        assertTrue(intermediateSql.contains("WHERE COUNT(*) > 100000"));
+        assertTrue("Intermediate HAVING should use re-aggregated SUM", intermediateSql.contains("HAVING SUM("));
         assertTrue(intermediateSql.contains("LIMIT 25"));
     }
 
@@ -571,8 +570,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             1, new SqlKind[] { SqlKind.COUNT }, null, false,
             new boolean[] { false }, null, "COUNT(*) > 100"
         );
-        assertTrue("HAVING wraps as subquery WHERE", sql.contains("SELECT * FROM ("));
-        assertTrue(sql.contains("WHERE COUNT(*) > 100"));
+        assertTrue("HAVING should use re-aggregated SUM", sql.contains("HAVING SUM(\"col_1\") > 100"));
         assertTrue(sql.contains("GROUP BY"));
     }
 
@@ -593,8 +591,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             1, new SqlKind[] { SqlKind.COUNT }, sort, false,
             new boolean[] { false }, null, "COUNT(*) > 100000"
         );
-        assertTrue("HAVING wraps as subquery WHERE", sql.contains("SELECT * FROM ("));
-        assertTrue(sql.contains("WHERE COUNT(*) > 100000"));
+        assertTrue("HAVING should use re-aggregated SUM", sql.contains("HAVING SUM(\"col_1\") > 100000"));
         assertTrue(sql.contains("LIMIT 25"));
     }
 
@@ -642,6 +639,23 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
     public void testStripHavingNoHavingUnchanged() {
         String sql = "SELECT a, COUNT(*) FROM t GROUP BY a ORDER BY 2 DESC";
         assertEquals(sql, PlanFragmenter.stripHaving(sql));
+    }
+
+    public void testRewriteHavingCountStar() {
+        String result = PlanFragmenter.rewriteHavingForReAggregation(
+            "COUNT(*) > 100000", 1, new SqlKind[] { SqlKind.COUNT }, false,
+            new boolean[] { false }, null
+        );
+        assertEquals("SUM(\"col_1\") > 100000", result);
+    }
+
+    public void testRewriteHavingWithAvgAndCount() {
+        // aggKinds=[AVG, COUNT], AVG takes 2 cols → COUNT is at col_3
+        String result = PlanFragmenter.rewriteHavingForReAggregation(
+            "COUNT(*) > 100000", 1, new SqlKind[] { SqlKind.AVG, SqlKind.COUNT }, true,
+            new boolean[] { false, false }, null
+        );
+        assertEquals("SUM(\"col_3\") > 100000", result);
     }
 
     public void testStripHavingAtEnd() {

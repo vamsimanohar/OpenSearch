@@ -148,25 +148,6 @@ public final class PlanFragmenter {
         boolean hasLimit = sort != null && sort.fetch != null;
         boolean needsDecomposition = hasAvg || hasDistinct;
 
-        if (hasLimit && !needsDecomposition) {
-            // Workers keep ORDER BY + LIMIT (no column layout changes), producing
-            // bounded local top-K. Coordinator re-aggregates K * numWorkers rows.
-            // OFFSET is stripped from workers (applied globally on coordinator).
-            // Worker LIMIT is expanded to LIMIT + OFFSET so coordinator can skip.
-            int offset = extractOffset(sort);
-            String workerSql = stripOffset(sql);
-            if (offset > 0) {
-                int limit = extractLimit(sort);
-                workerSql = adjustLimit(workerSql, limit + offset);
-            }
-            PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.GATHER, null);
-
-            String coordinatorSql = buildTwoPhaseGroupByCoordinatorSql(groupCount, aggKinds, sort, hasAvg, isDistinct, isPassthrough, havingClause);
-            PlanFragment finalStage = PlanFragment.intermediate(1, coordinatorSql, ExchangeType.NONE, null);
-
-            return SubPlan.distributed(List.of(leafStage, finalStage));
-        }
-
         String workerSql = stripOrderByLimitOffset(sql);
         if (hasDistinct) {
             workerSql = decomposeDistinctToDedup(workerSql, aggregate);
@@ -175,7 +156,7 @@ public final class PlanFragmenter {
             workerSql = decomposeAvg(workerSql);
         }
 
-        if (hasLimit) {
+        if (hasLimit && needsDecomposition) {
             // Decomposition changes column layout; use 3-stage HASH plan
             int[] groupKeyIndices = groupKeyIndices(groupCount);
             PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.HASH, groupKeyIndices);
@@ -446,15 +427,17 @@ public final class PlanFragmenter {
             sb.append("\"col_").append(i).append("\"");
         }
 
-        boolean hasOrderBy = sort != null && sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
-        boolean needsSubqueryWrap = (hasAvg && hasOrderBy) || havingClause != null;
+        if (havingClause != null) {
+            String rewritten = rewriteHavingForReAggregation(havingClause, groupCount, aggKinds, hasAvg, isDistinct, isPassthrough);
+            sb.append(" HAVING ").append(rewritten);
+        }
 
-        if (needsSubqueryWrap) {
+        boolean hasOrderBy = sort != null && sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
+        boolean wrapInSubquery = hasAvg && hasOrderBy;
+
+        if (wrapInSubquery) {
             sb.insert(0, "SELECT * FROM (");
             sb.append(")");
-            if (havingClause != null) {
-                sb.append(" WHERE ").append(havingClause);
-            }
         }
 
         if (hasOrderBy) {
@@ -546,18 +529,17 @@ public final class PlanFragmenter {
             sb.append("\"col_").append(i).append("\"");
         }
 
-        // HAVING must be applied after re-aggregation on the outer query (not inside
-        // the GROUP BY, where COUNT(*) counts intermediate rows instead of actual counts).
-        // Wrap in a subquery and apply HAVING as WHERE using positional column refs.
-        boolean hasOrderBy = sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
-        boolean needsSubqueryWrap = hasAvg && hasOrderBy;
+        if (havingClause != null) {
+            String rewritten = rewriteHavingForReAggregation(havingClause, groupCount, aggKinds, hasAvg, isDistinct, isPassthrough);
+            sb.append(" HAVING ").append(rewritten);
+        }
 
-        if (havingClause != null || needsSubqueryWrap) {
+        boolean hasOrderBy = sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
+        boolean wrapInSubquery = hasAvg && hasOrderBy;
+
+        if (wrapInSubquery) {
             sb.insert(0, "SELECT * FROM (");
             sb.append(")");
-            if (havingClause != null) {
-                sb.append(" WHERE ").append(havingClause);
-            }
         }
 
         if (hasOrderBy) {
@@ -745,6 +727,67 @@ public final class PlanFragmenter {
             pos = closeIdx + 1;
         }
         return result.toString();
+    }
+
+    /**
+     * Rewrites a HAVING clause so aggregate references use re-aggregation expressions
+     * over worker output columns. For example, {@code COUNT(*) > 100000} becomes
+     * {@code SUM("col_N") > 100000} because workers already computed partial COUNTs
+     * and the coordinator re-aggregates with SUM.
+     */
+    static String rewriteHavingForReAggregation(
+        String havingClause,
+        int groupCount,
+        SqlKind[] aggKinds,
+        boolean hasAvg,
+        boolean[] isDistinct,
+        boolean[] isPassthrough
+    ) {
+        String result = havingClause;
+        int totalAggs = aggKinds != null ? aggKinds.length : 0;
+        int workerCol = groupCount;
+        for (int i = 0; i < totalAggs; i++) {
+            if (isPassthrough != null && isPassthrough[i]) {
+                continue;
+            }
+            SqlKind kind = aggKinds[i];
+            if (kind == SqlKind.AVG && hasAvg) {
+                workerCol += 2;
+            } else if (kind == SqlKind.COUNT) {
+                String reAgg = "SUM(\"col_" + workerCol + "\")";
+                if (isDistinct != null && isDistinct[i]) {
+                    result = replaceAggInHaving(result, "COUNT(DISTINCT", reAgg);
+                } else {
+                    result = replaceAggInHaving(result, "COUNT(", reAgg);
+                }
+                workerCol++;
+            } else {
+                workerCol++;
+            }
+        }
+        return result;
+    }
+
+    private static String replaceAggInHaving(String having, String aggPrefix, String replacement) {
+        String upper = having.toUpperCase();
+        int idx = upper.indexOf(aggPrefix);
+        if (idx < 0) return having;
+        if (aggPrefix.equals("COUNT(") && idx > 0 && upper.charAt(idx - 1) == '(') {
+            return having;
+        }
+        int parenStart = having.indexOf('(', idx + aggPrefix.length() - 1);
+        if (parenStart < 0) parenStart = idx + aggPrefix.length() - 1;
+        int depth = 0;
+        int closeIdx = -1;
+        for (int i = parenStart; i < having.length(); i++) {
+            if (having.charAt(i) == '(') depth++;
+            else if (having.charAt(i) == ')') {
+                depth--;
+                if (depth == 0) { closeIdx = i; break; }
+            }
+        }
+        if (closeIdx < 0) return having;
+        return having.substring(0, idx) + replacement + having.substring(closeIdx + 1);
     }
 
     private static String appendToGroupBy(String sql, List<String> columns) {
