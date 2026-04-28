@@ -151,19 +151,18 @@ public final class PlanFragmenter {
         // Bounded local top-K: keep ORDER BY with expanded LIMIT to prevent OOM
         // from high-cardinality GROUP BY. Applied when LIMIT is present AND either:
         // (a) no decomposition needed, or
-        // (b) AVG-only decomposition (no DISTINCT, no HAVING) — AVG decomposition
-        //     preserves non-AVG ORDER BY aliases (e.g. ORDER BY c where c=COUNT(*)).
-        // COUNT(DISTINCT) can't use bounded top-K (dedup must be complete).
-        // HAVING can't use bounded top-K (filtering needs all groups).
-        boolean useBoundedTopK = hasLimit
-            && (!needsDecomposition || (hasAvg && !hasDistinct && havingClause == null));
+        // (b) AVG-only decomposition (no DISTINCT) — decomposition preserves
+        //     non-AVG ORDER BY aliases (e.g. ORDER BY c where c=COUNT(*)).
+        // COUNT(DISTINCT) can't use bounded top-K (dedup expands GROUP BY,
+        // changing the query structure entirely).
+        boolean useBoundedTopK = hasLimit && (!needsDecomposition || (hasAvg && !hasDistinct));
 
         String workerSql;
         if (useBoundedTopK) {
             int limit = extractLimit(sort);
             int offset = sort != null ? extractOffset(sort) : 0;
             int workerLimit = Math.max(limit + offset, limit * 100);
-            workerSql = stripOffset(sql);
+            workerSql = stripHaving(stripOffset(sql));
             workerSql = adjustLimit(workerSql, workerLimit);
         } else {
             workerSql = stripOrderByLimitOffset(sql);
