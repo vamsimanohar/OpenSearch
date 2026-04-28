@@ -119,6 +119,12 @@ public final class PlanFragmenter {
             );
         }
 
+        if (hasGroupBy && hasLimit) {
+            throw new UnsupportedOperationException(
+                "GROUP BY with LIMIT is not distributable — workers can't produce correct global top-K"
+            );
+        }
+
         if (hasGroupBy) {
             return fragmentGroupByNoLimit(aggregate, visitor.sort, sql, aggKinds, hasAvg, hasDistinctAgg, isDistinct, isPassthrough);
         }
@@ -183,10 +189,6 @@ public final class PlanFragmenter {
         boolean[] isPassthrough
     ) {
         int groupCount = aggregate.getGroupSet().cardinality();
-
-        if (sort != null && sort.offset != null) {
-            throw new UnsupportedOperationException("GROUP BY with OFFSET is not distributable");
-        }
 
         String workerSql = stripOrderByLimitOffset(sql);
         if (hasDistinct) {
