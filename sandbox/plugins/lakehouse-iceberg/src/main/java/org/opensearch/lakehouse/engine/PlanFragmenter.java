@@ -113,6 +113,12 @@ public final class PlanFragmenter {
             );
         }
 
+        if (hasGroupBy && hasNonPassthroughAnyValue(aggregate, isPassthrough)) {
+            throw new UnsupportedOperationException(
+                "GROUP BY with non-group-key expressions (constants) is not distributable"
+            );
+        }
+
         if (hasGroupBy) {
             return fragmentGroupByNoLimit(aggregate, visitor.sort, sql, aggKinds, hasAvg, hasDistinctAgg, isDistinct, isPassthrough);
         }
@@ -178,18 +184,11 @@ public final class PlanFragmenter {
     ) {
         int groupCount = aggregate.getGroupSet().cardinality();
 
-        boolean hasSort = sort != null && sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
-        boolean hasLimit = sort != null && sort.fetch != null;
-        boolean hasOffset = sort != null && sort.offset != null;
-
-        if (hasOffset) {
+        if (sort != null && sort.offset != null) {
             throw new UnsupportedOperationException("GROUP BY with OFFSET is not distributable");
         }
 
-        String workerSql = sql;
-        if (hasDistinct || (hasSort && !hasLimit)) {
-            workerSql = stripOrderByLimitOffset(sql);
-        }
+        String workerSql = stripOrderByLimitOffset(sql);
         if (hasDistinct) {
             workerSql = decomposeDistinctToDedup(workerSql, aggregate);
         }
@@ -790,6 +789,17 @@ public final class PlanFragmenter {
             result[i] = calls.get(i).isDistinct();
         }
         return result;
+    }
+
+    static boolean hasNonPassthroughAnyValue(Aggregate aggregate, boolean[] isPassthrough) {
+        List<AggregateCall> calls = aggregate.getAggCallList();
+        for (int i = 0; i < calls.size(); i++) {
+            if (calls.get(i).getAggregation().getKind() == SqlKind.ANY_VALUE
+                && (isPassthrough == null || !isPassthrough[i])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static boolean[] extractIsPassthrough(Aggregate aggregate) {

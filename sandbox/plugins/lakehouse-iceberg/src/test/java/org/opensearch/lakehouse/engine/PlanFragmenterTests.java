@@ -160,9 +160,10 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         PlanFragment leaf = plan.getStages().get(0);
         assertTrue(leaf.isLeaf());
         assertEquals(ExchangeType.GATHER, leaf.getOutputExchange());
-        assertTrue("Workers keep ORDER BY+LIMIT for local top-K",
+        assertFalse("Workers must strip ORDER BY — coordinator re-aggregates all groups",
             leaf.getSql().toUpperCase().contains("ORDER BY"));
-        assertTrue(leaf.getSql().toUpperCase().contains("LIMIT"));
+        assertFalse("Workers must strip LIMIT — coordinator applies global LIMIT",
+            leaf.getSql().toUpperCase().contains("LIMIT"));
 
         PlanFragment fin = plan.getFinalStage();
         assertTrue(fin.getSql().contains("GROUP BY"));
@@ -185,6 +186,8 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         String leafSql = plan.getLeafStage().getSql();
         assertTrue(leafSql.contains("SUM(CAST("));
         assertFalse(leafSql.contains("AVG("));
+        assertFalse("Workers must strip ORDER BY", leafSql.toUpperCase().contains("ORDER BY"));
+        assertFalse("Workers must strip LIMIT", leafSql.toUpperCase().contains("LIMIT"));
 
         String coordSql = plan.getFinalStage().getSql();
         assertTrue(coordSql.contains("CAST(SUM("));
@@ -220,6 +223,16 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         expectThrows(UnsupportedOperationException.class,
             () -> PlanFragmenter.fragment(agg,
                 "SELECT region, SUM(x), COUNT(DISTINCT userid) FROM t GROUP BY region"));
+    }
+
+    public void testGroupByWithNonPassthroughAnyValueThrows() {
+        // ANY_VALUE on non-group-key column (e.g., constant expression like SELECT 1 AS one, ...)
+        AggregateCall anyValueCall = makeAggCallWithArgs(SqlStdOperatorTable.ANY_VALUE, false, List.of(0));
+        AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
+        Aggregate agg = mockAggregate(ImmutableBitSet.of(1), List.of(anyValueCall, countCall));
+        expectThrows(UnsupportedOperationException.class,
+            () -> PlanFragmenter.fragment(agg,
+                "SELECT 1 AS one, url, COUNT(*) FROM t GROUP BY url"));
     }
 
     public void testGroupByWithHavingThrows() {
