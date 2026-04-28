@@ -146,6 +146,26 @@ public final class PlanFragmenter {
     ) {
         int groupCount = aggregate.getGroupSet().cardinality();
         boolean hasLimit = sort != null && sort.fetch != null;
+        boolean needsDecomposition = hasAvg || hasDistinct;
+
+        if (hasLimit && !needsDecomposition) {
+            // Workers keep ORDER BY + LIMIT (no column layout changes), producing
+            // bounded local top-K. Coordinator re-aggregates K * numWorkers rows.
+            // OFFSET is stripped from workers (applied globally on coordinator).
+            // Worker LIMIT is expanded to LIMIT + OFFSET so coordinator can skip.
+            int offset = extractOffset(sort);
+            String workerSql = stripOffset(sql);
+            if (offset > 0) {
+                int limit = extractLimit(sort);
+                workerSql = adjustLimit(workerSql, limit + offset);
+            }
+            PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.GATHER, null);
+
+            String coordinatorSql = buildTwoPhaseGroupByCoordinatorSql(groupCount, aggKinds, sort, hasAvg, isDistinct, isPassthrough, havingClause);
+            PlanFragment finalStage = PlanFragment.intermediate(1, coordinatorSql, ExchangeType.NONE, null);
+
+            return SubPlan.distributed(List.of(leafStage, finalStage));
+        }
 
         String workerSql = stripOrderByLimitOffset(sql);
         if (hasDistinct) {
@@ -156,6 +176,7 @@ public final class PlanFragmenter {
         }
 
         if (hasLimit) {
+            // Decomposition changes column layout; use 3-stage HASH plan
             int[] groupKeyIndices = groupKeyIndices(groupCount);
             PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.HASH, groupKeyIndices);
 
@@ -776,6 +797,32 @@ public final class PlanFragmenter {
         String before = sql.substring(0, havingIdx).stripTrailing();
         String after = endIdx < sql.length() ? " " + sql.substring(endIdx) : "";
         return before + after;
+    }
+
+    static String adjustLimit(String sql, int newLimit) {
+        String upper = sql.toUpperCase();
+        int limitIdx = findKeyword(upper, "LIMIT");
+        if (limitIdx < 0) return sql;
+        int afterLimit = limitIdx + 5;
+        while (afterLimit < sql.length() && Character.isWhitespace(sql.charAt(afterLimit))) {
+            afterLimit++;
+        }
+        int endNum = afterLimit;
+        while (endNum < sql.length() && Character.isDigit(sql.charAt(endNum))) {
+            endNum++;
+        }
+        return sql.substring(0, afterLimit) + newLimit + sql.substring(endNum);
+    }
+
+    static String stripOffset(String sql) {
+        String upper = sql.toUpperCase();
+        int offsetIdx = findKeyword(upper, "OFFSET");
+        if (offsetIdx < 0) return sql;
+        int endIdx = offsetIdx + 6;
+        while (endIdx < sql.length() && (Character.isWhitespace(sql.charAt(endIdx)) || Character.isDigit(sql.charAt(endIdx)))) {
+            endIdx++;
+        }
+        return (sql.substring(0, offsetIdx).stripTrailing() + " " + sql.substring(endIdx)).stripTrailing();
     }
 
     static String stripOrderByLimitOffset(String sql) {

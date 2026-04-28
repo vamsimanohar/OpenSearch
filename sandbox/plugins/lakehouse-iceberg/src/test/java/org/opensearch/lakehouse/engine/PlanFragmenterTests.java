@@ -147,7 +147,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue(coordSql.contains("SUM("));
     }
 
-    public void testGroupByWithLimitReturnsThreeStageHash() {
+    public void testGroupByWithLimitReturnsTwoStageLocalTopK() {
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(makeAggCall(SqlStdOperatorTable.COUNT, false)));
         RelNode wrapper = mockNodeWithInput(agg);
         Sort sort = makeSortWithInput(wrapper, true);
@@ -155,13 +155,14 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         SubPlan plan = PlanFragmenter.fragment(sort,
             "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY COUNT(*) DESC LIMIT 10");
 
-        assertEquals(3, plan.getStageCount());
-        assertEquals(ExchangeType.HASH, plan.getLeafStage().getOutputExchange());
-        assertNotNull(plan.getLeafStage().getHashColumns());
+        assertEquals(2, plan.getStageCount());
+        assertEquals(ExchangeType.GATHER, plan.getLeafStage().getOutputExchange());
 
-        String intermediateSql = plan.getStages().get(1).getSql();
-        assertTrue(intermediateSql.contains("GROUP BY"));
-        assertTrue(intermediateSql.contains("LIMIT 10"));
+        String leafSql = plan.getLeafStage().getSql();
+        assertTrue("Workers should keep ORDER BY+LIMIT", leafSql.contains("LIMIT 10"));
+
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue(coordSql.contains("GROUP BY"));
     }
 
     public void testGroupByWithLimitAndAvgReturnsThreeStageHash() {
@@ -241,7 +242,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue(coordSql.contains("COUNT(*) > 100"));
     }
 
-    public void testGroupByWithOffsetReturnsThreeStageHash() {
+    public void testGroupByWithOffsetReturnsTwoStageLocalTopK() {
         AggregateCall countCall = makeAggCall(SqlStdOperatorTable.COUNT, false);
         Aggregate agg = mockAggregate(ImmutableBitSet.of(0), List.of(countCall));
         RelNode wrapper = mockNodeWithInput(agg);
@@ -250,12 +251,15 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         SubPlan plan = PlanFragmenter.fragment(sort,
             "SELECT region, COUNT(*) FROM t GROUP BY region ORDER BY 2 DESC LIMIT 10 OFFSET 100");
 
-        assertEquals(3, plan.getStageCount());
-        assertEquals(ExchangeType.HASH, plan.getLeafStage().getOutputExchange());
+        assertEquals(2, plan.getStageCount());
+        assertEquals(ExchangeType.GATHER, plan.getLeafStage().getOutputExchange());
 
-        String intermediateSql = plan.getStages().get(1).getSql();
-        assertTrue(intermediateSql.contains("LIMIT 10"));
-        assertTrue(intermediateSql.contains("OFFSET 100"));
+        String leafSql = plan.getLeafStage().getSql();
+        assertTrue("Workers should expand LIMIT to LIMIT+OFFSET", leafSql.contains("LIMIT 110"));
+        assertFalse("Workers should not have OFFSET", leafSql.toUpperCase().contains("OFFSET"));
+
+        String coordSql = plan.getFinalStage().getSql();
+        assertTrue(coordSql.contains("OFFSET 100"));
     }
 
     public void testGroupByCountDistinctWithLimitReturnsThreeStageHash() {
@@ -642,6 +646,30 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             "SELECT a, COUNT(*) FROM t GROUP BY a HAVING COUNT(*) > 100"
         );
         assertEquals("SELECT a, COUNT(*) FROM t GROUP BY a", result);
+    }
+
+    public void testStripOffsetRemovesOffset() {
+        String result = PlanFragmenter.stripOffset(
+            "SELECT a, COUNT(*) FROM t GROUP BY a ORDER BY 2 DESC LIMIT 10 OFFSET 1000"
+        );
+        assertEquals("SELECT a, COUNT(*) FROM t GROUP BY a ORDER BY 2 DESC LIMIT 10", result);
+    }
+
+    public void testStripOffsetNoOffset() {
+        String sql = "SELECT a FROM t ORDER BY a LIMIT 10";
+        assertEquals(sql, PlanFragmenter.stripOffset(sql));
+    }
+
+    public void testAdjustLimitChangesValue() {
+        String result = PlanFragmenter.adjustLimit(
+            "SELECT a FROM t GROUP BY a ORDER BY 2 DESC LIMIT 10", 110
+        );
+        assertEquals("SELECT a FROM t GROUP BY a ORDER BY 2 DESC LIMIT 110", result);
+    }
+
+    public void testAdjustLimitNoLimitUnchanged() {
+        String sql = "SELECT a FROM t GROUP BY a";
+        assertEquals(sql, PlanFragmenter.adjustLimit(sql, 100));
     }
 
     // ==== SQL rewriting tests ====
