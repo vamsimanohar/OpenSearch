@@ -182,6 +182,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
 
         String leafSql = plan.getLeafStage().getSql();
         assertTrue("Worker should decompose AVG", leafSql.contains("SUM(CAST("));
+        assertTrue("Worker should have bounded LIMIT", leafSql.contains("LIMIT 500"));
 
         String intermediateSql = plan.getStages().get(1).getSql();
         assertTrue(intermediateSql.contains("LIMIT 5"));
@@ -278,6 +279,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
 
         String leafSql = plan.getLeafStage().getSql();
         assertTrue("Worker should dedup", leafSql.contains("userid"));
+        assertTrue("Worker should have bounded LIMIT", leafSql.contains("LIMIT 1000"));
 
         String intermediateSql = plan.getStages().get(1).getSql();
         assertTrue(intermediateSql.contains("COUNT(DISTINCT"));
@@ -301,6 +303,7 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         String leafSql = plan.getLeafStage().getSql();
         assertFalse("Worker should not have HAVING", leafSql.toUpperCase().contains("HAVING"));
         assertTrue("Worker should decompose AVG", leafSql.contains("SUM(CAST("));
+        assertTrue("Worker should have bounded LIMIT", leafSql.contains("LIMIT 2500"));
 
         String intermediateSql = plan.getStages().get(1).getSql();
         assertTrue("Intermediate HAVING should use re-aggregated SUM", intermediateSql.contains("HAVING SUM("));

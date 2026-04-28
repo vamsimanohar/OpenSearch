@@ -170,7 +170,11 @@ public final class PlanFragmenter {
         }
 
         if (hasLimit && needsDecomposition) {
-            // Decomposition changes column layout; use 3-stage HASH plan
+            int limit = extractLimit(sort);
+            int offset = sort != null ? extractOffset(sort) : 0;
+            int workerLimit = Math.max(limit + offset, limit * 100);
+            workerSql = workerSql + " LIMIT " + workerLimit;
+
             int[] groupKeyIndices = groupKeyIndices(groupCount);
             PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.HASH, groupKeyIndices);
 
