@@ -446,16 +446,15 @@ public final class PlanFragmenter {
             sb.append("\"col_").append(i).append("\"");
         }
 
-        if (havingClause != null) {
-            sb.append(" HAVING ").append(havingClause);
-        }
-
         boolean hasOrderBy = sort != null && sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
-        boolean wrapInSubquery = hasAvg && hasOrderBy;
+        boolean needsSubqueryWrap = (hasAvg && hasOrderBy) || havingClause != null;
 
-        if (wrapInSubquery) {
+        if (needsSubqueryWrap) {
             sb.insert(0, "SELECT * FROM (");
             sb.append(")");
+            if (havingClause != null) {
+                sb.append(" WHERE ").append(havingClause);
+            }
         }
 
         if (hasOrderBy) {
@@ -547,16 +546,18 @@ public final class PlanFragmenter {
             sb.append("\"col_").append(i).append("\"");
         }
 
-        if (havingClause != null) {
-            sb.append(" HAVING ").append(havingClause);
-        }
-
+        // HAVING must be applied after re-aggregation on the outer query (not inside
+        // the GROUP BY, where COUNT(*) counts intermediate rows instead of actual counts).
+        // Wrap in a subquery and apply HAVING as WHERE using positional column refs.
         boolean hasOrderBy = sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
-        boolean wrapInSubquery = hasAvg && hasOrderBy;
+        boolean needsSubqueryWrap = hasAvg && hasOrderBy;
 
-        if (wrapInSubquery) {
+        if (havingClause != null || needsSubqueryWrap) {
             sb.insert(0, "SELECT * FROM (");
             sb.append(")");
+            if (havingClause != null) {
+                sb.append(" WHERE ").append(havingClause);
+            }
         }
 
         if (hasOrderBy) {

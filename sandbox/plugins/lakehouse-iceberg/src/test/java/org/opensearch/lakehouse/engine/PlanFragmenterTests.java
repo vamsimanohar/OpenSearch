@@ -238,8 +238,8 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertFalse("Worker SQL should not have HAVING", leafSql.toUpperCase().contains("HAVING"));
 
         String coordSql = plan.getFinalStage().getSql();
-        assertTrue("Coordinator should apply HAVING", coordSql.contains("HAVING"));
-        assertTrue(coordSql.contains("COUNT(*) > 100"));
+        assertTrue("Coordinator wraps in subquery for HAVING", coordSql.contains("SELECT * FROM ("));
+        assertTrue(coordSql.contains("WHERE COUNT(*) > 100"));
     }
 
     public void testGroupByWithOffsetReturnsTwoStageLocalTopK() {
@@ -301,7 +301,8 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertTrue("Worker should decompose AVG", leafSql.contains("SUM(CAST("));
 
         String intermediateSql = plan.getStages().get(1).getSql();
-        assertTrue("Intermediate should have HAVING", intermediateSql.contains("HAVING"));
+        assertTrue("Intermediate wraps in subquery for HAVING", intermediateSql.contains("SELECT * FROM ("));
+        assertTrue(intermediateSql.contains("WHERE COUNT(*) > 100000"));
         assertTrue(intermediateSql.contains("LIMIT 25"));
     }
 
@@ -570,7 +571,8 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             1, new SqlKind[] { SqlKind.COUNT }, null, false,
             new boolean[] { false }, null, "COUNT(*) > 100"
         );
-        assertTrue(sql.contains("HAVING COUNT(*) > 100"));
+        assertTrue("HAVING wraps as subquery WHERE", sql.contains("SELECT * FROM ("));
+        assertTrue(sql.contains("WHERE COUNT(*) > 100"));
         assertTrue(sql.contains("GROUP BY"));
     }
 
@@ -591,7 +593,8 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
             1, new SqlKind[] { SqlKind.COUNT }, sort, false,
             new boolean[] { false }, null, "COUNT(*) > 100000"
         );
-        assertTrue(sql.contains("HAVING COUNT(*) > 100000"));
+        assertTrue("HAVING wraps as subquery WHERE", sql.contains("SELECT * FROM ("));
+        assertTrue(sql.contains("WHERE COUNT(*) > 100000"));
         assertTrue(sql.contains("LIMIT 25"));
     }
 
