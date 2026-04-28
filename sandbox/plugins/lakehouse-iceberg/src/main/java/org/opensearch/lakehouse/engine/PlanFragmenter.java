@@ -148,12 +148,18 @@ public final class PlanFragmenter {
         boolean hasLimit = sort != null && sort.fetch != null;
         boolean needsDecomposition = hasAvg || hasDistinct;
 
+        // Bounded local top-K: keep ORDER BY with expanded LIMIT to prevent OOM
+        // from high-cardinality GROUP BY. Applied when LIMIT is present AND either:
+        // (a) no decomposition needed, or
+        // (b) AVG-only decomposition (no DISTINCT, no HAVING) — AVG decomposition
+        //     preserves non-AVG ORDER BY aliases (e.g. ORDER BY c where c=COUNT(*)).
+        // COUNT(DISTINCT) can't use bounded top-K (dedup must be complete).
+        // HAVING can't use bounded top-K (filtering needs all groups).
+        boolean useBoundedTopK = hasLimit
+            && (!needsDecomposition || (hasAvg && !hasDistinct && havingClause == null));
+
         String workerSql;
-        if (hasLimit && !needsDecomposition) {
-            // Workers keep ORDER BY with expanded LIMIT to bound output while
-            // maintaining high accuracy. Without this, high-cardinality GROUP BY
-            // sends millions of groups per worker, causing OOM during Arrow IPC
-            // serialization on the coordinator.
+        if (useBoundedTopK) {
             int limit = extractLimit(sort);
             int offset = sort != null ? extractOffset(sort) : 0;
             int workerLimit = Math.max(limit + offset, limit * 100);
@@ -170,11 +176,6 @@ public final class PlanFragmenter {
         }
 
         if (hasLimit && needsDecomposition) {
-            int limit = extractLimit(sort);
-            int offset = sort != null ? extractOffset(sort) : 0;
-            int workerLimit = Math.max(limit + offset, limit * 100);
-            workerSql = workerSql + " LIMIT " + workerLimit;
-
             int[] groupKeyIndices = groupKeyIndices(groupCount);
             PlanFragment leafStage = PlanFragment.leaf(0, workerSql, ExchangeType.HASH, groupKeyIndices);
 
