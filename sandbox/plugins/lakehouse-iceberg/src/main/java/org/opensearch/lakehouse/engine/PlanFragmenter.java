@@ -243,6 +243,10 @@ public final class PlanFragmenter {
      * subquery to strip those extra columns from the final output.
      */
     private static SubPlan fragmentSort(Sort sort, String sql, RelNode relNode) {
+        boolean hasCollation = sort.getCollation() != null && !sort.getCollation().getFieldCollations().isEmpty();
+        if (!hasCollation) {
+            return fragmentScan(sql);
+        }
         if (sort.fetch == null) {
             throw new UnsupportedOperationException(
                 "ORDER BY without LIMIT is not distributable — unbounded sort requires all data on one node"
@@ -895,7 +899,7 @@ public final class PlanFragmenter {
                 aggregate = (Aggregate) node;
             } else if (node instanceof Sort && sort == null) {
                 Sort s = (Sort) node;
-                if (!s.getCollation().getFieldCollations().isEmpty()) {
+                if (!s.getCollation().getFieldCollations().isEmpty() || s.fetch != null) {
                     sort = s;
                 }
             }

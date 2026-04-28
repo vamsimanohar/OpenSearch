@@ -719,12 +719,14 @@ public class PlanFragmenterTests extends OpenSearchTestCase {
         assertNotNull(visitor.aggregate);
     }
 
-    public void testPlanVisitorSkipsSortWithEmptyCollation() {
+    public void testPlanVisitorCapturesSortWithLimitOnly() {
         Sort sort = makeSort(false, true);
         PlanFragmenter.PlanVisitor visitor = new PlanFragmenter.PlanVisitor();
         visitor.go(sort);
-        assertNull(visitor.sort);
+        assertNotNull("Sort with LIMIT (no ORDER BY) should be captured", visitor.sort);
     }
+
+    // Note: Sort with empty collation AND no fetch cannot be created (Calcite rejects "trivial sort")
 
     // ---- helpers (same pattern as QueryAnalyzerTests) ----
 
