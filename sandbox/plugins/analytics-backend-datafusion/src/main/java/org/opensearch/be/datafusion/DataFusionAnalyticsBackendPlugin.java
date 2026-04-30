@@ -123,16 +123,6 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
     }
 
     @Override
-    public ExchangeSinkProvider getExchangeSinkProvider() {
-        DataFusionService dataFusionService = plugin.getDataFusionService();
-        if (dataFusionService == null) {
-            // createComponents() may not have been called yet; fall back to the lazy SPI path.
-            dataFusionService = DataFusionPlugin.ensureSharedService();
-        }
-        return new DataFusionExchangeSinkProvider(dataFusionService);
-    }
-
-    @Override
     public FragmentConvertor getFragmentConvertor() {
         return new DataFusionFragmentConvertor(plugin.getSubstraitExtensions());
     }

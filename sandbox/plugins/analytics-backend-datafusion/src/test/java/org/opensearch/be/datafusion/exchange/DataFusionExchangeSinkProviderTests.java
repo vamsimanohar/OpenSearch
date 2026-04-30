@@ -9,6 +9,7 @@
 package org.opensearch.be.datafusion.exchange;
 
 import org.opensearch.analytics.spi.ExchangeSink;
+import org.opensearch.analytics.spi.ExchangeSinkContext;
 import org.opensearch.be.datafusion.DataFusionService;
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -30,26 +31,33 @@ public class DataFusionExchangeSinkProviderTests extends OpenSearchTestCase {
         DataFusionExchangeSinkProvider provider = new DataFusionExchangeSinkProvider(service);
 
         byte[] bytes = "SELECT * FROM input".getBytes(StandardCharsets.UTF_8);
-        ExchangeSink sink = provider.createSink(bytes);
+        ExchangeSinkContext ctx = new ExchangeSinkContext("q1", 0, bytes, null, null, null);
+        ExchangeSink sink = provider.createSink(ctx);
 
         assertNotNull("createSink must return a non-null sink", sink);
         assertTrue(sink instanceof DataFusionExchangeSink);
         DataFusionExchangeSink dfSink = (DataFusionExchangeSink) sink;
         assertEquals("SELECT * FROM input", dfSink.coordinatorSql());
-        // In P1 the framework does not pipe the downstream through — this is a recorded gap.
-        assertNull("Downstream must be null under the P1 framework contract", dfSink.downstream());
     }
 
-    public void testCreateSinkRejectsNullBytes() {
+    public void testCreateSinkRejectsNullContext() {
         DataFusionService service = mock(DataFusionService.class);
         DataFusionExchangeSinkProvider provider = new DataFusionExchangeSinkProvider(service);
         expectThrows(IllegalArgumentException.class, () -> provider.createSink(null));
     }
 
+    public void testCreateSinkRejectsNullFragmentBytes() {
+        DataFusionService service = mock(DataFusionService.class);
+        DataFusionExchangeSinkProvider provider = new DataFusionExchangeSinkProvider(service);
+        ExchangeSinkContext ctx = new ExchangeSinkContext("q1", 0, null, null, null, null);
+        expectThrows(IllegalArgumentException.class, () -> provider.createSink(ctx));
+    }
+
     public void testCreateSinkWithEmptyBytesProducesEmptySql() {
         DataFusionService service = mock(DataFusionService.class);
         DataFusionExchangeSinkProvider provider = new DataFusionExchangeSinkProvider(service);
-        ExchangeSink sink = provider.createSink(new byte[0]);
+        ExchangeSinkContext ctx = new ExchangeSinkContext("q1", 0, new byte[0], null, null, null);
+        ExchangeSink sink = provider.createSink(ctx);
         assertNotNull(sink);
         assertEquals("", ((DataFusionExchangeSink) sink).coordinatorSql());
     }
@@ -58,9 +66,9 @@ public class DataFusionExchangeSinkProviderTests extends OpenSearchTestCase {
         DataFusionService service = mock(DataFusionService.class);
         DataFusionExchangeSinkProvider provider = new DataFusionExchangeSinkProvider(service);
 
-        // Non-ASCII characters should survive the UTF-8 round-trip.
         String sql = "SELECT '\u00e9\u00e8\u00e0' AS greeting";
-        ExchangeSink sink = provider.createSink(sql.getBytes(StandardCharsets.UTF_8));
+        ExchangeSinkContext ctx = new ExchangeSinkContext("q1", 0, sql.getBytes(StandardCharsets.UTF_8), null, null, null);
+        ExchangeSink sink = provider.createSink(ctx);
         assertEquals(sql, ((DataFusionExchangeSink) sink).coordinatorSql());
     }
 }

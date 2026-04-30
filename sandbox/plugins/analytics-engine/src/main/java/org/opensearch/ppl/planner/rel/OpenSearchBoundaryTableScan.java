@@ -24,6 +24,7 @@ import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.TableScan;
 import org.apache.calcite.rel.type.RelDataType;
+import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
 
 import java.util.List;
@@ -126,8 +127,9 @@ public class OpenSearchBoundaryTableScan extends TableScan implements Enumerable
     @SuppressWarnings("unchecked")
     public Enumerable<Object[]> bind(DataContext dataContext) {
         try {
-            Iterable<Object[]> result = (Iterable<Object[]>) planExecutor.execute(logicalFragment, dataContext);
-            return Linq4j.asEnumerable(result);
+            PlainActionFuture<Iterable<Object[]>> future = PlainActionFuture.newFuture();
+            planExecutor.execute(logicalFragment, dataContext, future);
+            return Linq4j.asEnumerable(future.actionGet());
         } catch (Exception e) {
             throw new RuntimeException(
                 "Engine execution failed for table ["

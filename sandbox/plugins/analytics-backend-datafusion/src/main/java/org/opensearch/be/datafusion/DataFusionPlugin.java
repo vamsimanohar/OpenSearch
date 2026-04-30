@@ -57,22 +57,6 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
 
     private static final Logger logger = LogManager.getLogger(DataFusionPlugin.class);
 
-    /** Memory pool limit for the DataFusion runtime. */
-    public static final Setting<Long> DATAFUSION_MEMORY_POOL_LIMIT = Setting.longSetting(
-        "datafusion.memory_pool_limit_bytes",
-        Runtime.getRuntime().maxMemory() / 4,
-        0L,
-        Setting.Property.NodeScope
-    );
-
-    /** Spill memory limit — when exceeded, DataFusion spills to disk. */
-    public static final Setting<Long> DATAFUSION_SPILL_MEMORY_LIMIT = Setting.longSetting(
-        "datafusion.spill_memory_limit_bytes",
-        Runtime.getRuntime().maxMemory() / 8,
-        0L,
-        Setting.Property.NodeScope
-    );
-
     /**
      * Selects how the coordinator-reduce sink hands shard responses to the native runtime.
      */

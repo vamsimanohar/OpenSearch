@@ -12,6 +12,7 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.action.support.PlainActionFuture;
 import org.opensearch.analytics.EngineContext;
 import org.opensearch.ppl.compiler.OpenSearchQueryCompiler;
 import org.opensearch.ppl.planner.PushDownPlanner;
@@ -156,8 +157,9 @@ public class UnifiedQueryService {
     @SuppressWarnings("unchecked")
     private PPLResponse executeDirectly(OpenSearchBoundaryTableScan boundary) {
         List<String> columns = boundary.getRowType().getFieldNames();
-        Iterable<Object[]> result = (Iterable<Object[]>) boundary.getEngineExecutor()
-            .execute(boundary.getLogicalFragment(), null);
+        PlainActionFuture<Iterable<Object[]>> future = PlainActionFuture.newFuture();
+        boundary.getEngineExecutor().execute(boundary.getLogicalFragment(), null, future);
+        Iterable<Object[]> result = future.actionGet();
         List<Object[]> rows = new ArrayList<>();
         for (Object[] row : result) {
             rows.add(row);
