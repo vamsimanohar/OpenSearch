@@ -53,6 +53,13 @@ public final class NativeBridge {
     private static final MethodHandle EXECUTE_ICEBERG_QUERY;
     private static final MethodHandle EXECUTE_FROM_IPC;
     private static final MethodHandle SQL_TO_SUBSTRAIT;
+    private static final MethodHandle CREATE_LOCAL_SESSION;
+    private static final MethodHandle CLOSE_LOCAL_SESSION;
+    private static final MethodHandle REGISTER_PARTITION_STREAM;
+    private static final MethodHandle EXECUTE_LOCAL_PLAN;
+    private static final MethodHandle SENDER_SEND;
+    private static final MethodHandle SENDER_CLOSE;
+    private static final MethodHandle REGISTER_MEMTABLE;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -171,6 +178,64 @@ public final class NativeBridge {
                 ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG,
                 ValueLayout.ADDRESS
+            )
+        );
+
+        // ── Coordinator-reduce bindings ──
+        // i64 df_create_local_session(runtime_ptr)
+        CREATE_LOCAL_SESSION = linker.downcallHandle(
+            lib.find("df_create_local_session").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+
+        // void df_close_local_session(session_ptr)
+        CLOSE_LOCAL_SESSION = linker.downcallHandle(
+            lib.find("df_close_local_session").orElseThrow(),
+            FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG)
+        );
+
+        // i64 df_register_partition_stream(session_ptr, input_id_ptr, input_id_len, schema_ipc_ptr, schema_ipc_len)
+        REGISTER_PARTITION_STREAM = linker.downcallHandle(
+            lib.find("df_register_partition_stream").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG
+            )
+        );
+
+        // i64 df_execute_local_plan(session_ptr, substrait_ptr, substrait_len)
+        EXECUTE_LOCAL_PLAN = linker.downcallHandle(
+            lib.find("df_execute_local_plan").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG)
+        );
+
+        // i64 df_sender_send(sender_ptr, array_ptr, schema_ptr)
+        SENDER_SEND = linker.downcallHandle(
+            lib.find("df_sender_send").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
+        );
+
+        // void df_sender_close(sender_ptr)
+        SENDER_CLOSE = linker.downcallHandle(lib.find("df_sender_close").orElseThrow(), FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG));
+
+        // i64 df_register_memtable(session_ptr, input_id_ptr, input_id_len, schema_ipc_ptr, schema_ipc_len,
+        // array_ptrs, schema_ptrs, n_batches)
+        REGISTER_MEMTABLE = linker.downcallHandle(
+            lib.find("df_register_memtable").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG
             )
         );
     }
@@ -310,13 +375,83 @@ public final class NativeBridge {
         }
     }
 
+    // ---- Coordinator-reduce exports ----
+
+    public static long createLocalSession(long runtimePtr) {
+        NativeHandle.validatePointer(runtimePtr, "runtime");
+        try (var call = new NativeCall()) {
+            return call.invoke(CREATE_LOCAL_SESSION, runtimePtr);
+        }
+    }
+
+    public static void closeLocalSession(long sessionPtr) {
+        NativeCall.invokeVoid(CLOSE_LOCAL_SESSION, sessionPtr);
+    }
+
+    public static long registerPartitionStream(long sessionPtr, String inputId, byte[] schemaIpc) {
+        NativeHandle.validatePointer(sessionPtr, "session");
+        try (var call = new NativeCall()) {
+            var id = call.str(inputId);
+            return call.invoke(
+                REGISTER_PARTITION_STREAM,
+                sessionPtr,
+                id.segment(),
+                id.len(),
+                call.bytes(schemaIpc),
+                (long) schemaIpc.length
+            );
+        }
+    }
+
+    public static long executeLocalPlan(long sessionPtr, byte[] substrait) {
+        NativeHandle.validatePointer(sessionPtr, "session");
+        try (var call = new NativeCall()) {
+            return call.invoke(EXECUTE_LOCAL_PLAN, sessionPtr, call.bytes(substrait), (long) substrait.length);
+        }
+    }
+
+    public static long senderSend(long senderPtr, long arrayPtr, long schemaPtr) {
+        NativeHandle.validatePointer(senderPtr, "sender");
+        if (arrayPtr == 0) {
+            throw new IllegalArgumentException("arrayPtr must be non-zero");
+        }
+        if (schemaPtr == 0) {
+            throw new IllegalArgumentException("schemaPtr must be non-zero");
+        }
+        try (var call = new NativeCall()) {
+            return call.invoke(SENDER_SEND, senderPtr, arrayPtr, schemaPtr);
+        }
+    }
+
+    public static void senderClose(long senderPtr) {
+        NativeCall.invokeVoid(SENDER_CLOSE, senderPtr);
+    }
+
+    public static long registerMemtable(long sessionPtr, String inputId, byte[] schemaIpc, long[] arrayPtrs, long[] schemaPtrs) {
+        NativeHandle.validatePointer(sessionPtr, "session");
+        if (arrayPtrs.length != schemaPtrs.length) {
+            throw new IllegalArgumentException(
+                "arrayPtrs.length (" + arrayPtrs.length + ") != schemaPtrs.length (" + schemaPtrs.length + ")"
+            );
+        }
+        try (var call = new NativeCall()) {
+            var id = call.str(inputId);
+            return call.invoke(
+                REGISTER_MEMTABLE,
+                sessionPtr,
+                id.segment(),
+                id.len(),
+                call.bytes(schemaIpc),
+                (long) schemaIpc.length,
+                call.longs(arrayPtrs),
+                call.longs(schemaPtrs),
+                (long) arrayPtrs.length
+            );
+        }
+    }
+
     // ---- Iceberg / S3 query execution ----
 
-    /**
-     * Executes a SQL query against S3-backed (or local file://) Parquet files via DataFusion.
-     * Marshals all arguments to native memory and calls {@code df_execute_iceberg_query}.
-     * Returns a stream pointer via the listener on success.
-     */
     public static void executeIcebergQueryAsync(
         String s3Region,
         String s3Bucket,
@@ -373,17 +508,6 @@ public final class NativeBridge {
 
     // ---- Execute SQL over accumulated Arrow IPC bytes (exchange-sink path) ----
 
-    /**
-     * Executes a SQL query over a serialized Arrow IPC stream via DataFusion.
-     * The IPC bytes contain a full stream-format encoding (schema + record batches + EOS)
-     * of the input. Rust reads the IPC, registers it as an in-memory table that {@code sql}
-     * references, runs the SQL, and returns a stream pointer via the listener on success.
-     *
-     * @param ipc         full Arrow IPC stream-format bytes; must not be {@code null}
-     * @param sql         coordinator SQL to evaluate over the IPC input
-     * @param runtimePtr  native DataFusion runtime pointer
-     * @param listener    receives the resulting stream pointer or any failure
-     */
     public static void executeFromIpcAsync(byte[] ipc, String sql, long runtimePtr, ActionListener<Long> listener) {
         try {
             NativeHandle.validatePointer(runtimePtr, "runtime");
