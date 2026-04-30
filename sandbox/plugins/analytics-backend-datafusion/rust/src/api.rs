@@ -919,25 +919,23 @@ pub async unsafe fn execute_local_plan(
     session_ptr: i64,
     substrait_bytes: &[u8],
     manager: &RuntimeManager,
-    context_id: i64,
+    _context_id: i64,
 ) -> Result<i64, DataFusionError> {
     let session = &*(session_ptr as *const LocalSession);
 
-    // Per-query memory tracking — wraps the session's global pool. A
-    // `context_id` of 0 disables tracking (pool is not consulted).
-    let query_context = QueryTrackingContext::new(context_id, session.memory_pool());
-
     let df_stream = session.execute_substrait(substrait_bytes).await?;
 
-    // Wrap the output in the same CrossRtStream + RecordBatchStreamAdapter
-    // shape as `execute_query`, so existing `stream_next` / `stream_close`
-    // drain this handle unchanged.
+    let memory_pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool> =
+        Arc::new(datafusion::execution::memory_pool::UnboundedMemoryPool::default());
+
     let cross_rt_stream =
         CrossRtStream::new_with_df_error_stream(df_stream, manager.cpu_executor());
-    let wrapped = RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream);
-
-    let handle = QueryStreamHandle::new(wrapped, query_context);
-    Ok(Box::into_raw(Box::new(handle)) as i64)
+    let wrapped = MemoryTrackingStream {
+        inner: RecordBatchStreamAdapter::new(cross_rt_stream.schema(), cross_rt_stream),
+        memory_pool,
+        peak_memory: std::sync::atomic::AtomicUsize::new(0),
+    };
+    Ok(Box::into_raw(Box::new(wrapped)) as i64)
 }
 
 /// Imports an Arrow C Data batch and pushes it through the partition
