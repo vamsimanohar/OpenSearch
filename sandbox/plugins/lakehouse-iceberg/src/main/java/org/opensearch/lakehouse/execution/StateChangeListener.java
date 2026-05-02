@@ -5,8 +5,8 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Derived from Trino (io.trino.execution.StateMachine.StateChangeListener).
- * Adapted for OpenSearch: removed Guava dependencies.
+ *
+ *
  */
 
 package org.opensearch.lakehouse.execution;

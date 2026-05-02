@@ -5,8 +5,8 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Derived from Trino (io.trino.execution.StateMachine).
- * Adapted for OpenSearch: replaced Guava ListenableFuture/SettableFuture
+ *
+ *
  * with JDK CompletableFuture, replaced Airlift Logger with Log4j.
  */
 
@@ -27,7 +27,7 @@ import static java.util.Objects.requireNonNull;
 /**
  * Thread-safe state machine with async listener notification.
  * <p>
- * Ported from Trino's {@code io.trino.execution.StateMachine}.
+ * Generic thread-safe state container with async listener notification.
  * Terminal states are absorbing — once reached, no further transitions are allowed.
  * Listeners fire asynchronously on a dedicated executor and are cleared on terminal state.
  *

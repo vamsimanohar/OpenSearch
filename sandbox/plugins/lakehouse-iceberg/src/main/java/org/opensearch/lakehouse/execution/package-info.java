@@ -8,7 +8,7 @@
 
 /**
  * Distributed query execution lifecycle — state machines and event-driven
- * stage orchestration. Ported from Trino's execution framework and adapted
+ * stage orchestration.
  * for OpenSearch.
  *
  * @see org.opensearch.lakehouse.execution.StateMachine

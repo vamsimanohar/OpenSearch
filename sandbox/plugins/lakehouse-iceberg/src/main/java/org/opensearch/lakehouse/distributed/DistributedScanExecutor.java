@@ -14,7 +14,6 @@ import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.calcite.rel.RelNode;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.action.support.GroupedActionListener;
 import org.opensearch.analytics.exec.DataWarehouseQueryEngine;
 import org.opensearch.be.datafusion.DataFusionPlugin;
 import org.opensearch.be.datafusion.DataFusionService;
@@ -38,6 +37,12 @@ import org.opensearch.lakehouse.engine.ExchangeType;
 import org.opensearch.lakehouse.engine.PlanFragment;
 import org.opensearch.lakehouse.engine.PlanFragmenter;
 import org.opensearch.lakehouse.engine.SubPlan;
+import org.opensearch.lakehouse.execution.QueryState;
+import org.opensearch.lakehouse.execution.QueryStateMachine;
+import org.opensearch.lakehouse.execution.StageState;
+import org.opensearch.lakehouse.execution.StageStateMachine;
+import org.opensearch.lakehouse.execution.TaskState;
+import org.opensearch.lakehouse.execution.TaskStateMachine;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportException;
 import org.opensearch.transport.TransportResponseHandler;
@@ -49,16 +54,19 @@ import java.nio.channels.Channels;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Unified scan executor that handles both single-node and distributed query execution.
  * <p>
  * Fully asynchronous: dispatches worker queries via transport or local thread pool,
- * collects responses via {@link GroupedActionListener}, and delivers merged results
+ * collects responses via per-task state machines, and delivers merged results
  * through an {@link ActionListener} callback. No thread ever blocks waiting for results.
  * <p>
  * When multiple eligible worker nodes are available and the query is distributable,
@@ -79,6 +87,7 @@ public class DistributedScanExecutor {
     private final NodeDiscovery nodeDiscovery;
     private final DataWarehouseQueryEngine queryEngine;
     private final NativeIpcExecutor nativeIpcExecutor;
+    private final java.util.concurrent.Executor stateExecutor;
 
     /**
      * Creates a new DistributedScanExecutor.
@@ -100,7 +109,7 @@ public class DistributedScanExecutor {
      * @param queryEngine     the external query backend for executing queries
      */
     DistributedScanExecutor(TransportService transportService, ClusterService clusterService, NodeDiscovery nodeDiscovery, DataWarehouseQueryEngine queryEngine) {
-        this(transportService, clusterService, nodeDiscovery, queryEngine, NativeBridge::executeFromIpcAsync);
+        this(transportService, clusterService, nodeDiscovery, queryEngine, NativeBridge::executeFromIpcAsync, Runnable::run);
     }
 
     /**
@@ -119,11 +128,26 @@ public class DistributedScanExecutor {
         DataWarehouseQueryEngine queryEngine,
         NativeIpcExecutor nativeIpcExecutor
     ) {
+        this(transportService, clusterService, nodeDiscovery, queryEngine, nativeIpcExecutor, Runnable::run);
+    }
+
+    /**
+     * Full constructor exposing all test seams.
+     */
+    DistributedScanExecutor(
+        TransportService transportService,
+        ClusterService clusterService,
+        NodeDiscovery nodeDiscovery,
+        DataWarehouseQueryEngine queryEngine,
+        NativeIpcExecutor nativeIpcExecutor,
+        java.util.concurrent.Executor stateExecutor
+    ) {
         this.transportService = transportService;
         this.clusterService = clusterService;
         this.nodeDiscovery = nodeDiscovery;
         this.queryEngine = queryEngine;
         this.nativeIpcExecutor = nativeIpcExecutor;
+        this.stateExecutor = stateExecutor;
     }
 
     /**
@@ -172,11 +196,35 @@ public class DistributedScanExecutor {
             return;
         }
 
+        // Initialize query state machine
+        String queryId = UUID.randomUUID().toString().substring(0, 8);
+        QueryStateMachine queryStateMachine = new QueryStateMachine(queryId, stateExecutor);
+
+        // Create stage state machines and register with query
+        List<StageStateMachine> stageMachines = new ArrayList<>();
+        for (int i = 0; i < subPlan.getStageCount(); i++) {
+            StageStateMachine stageSm = new StageStateMachine(i, stateExecutor);
+            queryStateMachine.addStage(stageSm);
+            stageMachines.add(stageSm);
+        }
+
+        // Wire query failure to logging
+        queryStateMachine.addStateChangeListener(state -> {
+            if (state == QueryState.FAILED) {
+                logger.error("[ScanExecutor] Query {} failed: {}", queryId, queryStateMachine.getFailureCause().getMessage());
+            } else {
+                logger.info("[ScanExecutor] Query {} → {}", queryId, state);
+            }
+        });
+
+        queryStateMachine.transitionToStarting();
+
         PlanFragment leafStage = subPlan.getLeafStage();
         PlanFragment finalStage = subPlan.getFinalStage();
 
         logger.info(
-            "[ScanExecutor] Distributing query across {} workers, stages={}, exchange={}, files={}",
+            "[ScanExecutor] Distributing query {} across {} workers, stages={}, exchange={}, files={}",
+            queryId,
             workers.size(),
             subPlan.getStageCount(),
             leafStage.getOutputExchange(),
@@ -185,21 +233,60 @@ public class DistributedScanExecutor {
 
         List<FilePartitioner.FileAssignment> assignments = FilePartitioner.partition(filePaths, fileSizes, workers.size());
 
+        queryStateMachine.transitionToRunning();
+        StageStateMachine leafStageSm = stageMachines.get(0);
+
         if (subPlan.getStageCount() == 3 && leafStage.getOutputExchange() == ExchangeType.HASH) {
-            executeThreeStageAsync(subPlan, workers, assignments, storageConfig, tableName, listener);
+            StageStateMachine intermediateStageSm = stageMachines.get(1);
+            StageStateMachine finalStageSm = stageMachines.get(2);
+
+            executeThreeStageAsync(subPlan, workers, assignments, storageConfig, tableName,
+                leafStageSm, intermediateStageSm, finalStageSm, ActionListener.wrap(
+                result -> {
+                    queryStateMachine.transitionToFinishing();
+                    queryStateMachine.transitionToFinished();
+                    listener.onResponse(result);
+                },
+                e -> {
+                    queryStateMachine.transitionToFailed(e);
+                    listener.onFailure(e);
+                }
+            ));
         } else {
+            StageStateMachine finalStageSm = stageMachines.get(stageMachines.size() - 1);
             String workerSql = leafStage.getSql();
             String coordinatorSql = finalStage.getSql();
 
-            dispatchAndCollect(workers, assignments, workerSql, storageConfig, tableName, ActionListener.wrap(
+            dispatchAndCollect(queryId, workers, assignments, workerSql, storageConfig, tableName,
+                leafStageSm, ActionListener.wrap(
                 responses -> {
+                    // Leaf stage done, start final stage (coordinator merge)
+                    finalStageSm.transitionToScheduling();
+                    finalStageSm.transitionToRunning();
                     try {
-                        mergeViaDataFusion(responses, coordinatorSql, subPlan, listener);
+                        mergeViaDataFusion(responses, coordinatorSql, subPlan, ActionListener.wrap(
+                            result -> {
+                                finalStageSm.transitionToFinished();
+                                queryStateMachine.transitionToFinishing();
+                                queryStateMachine.transitionToFinished();
+                                listener.onResponse(result);
+                            },
+                            e -> {
+                                finalStageSm.transitionToFailed(e);
+                                queryStateMachine.transitionToFailed(e);
+                                listener.onFailure(e);
+                            }
+                        ));
                     } catch (Exception e) {
+                        finalStageSm.transitionToFailed(e);
+                        queryStateMachine.transitionToFailed(e);
                         listener.onFailure(e);
                     }
                 },
-                listener::onFailure
+                e -> {
+                    queryStateMachine.transitionToFailed(e);
+                    listener.onFailure(e);
+                }
             ));
         }
     }
@@ -218,6 +305,9 @@ public class DistributedScanExecutor {
         List<FilePartitioner.FileAssignment> assignments,
         Map<String, String> storageConfig,
         String tableName,
+        StageStateMachine leafStageSm,
+        StageStateMachine intermediateStageSm,
+        StageStateMachine finalStageSm,
         ActionListener<Iterable<Object[]>> listener
     ) {
         PlanFragment leafStage = subPlan.getLeafStage();
@@ -225,11 +315,28 @@ public class DistributedScanExecutor {
 
         logger.info("[ScanExecutor] 3-stage HASH plan: running intermediate on coordinator");
 
-        dispatchAndCollect(workers, assignments, leafStage.getSql(), storageConfig, tableName, ActionListener.wrap(
+        dispatchAndCollect("3stage", workers, assignments, leafStage.getSql(), storageConfig, tableName,
+            leafStageSm, ActionListener.wrap(
             responses -> {
+                // Leaf done → start intermediate stage on coordinator
+                intermediateStageSm.transitionToScheduling();
+                intermediateStageSm.transitionToRunning();
                 try {
-                    mergeViaDataFusion(responses, intermediateStage.getSql(), subPlan, listener);
+                    mergeViaDataFusion(responses, intermediateStage.getSql(), subPlan, ActionListener.wrap(
+                        result -> {
+                            intermediateStageSm.transitionToFinished();
+                            finalStageSm.transitionToScheduling();
+                            finalStageSm.transitionToRunning();
+                            finalStageSm.transitionToFinished();
+                            listener.onResponse(result);
+                        },
+                        e -> {
+                            intermediateStageSm.transitionToFailed(e);
+                            listener.onFailure(e);
+                        }
+                    ));
                 } catch (Exception e) {
+                    intermediateStageSm.transitionToFailed(e);
                     listener.onFailure(e);
                 }
             },
@@ -263,47 +370,55 @@ public class DistributedScanExecutor {
     /**
      * Dispatches worker requests and collects responses asynchronously.
      * <p>
-     * Uses {@link GroupedActionListener} to collect all worker responses.
-     * When all responses arrive, the listener is called with the collected results.
-     * No thread blocks waiting — the callback fires on the thread that delivers
-     * the last response.
+     * Creates a {@link TaskStateMachine} per worker task. Task completion cascades
+     * to the stage: when all tasks finish, the stage transitions to FINISHED.
+     * If any task fails, the stage transitions to FAILED.
      *
+     * @param queryId       query identifier for logging
      * @param workers       eligible worker nodes
      * @param assignments   file assignments (one per worker)
      * @param sqlQuery      the SQL query
      * @param storageConfig storage configuration
      * @param tableName     the table name
+     * @param stageSm       stage state machine for this dispatch
      * @param listener      callback for collected responses
      */
     void dispatchAndCollect(
+        String queryId,
         List<DiscoveryNode> workers,
         List<FilePartitioner.FileAssignment> assignments,
         String sqlQuery,
         Map<String, String> storageConfig,
         String tableName,
+        StageStateMachine stageSm,
         ActionListener<List<WorkerQueryResponse>> listener
     ) {
         int assignmentCount = assignments.size();
+        stageSm.transitionToScheduling();
 
-        GroupedActionListener<WorkerQueryResponse> groupListener = new GroupedActionListener<>(
-            ActionListener.wrap(
-                collected -> listener.onResponse(List.copyOf(collected)),
-                listener::onFailure
-            ),
-            assignmentCount
-        );
+        // Per-task state machines
+        AtomicInteger pendingTasks = new AtomicInteger(assignmentCount);
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        List<WorkerQueryResponse> responses = java.util.Collections.synchronizedList(new ArrayList<>(assignmentCount));
+
+        stageSm.transitionToRunning();
 
         String localNodeId = clusterService.state().nodes().getLocalNodeId();
 
         for (int i = 0; i < assignmentCount; i++) {
             FilePartitioner.FileAssignment assignment = assignments.get(i);
             DiscoveryNode targetNode = workers.get(i % workers.size());
+            String taskId = queryId + "-s" + stageSm.getStageId() + "-t" + i;
+            TaskStateMachine taskSm = new TaskStateMachine(taskId, stateExecutor);
 
             if (assignment.getFilePaths().isEmpty()) {
-                logger.warn("[ScanExecutor] Worker {} has no files assigned (more workers than files)", i);
-                groupListener.onResponse(
-                    new WorkerQueryResponse(List.of(), List.of(), 0, new Object[0][])
-                );
+                logger.warn("[ScanExecutor] Task {} has no files assigned", taskId);
+                responses.add(new WorkerQueryResponse(List.of(), List.of(), 0, new Object[0][]));
+                taskSm.finished();
+                if (pendingTasks.decrementAndGet() == 0) {
+                    stageSm.transitionToFinished();
+                    listener.onResponse(List.copyOf(responses));
+                }
                 continue;
             }
 
@@ -315,11 +430,44 @@ public class DistributedScanExecutor {
                 tableName
             );
 
+            logger.debug("[ScanExecutor] Task {} dispatching to node {}: {} files", taskId, targetNode.getId(), request.getFilePaths().size());
+
+            // Task-level listener: on response → task FINISHED; on failure → task FAILED → stage FAILED
+            ActionListener<WorkerQueryResponse> taskListener = new ActionListener<>() {
+                @Override
+                public void onResponse(WorkerQueryResponse response) {
+                    taskSm.finished();
+                    logger.debug("[ScanExecutor] Task {} finished: {} rows", taskId, response.getRowCount());
+                    responses.add(response);
+                    if (pendingTasks.decrementAndGet() == 0) {
+                        if (firstFailure.get() != null) {
+                            stageSm.transitionToFailed(firstFailure.get());
+                            listener.onFailure(new RuntimeException("Stage " + stageSm.getStageId() + " failed", firstFailure.get()));
+                        } else {
+                            stageSm.transitionToFinished();
+                            listener.onResponse(List.copyOf(responses));
+                        }
+                    }
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    taskSm.fail(e);
+                    taskSm.terminationComplete();
+                    logger.error("[ScanExecutor] Task {} failed: {}", taskId, e.getMessage());
+                    firstFailure.compareAndSet(null, e);
+                    if (pendingTasks.decrementAndGet() == 0) {
+                        stageSm.transitionToFailed(firstFailure.get());
+                        listener.onFailure(new RuntimeException("Stage " + stageSm.getStageId() + " failed", firstFailure.get()));
+                    }
+                }
+            };
+
             boolean isLocal = targetNode.getId().equals(localNodeId);
             if (isLocal) {
-                dispatchLocal(request, groupListener);
+                dispatchLocal(request, taskListener);
             } else {
-                dispatchRemote(targetNode, request, groupListener);
+                dispatchRemote(targetNode, request, taskListener);
             }
         }
     }

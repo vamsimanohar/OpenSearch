@@ -5,7 +5,7 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Derived from Trino (io.trino.execution.StageState).
+ *
  */
 
 package org.opensearch.lakehouse.execution;
@@ -25,6 +25,8 @@ public enum StageState {
     SCHEDULING(false, false),
     /** Stage has at least one running task. */
     RUNNING(false, false),
+    /** Stage has finished existing tasks but more could be scheduled. */
+    PENDING(false, false),
     /** Stage has finished executing and all output consumed. */
     FINISHED(true, false),
     /** Stage was aborted due to a failure in another stage. */

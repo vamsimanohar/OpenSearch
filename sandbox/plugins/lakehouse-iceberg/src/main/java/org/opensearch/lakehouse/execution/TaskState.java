@@ -5,7 +5,7 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Derived from Trino (io.trino.execution.TaskState).
+ *
  */
 
 package org.opensearch.lakehouse.execution;
@@ -18,11 +18,13 @@ import static java.util.stream.Collectors.toUnmodifiableSet;
 /**
  * Lifecycle states for a task (one unit of work on one node).
  * <p>
- * Uses Trino's three-phase termination model: a task enters a terminating
+ * Uses a three-phase termination model: a task enters a terminating
  * state (CANCELING/FAILING) first, allowing in-flight work to drain,
  * then moves to the final terminal state (CANCELED/FAILED).
  */
 public enum TaskState {
+    /** Task is planned but has not been scheduled yet. */
+    PLANNED(false, false),
     /** Task is running. */
     RUNNING(false, false),
     /** Task has finished executing; output is being flushed. */
@@ -33,6 +35,10 @@ public enum TaskState {
     CANCELING(false, true),
     /** Task was canceled. */
     CANCELED(true, false),
+    /** Task is being aborted due to failure in another stage. */
+    ABORTING(false, true),
+    /** Task was aborted due to a failure in another stage. */
+    ABORTED(true, false),
     /** Task is failing (draining in-flight work). */
     FAILING(false, true),
     /** Task execution failed. */

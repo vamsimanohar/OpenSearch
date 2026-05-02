@@ -5,7 +5,7 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Derived from Trino (io.trino.execution.QueryState).
+ *
  */
 
 package org.opensearch.lakehouse.execution;
@@ -19,6 +19,12 @@ import static java.util.stream.Collectors.toUnmodifiableSet;
  * Lifecycle states for a distributed query.
  */
 public enum QueryState {
+    /** Query has been accepted and is awaiting execution. */
+    QUEUED(false),
+    /** Query is waiting for required resources. */
+    WAITING_FOR_RESOURCES(false),
+    /** Query is being dispatched to a coordinator. */
+    DISPATCHING(false),
     /** Query is being planned (SQL → SubPlan). */
     PLANNING(false),
     /** Query execution is being started (dispatching leaf stages). */

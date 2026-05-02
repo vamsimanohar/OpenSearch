@@ -5,8 +5,8 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Derived from Trino (io.trino.execution.QueryStateMachine).
- * Adapted for OpenSearch lakehouse distributed query engine.
+ *
+ *
  */
 
 package org.opensearch.lakehouse.execution;

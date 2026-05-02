@@ -5,8 +5,8 @@
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Derived from Trino (io.trino.execution.TaskStateMachine).
- * Adapted for OpenSearch lakehouse distributed query engine.
+ *
+ *
  */
 
 package org.opensearch.lakehouse.execution;
@@ -77,6 +77,13 @@ public class TaskStateMachine {
     }
 
     /**
+     * Non-terminating → ABORTING (begin graceful abort due to failure in another stage)
+     */
+    public boolean abort() {
+        return stateMachine.setIf(TaskState.ABORTING, state -> !state.isTerminatingOrDone());
+    }
+
+    /**
      * Non-terminating → FAILING (begin graceful failure, captures cause)
      */
     public boolean fail(Throwable cause) {
@@ -99,6 +106,7 @@ public class TaskStateMachine {
         TaskState current = stateMachine.get();
         switch (current) {
             case CANCELING -> stateMachine.compareAndSet(TaskState.CANCELING, TaskState.CANCELED);
+            case ABORTING -> stateMachine.compareAndSet(TaskState.ABORTING, TaskState.ABORTED);
             case FAILING -> stateMachine.compareAndSet(TaskState.FAILING, TaskState.FAILED);
             default -> {
                 // already terminal or not terminating — no-op

@@ -49,9 +49,9 @@ SQL → Calcite → PlanFragmenter → SubPlan(stages) → DistributedScanExecut
 
 ## Plan: 4 Phases
 
-### Phase 0: Execution Lifecycle (Trino State Machine Port)
+### Phase 0: Execution Lifecycle (State Machine Framework)
 
-**Goal**: Port Trino's generic `StateMachine<T>` and state enums to drive multi-stage query execution with event-driven cascading.
+**Goal**: Add a generic `StateMachine<T>` and state enums to drive multi-stage query execution with event-driven cascading.
 
 #### Why First
 
@@ -61,7 +61,7 @@ Without a state machine, multi-stage execution requires hand-wiring completion/f
 - Cancellation must flow top-down
 - Resource cleanup (shuffle files, connections) must be guaranteed on terminal states
 
-#### What We Port from Trino
+#### Components
 
 ```
 StateMachine<T>              Generic thread-safe state container with async listener notification
@@ -111,13 +111,13 @@ Top-down:  query cancel → abort stages → cancel tasks
 
 #### Adaptation for OpenSearch
 
-| Trino | OpenSearch Port | Change |
+| Reference | OpenSearch | Change |
 |---|---|---|
 | `com.google.common.util.concurrent.ListenableFuture` | `java.util.concurrent.CompletableFuture` | Replace Guava with JDK |
 | `com.google.common.collect.ImmutableList/Set` | `java.util.List.of()` / `Set.of()` | Replace Guava with JDK |
 | `com.google.common.util.concurrent.SettableFuture` | `java.util.concurrent.CompletableFuture` | Replace Guava with JDK |
 | `io.airlift.log.Logger` | `org.apache.logging.log4j.Logger` | Standard OpenSearch logging |
-| `io.trino.spi.TrinoException` | `org.opensearch.OpenSearchException` | Standard OpenSearch exception |
+| External exception type | `org.opensearch.OpenSearchException` | Standard OpenSearch exception |
 | `FutureStateChange` (long-poll) | `CompletableFuture`-based equivalent | Simplified — no HTTP long-poll needed |
 | Async listener executor | `OpenSearchExecutors.newSinglePrioritizing` or `ThreadPool` | Use OpenSearch thread pool |
 
@@ -125,7 +125,7 @@ Top-down:  query cancel → abort stages → cancel tasks
 
 ```
 sandbox/plugins/lakehouse-iceberg/src/main/java/org/opensearch/lakehouse/execution/
-├── StateMachine.java              # Generic state machine (ported from Trino)
+├── StateMachine.java              # Generic state machine
 ├── StateChangeListener.java       # Listener interface
 ├── QueryState.java                # Query lifecycle states
 ├── StageState.java                # Stage lifecycle states
@@ -313,7 +313,7 @@ Step 5: Coordinator gathers Stage 1 results (CONCAT + final ORDER BY + LIMIT)
 
 ---
 
-### Phase 3: Pipelined Streaming Exchange (Trino-style)
+### Phase 3: Pipelined Streaming Exchange
 
 **Goal**: Eliminate the stage boundary. Stage 1 starts pulling as soon as Stage 0 starts producing.
 
@@ -380,9 +380,9 @@ Coordinator only orchestrates — never touches data.
 
 ---
 
-## Trino Concepts Mapped to Our Architecture
+## Reference Architecture Mapping
 
-| Trino | Our Equivalent | Status |
+| Reference Concept | Our Equivalent | Status |
 |---|---|---|
 | `PlanFragmenter` → `SubPlan` | `PlanFragmenter` → `SubPlan` | ✅ Done |
 | `PlanFragment` + `PartitioningHandle` | `PlanFragment` + `ExchangeType` + `hashColumns` | ✅ Done |
