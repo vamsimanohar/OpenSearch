@@ -20,6 +20,7 @@ import org.opensearch.core.action.ActionListener;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryAction;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryRequest;
 import org.opensearch.lakehouse.distributed.worker.WorkerQueryResponse;
+import org.opensearch.lakehouse.execution.StageStateMachine;
 import org.opensearch.test.OpenSearchTestCase;
 import org.opensearch.transport.TransportService;
 
@@ -28,6 +29,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -174,12 +178,17 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<List<WorkerQueryResponse>> resultRef = new AtomicReference<>();
 
+        ExecutorService stateExec = Executors.newSingleThreadExecutor();
+        StageStateMachine stageSm = new StageStateMachine(0, stateExec);
+
         executor.dispatchAndCollect(
+            "test-q",
             List.of(node1, node2),
             List.of(emptyAssignment, realAssignment),
             "SELECT * FROM t",
             Map.of(),
             "t",
+            stageSm,
             new ActionListener<>() {
                 @Override
                 public void onResponse(List<WorkerQueryResponse> responses) {
@@ -196,6 +205,7 @@ public class DistributedScanExecutorTests extends OpenSearchTestCase {
 
         assertTrue("Timed out", latch.await(10, TimeUnit.SECONDS));
         assertEquals(2, resultRef.get().size());
+        stateExec.shutdownNow();
     }
 
     @SuppressWarnings("unchecked")
