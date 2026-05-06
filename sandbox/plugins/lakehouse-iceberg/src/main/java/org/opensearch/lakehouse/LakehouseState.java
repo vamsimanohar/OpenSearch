@@ -13,8 +13,8 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.lakehouse.catalog.AwsCredentials;
 import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
 import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
+import org.opensearch.lakehouse.scan.IcebergScanPlanner;
 
-import java.io.Closeable;
 import java.security.AccessControlContext;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
@@ -31,7 +31,7 @@ import java.util.concurrent.TimeUnit;
  * {@link LakehousePlugin} for each interface it implements. All instances
  * access shared state through this singleton.
  */
-public final class LakehouseState implements Closeable {
+public final class LakehouseState {
 
     private static final Logger logger = LogManager.getLogger(LakehouseState.class);
 
@@ -40,11 +40,13 @@ public final class LakehouseState implements Closeable {
 
     private final IcebergCatalogConnector catalogConnector;
     private final ExecutorService scanExecutor;
+    private final IcebergScanPlanner scanPlanner;
 
     @SuppressWarnings("removal")
     private LakehouseState() {
         this.catalogConnector = new IcebergCatalogConnector();
         this.scanExecutor = createPrivilegedExecutor();
+        this.scanPlanner = new IcebergScanPlanner(scanExecutor);
     }
 
     /** Returns the singleton instance. */
@@ -57,16 +59,15 @@ public final class LakehouseState implements Closeable {
         return catalogConnector;
     }
 
-    /** Returns the shared scan executor. */
-    public ExecutorService scanExecutor() {
-        return scanExecutor;
+    /** Returns the shared scan planner. */
+    public IcebergScanPlanner scanPlanner() {
+        return scanPlanner;
     }
 
     /**
      * Shuts down the scan executor gracefully.
      * Called from {@link LakehousePlugin#close()}.
      */
-    @Override
     public void close() {
         logger.info("[LakehouseState] Shutting down scan executor");
         scanExecutor.shutdown();
@@ -83,6 +84,15 @@ public final class LakehouseState implements Closeable {
     /**
      * Creates an executor that propagates the plugin's security context, classloader,
      * and ThreadLocal credentials to executor threads.
+     *
+     * <p>Iceberg's parallel manifest reads ({@code scan.planWith(executor).planFiles()})
+     * run on executor threads that don't inherit the calling thread's doPrivileged or
+     * ThreadLocal state. This executor wraps every task to:
+     * <ol>
+     *   <li>Set the thread context classloader to the plugin's classloader</li>
+     *   <li>Propagate ThreadLocal credentials from the calling thread</li>
+     *   <li>Run the task inside doPrivileged with the plugin's AccessControlContext</li>
+     * </ol>
      */
     @SuppressWarnings("removal")
     private static ExecutorService createPrivilegedExecutor() {
