@@ -1,0 +1,294 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+apply plugin: 'opensearch.internal-cluster-test'
+
+repositories {
+    maven {
+        name = 'OpenSearch Snapshots'
+        url = 'https://ci.opensearch.org/ci/dbc/snapshots/maven/'
+    }
+}
+
+opensearchplugin {
+    name = 'lakehouse-iceberg'
+    description = 'Read external Apache Iceberg tables via PPL and SQL'
+    classname = 'org.opensearch.lakehouse.LakehousePlugin'
+    extendedPlugins = ['analytics-engine', 'analytics-backend-datafusion']
+}
+
+// Guava comes transitively from Calcite (via analytics-engine) — forbidden on
+// compile classpaths by OpenSearch. Bypass via custom config.
+configurations {
+    calciteCompile
+    compileClasspath { exclude group: 'com.google.guava' }
+    testCompileClasspath { exclude group: 'com.google.guava' }
+}
+sourceSets.main.compileClasspath += configurations.calciteCompile
+sourceSets.test.compileClasspath += configurations.calciteCompile
+
+dependencies {
+    // Guava for compilation — Calcite API exposes guava types
+    calciteCompile "com.google.guava:guava:${versions.guava}"
+
+    // Server APIs (Plugin, Settings, SecureSetting — provided at runtime)
+    compileOnly project(':server')
+
+    // Analytics engine and framework (compile-only, provided at runtime by analytics-engine plugin)
+    compileOnly project(':sandbox:plugins:analytics-engine')
+    compileOnly project(':sandbox:libs:analytics-framework')
+
+    // DataFusion backend — needed for NativeBridge, DataFusionService, DatafusionResultStream (CONCAT merge path)
+    compileOnly project(':sandbox:plugins:analytics-backend-datafusion')
+
+    // Arrow core — needed for WorkerResponseToArrow (column-major → Arrow VectorSchemaRoot conversion)
+    compileOnly "org.apache.arrow:arrow-memory-core:18.3.0"
+    compileOnly "org.apache.arrow:arrow-vector:18.3.0"
+    compileOnly "org.apache.arrow:arrow-c-data:18.3.0"
+
+    // SQL Unified Query API (compile-only, provided at runtime via analytics-engine)
+    compileOnly("org.opensearch.query:unified-query-api:3.6.0.0-SNAPSHOT") {
+        exclude group: 'org.opensearch'
+    }
+    compileOnly("org.opensearch.query:unified-query-core:3.6.0.0-SNAPSHOT") {
+        exclude group: 'org.opensearch'
+    }
+
+    // Iceberg SDK
+    implementation "org.apache.iceberg:iceberg-api:1.7.1"
+    implementation "org.apache.iceberg:iceberg-core:1.7.1"
+    implementation "org.apache.iceberg:iceberg-aws:1.7.1"
+    implementation "org.apache.iceberg:iceberg-bundled-guava:1.7.1"
+
+    // Hadoop client (api + runtime cover hadoop-common, hadoop-auth, shaded deps)
+    implementation "org.apache.hadoop:hadoop-client-api:3.4.2"
+    runtimeOnly "org.apache.hadoop:hadoop-client-runtime:3.4.2"
+
+    // Iceberg transitive dependencies (OpenSearch plugin system strips transitives)
+    runtimeOnly "org.apache.avro:avro:1.12.0"
+    runtimeOnly "org.apache.iceberg:iceberg-common:1.7.1"
+    runtimeOnly "io.airlift:aircompressor:0.27"
+    runtimeOnly "com.github.ben-manes.caffeine:caffeine:2.9.3"
+    runtimeOnly "dev.failsafe:failsafe:3.3.2"
+    runtimeOnly "org.roaringbitmap:RoaringBitmap:1.3.0"
+
+    // AWS SDK
+    implementation "software.amazon.awssdk:glue:${versions.aws}"
+    implementation "software.amazon.awssdk:s3:${versions.aws}"
+    implementation "software.amazon.awssdk:sts:${versions.aws}"
+    implementation "software.amazon.awssdk:auth:${versions.aws}"
+    implementation "software.amazon.awssdk:regions:${versions.aws}"
+    implementation "software.amazon.awssdk:identity-spi:${versions.aws}"
+    implementation "software.amazon.awssdk:utils:${versions.aws}"
+    implementation "software.amazon.awssdk:aws-core:${versions.aws}"
+    implementation "software.amazon.awssdk:sdk-core:${versions.aws}"
+
+    // AWS SDK transitive deps (OpenSearch plugin system strips transitives)
+    runtimeOnly "software.amazon.awssdk:http-client-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:url-connection-client:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:apache-client:${versions.aws}"
+    runtimeOnly "org.apache.httpcomponents:httpclient:4.5.14"
+    runtimeOnly "org.apache.httpcomponents:httpcore:4.4.16"
+    runtimeOnly "commons-logging:commons-logging:1.2"
+    runtimeOnly "software.amazon.awssdk:profiles:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:endpoints-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:protocol-core:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:json-utils:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-json-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-query-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:aws-xml-protocol:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:third-party-jackson-core:${versions.aws}"
+    // Jackson databind + annotations — provided at runtime by parent analytics-engine plugin.
+    runtimeOnly "software.amazon.awssdk:metrics-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:annotations:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:checksums:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:checksums-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:retries:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:retries-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth-spi:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:http-auth-aws:${versions.aws}"
+    runtimeOnly "software.amazon.awssdk:crt-core:${versions.aws}"
+
+    // Arrow for unit tests (compileOnly doesn't carry to test classpath)
+    testImplementation "org.apache.arrow:arrow-memory-core:18.3.0"
+    testImplementation "org.apache.arrow:arrow-memory-unsafe:18.3.0"
+    testImplementation "org.apache.arrow:arrow-vector:18.3.0"
+    testImplementation "org.apache.arrow:arrow-format:18.3.0"
+    testImplementation "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
+
+    // Integration test dependencies
+    internalClusterTestImplementation project(':server')
+    internalClusterTestImplementation project(':test:framework')
+    internalClusterTestImplementation project(':sandbox:plugins:analytics-engine')
+    internalClusterTestImplementation project(':sandbox:plugins:analytics-backend-datafusion')
+    internalClusterTestImplementation project(':sandbox:libs:dataformat-native')
+    internalClusterTestImplementation project(':sandbox:plugins:dsl-query-executor')
+    internalClusterTestImplementation project(':sandbox:libs:analytics-framework')
+    internalClusterTestImplementation project(':plugins:arrow-flight-rpc')
+}
+
+// JaCoCo coverage enforcement — fail build if line coverage drops below threshold
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            element = 'CLASS'
+            // Classes needing live infrastructure or full plugin Guice context
+            excludes = [
+                'org.opensearch.lakehouse.catalog.IcebergCatalogConnector',
+                // Anonymous inner classes in REST handlers and LakehouseState — only testable via integration tests
+                'org.opensearch.lakehouse.action.LakehouseSqlRestAction.*',
+                'org.opensearch.lakehouse.action.LakehousePplRestAction*',
+                'org.opensearch.lakehouse.LakehouseState',
+                'org.opensearch.lakehouse.LakehouseState.*',
+                // LakehousePlugin is a thin wiring class — tested via integration tests
+                'org.opensearch.lakehouse.LakehousePlugin',
+                // LakehouseQueryExecutor requires live Iceberg catalog and EngineContext
+                'org.opensearch.lakehouse.exec.LakehouseQueryExecutor',
+                // LakehouseQueryTransportAction requires Guice-injected EngineContext
+                'org.opensearch.lakehouse.action.LakehouseQueryTransportAction',
+                // WorkerQueryTransportAction.doExecute requires Guice-injected TransportService and doPrivileged
+                'org.opensearch.lakehouse.distributed.worker.WorkerQueryTransportAction',
+                // DistributedScanExecutor: native DataFusion merge path requires native library; tested via integration tests
+                'org.opensearch.lakehouse.distributed.DistributedScanExecutor',
+                // Anonymous TransportResponseHandler classes in DistributedScanExecutor — tested via transport mocks
+                'org.opensearch.lakehouse.distributed.DistributedScanExecutor.*'
+            ]
+            limit {
+                counter = 'LINE'
+                minimum = 0.70
+            }
+        }
+    }
+}
+check.dependsOn jacocoTestCoverageVerification
+
+// DataFusion and dataformat-native target JVM 25. Override JVM version attribute
+// so Gradle resolves them correctly (we build and test on JVM 25).
+['compileClasspath', 'testCompileClasspath', 'testRuntimeClasspath',
+ 'internalClusterTestCompileClasspath', 'internalClusterTestRuntimeClasspath'].each { configName ->
+    configurations.named(configName).configure {
+        attributes {
+            attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, Integer.valueOf(25))
+        }
+    }
+}
+
+// Arrow requires these JVM flags for unit tests (WorkerResponseToArrowTests)
+test {
+    jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
+    jvmArgs '-Darrow.memory.debug.allocator=false'
+}
+
+// Arrow/Flight requires these JVM flags for integration tests
+internalClusterTest {
+    jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
+    jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED'
+    jvmArgs '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED'
+    jvmArgs '-Darrow.memory.debug.allocator=false'
+    jvmArgs '--enable-native-access=ALL-UNNAMED'
+    systemProperty 'io.netty.allocator.numDirectArenas', '1'
+    systemProperty 'io.netty.noUnsafe', 'false'
+    systemProperty 'io.netty.tryUnsafe', 'true'
+    systemProperty 'io.netty.tryReflectionSetAccessible', 'true'
+    jvmArgs += ["--add-opens", "java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"]
+    // Native library path for DataFusion
+    def nativeLib = project(':sandbox:libs:dataformat-native').ext.nativeLibPath
+    systemProperty 'native.lib.path', nativeLib.absolutePath
+}
+
+// --- Benchmark tools source set (not part of the plugin bundle) ---
+sourceSets {
+    tools {
+        java {
+            srcDir 'src/tools/java'
+        }
+    }
+}
+
+configurations.toolsImplementation.extendsFrom(configurations.implementation, configurations.runtimeOnly)
+
+dependencies {
+    toolsImplementation "org.slf4j:slf4j-api:${versions.slf4j}"
+    toolsImplementation "org.slf4j:slf4j-simple:${versions.slf4j}"
+    toolsImplementation "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
+    toolsImplementation "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+    toolsImplementation "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+    // AWS SDK transitive deps needed for S3 listing in CreateS3IcebergTable
+    toolsImplementation "org.reactivestreams:reactive-streams:1.0.4"
+}
+
+task createLocalIcebergTable(type: JavaExec) {
+    description = 'Creates local Iceberg tables wrapping existing ClickBench Parquet files'
+    group = 'benchmark'
+    classpath = sourceSets.tools.runtimeClasspath + sourceSets.main.output
+    mainClass = 'org.opensearch.lakehouse.benchmark.CreateLocalIcebergTable'
+    if (project.hasProperty('args')) {
+        args project.args.split(' ')
+    }
+}
+
+task createS3IcebergTable(type: JavaExec) {
+    description = 'Creates Iceberg tables in AWS Glue catalog wrapping existing S3 Parquet files'
+    group = 'benchmark'
+    classpath = sourceSets.tools.runtimeClasspath + sourceSets.main.output
+    mainClass = 'org.opensearch.lakehouse.benchmark.CreateS3IcebergTable'
+    if (project.hasProperty('args')) {
+        args project.args.split(' ')
+    }
+}
+
+configurations.all {
+    // okhttp-aws-signer is a transitive dep of unified-query-common, only on JitPack
+    exclude group: 'com.github.babbel', module: 'okhttp-aws-signer'
+    // jetbrains:annotations conflicts with awssdk:annotations (same artifact name → codebase clash in test security manager)
+    exclude group: 'org.jetbrains', module: 'annotations'
+
+    resolutionStrategy {
+        // Align transitive versions with OpenSearch's managed versions
+        force "org.apache.logging.log4j:log4j-api:${versions.log4j}"
+        force "org.apache.logging.log4j:log4j-core:${versions.log4j}"
+        force "com.google.guava:guava:33.4.0-jre"
+        force "com.google.guava:failureaccess:1.0.2"
+        force "com.google.errorprone:error_prone_annotations:2.36.0"
+        force "org.checkerframework:checker-qual:3.43.0"
+        force "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
+        force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+        force "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+        force "com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:${versions.jackson}"
+        force "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${versions.jackson}"
+        force "org.slf4j:slf4j-api:${versions.slf4j}"
+        force "org.locationtech.jts:jts-core:${versions.jts}"
+        force "commons-codec:commons-codec:${versions.commonscodec}"
+        force "joda-time:joda-time:2.12.7"
+        force "org.yaml:snakeyaml:2.4"
+        force "org.codehaus.janino:janino:3.1.12"
+        force "org.codehaus.janino:commons-compiler:3.1.12"
+        force "commons-io:commons-io:${versions.commonsio}"
+        force "org.apache.commons:commons-lang3:3.18.0"
+        force "org.apache.commons:commons-text:1.11.0"
+        force "commons-logging:commons-logging:1.3.5"
+        force "net.minidev:json-smart:2.5.2"
+        force "org.apache.httpcomponents.client5:httpclient5:5.6"
+        force "org.apache.httpcomponents.core5:httpcore5:5.4"
+        force "com.squareup.okhttp3:okhttp:4.12.0"
+        force "org.jetbrains.kotlin:kotlin-stdlib:1.8.21"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.21"
+        force "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.21"
+        force "org.jetbrains.kotlin:kotlin-stdlib-common:1.9.10"
+        force "org.apache.httpcomponents:httpclient:4.5.14"
+        force "org.apache.httpcomponents:httpcore:4.4.16"
+        force "com.github.luben:zstd-jni:1.5.6-6"
+        force "org.xerial.snappy:snappy-java:1.1.10.7"
+        force "org.apache.arrow:arrow-memory-core:18.3.0"
+        force "org.apache.arrow:arrow-memory-unsafe:18.3.0"
+        force "org.apache.arrow:arrow-vector:18.3.0"
+        force "org.apache.arrow:arrow-format:18.3.0"
+        force "org.apache.arrow:arrow-c-data:18.3.0"
+    }
+}
