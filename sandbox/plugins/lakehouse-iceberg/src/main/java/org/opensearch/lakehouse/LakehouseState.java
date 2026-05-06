@@ -8,7 +8,21 @@
 
 package org.opensearch.lakehouse;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.opensearch.lakehouse.catalog.AwsCredentials;
+import org.opensearch.lakehouse.catalog.IcebergCatalogConnector;
+import org.opensearch.lakehouse.catalog.LakehouseCredentialsProvider;
+
 import java.io.Closeable;
+import java.security.AccessControlContext;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
+import java.util.List;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Singleton holder for shared state across SPI-created instances.
@@ -19,15 +33,109 @@ import java.io.Closeable;
  */
 public final class LakehouseState implements Closeable {
 
+    private static final Logger logger = LogManager.getLogger(LakehouseState.class);
+
+    @SuppressWarnings("removal")
     private static final LakehouseState INSTANCE = new LakehouseState();
 
-    private LakehouseState() {}
+    private final IcebergCatalogConnector catalogConnector;
+    private final ExecutorService scanExecutor;
+
+    @SuppressWarnings("removal")
+    private LakehouseState() {
+        this.catalogConnector = new IcebergCatalogConnector();
+        this.scanExecutor = createPrivilegedExecutor();
+    }
 
     /** Returns the singleton instance. */
     public static LakehouseState instance() {
         return INSTANCE;
     }
 
+    /** Returns the shared catalog connector. */
+    public IcebergCatalogConnector catalogConnector() {
+        return catalogConnector;
+    }
+
+    /** Returns the shared scan executor. */
+    public ExecutorService scanExecutor() {
+        return scanExecutor;
+    }
+
+    /**
+     * Shuts down the scan executor gracefully.
+     * Called from {@link LakehousePlugin#close()}.
+     */
     @Override
-    public void close() {}
+    public void close() {
+        logger.info("[LakehouseState] Shutting down scan executor");
+        scanExecutor.shutdown();
+        try {
+            if (!scanExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                scanExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scanExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Creates an executor that propagates the plugin's security context, classloader,
+     * and ThreadLocal credentials to executor threads.
+     */
+    @SuppressWarnings("removal")
+    private static ExecutorService createPrivilegedExecutor() {
+        AccessControlContext acc = AccessController.getContext();
+        ClassLoader pluginClassLoader = LakehouseState.class.getClassLoader();
+        int threads = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+        ExecutorService delegate = Executors.newFixedThreadPool(threads);
+        return new AbstractExecutorService() {
+            @Override
+            public void execute(Runnable command) {
+                AwsCredentials creds = LakehouseCredentialsProvider.get();
+                delegate.execute(() -> {
+                    ClassLoader prev = Thread.currentThread().getContextClassLoader();
+                    Thread.currentThread().setContextClassLoader(pluginClassLoader);
+                    if (creds != null) {
+                        LakehouseCredentialsProvider.set(creds);
+                    }
+                    try {
+                        AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
+                            command.run();
+                            return null;
+                        }, acc);
+                    } finally {
+                        LakehouseCredentialsProvider.clear();
+                        Thread.currentThread().setContextClassLoader(prev);
+                    }
+                });
+            }
+
+            @Override
+            public void shutdown() {
+                delegate.shutdown();
+            }
+
+            @Override
+            public List<Runnable> shutdownNow() {
+                return delegate.shutdownNow();
+            }
+
+            @Override
+            public boolean isShutdown() {
+                return delegate.isShutdown();
+            }
+
+            @Override
+            public boolean isTerminated() {
+                return delegate.isTerminated();
+            }
+
+            @Override
+            public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+                return delegate.awaitTermination(timeout, unit);
+            }
+        };
+    }
 }
