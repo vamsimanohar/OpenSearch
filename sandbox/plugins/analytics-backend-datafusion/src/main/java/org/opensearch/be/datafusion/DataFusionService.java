@@ -66,6 +66,20 @@ public class DataFusionService extends AbstractLifecycleComponent {
         return new Builder();
     }
 
+    /**
+     * Override stop() to gracefully handle being called when already closed.
+     * This happens in the test framework when multiple nodes share the same static
+     * DataFusionService instance — the first node's close() transitions to CLOSED,
+     * then other nodes' teardown calls stop() on the same instance.
+     */
+    @Override
+    public void stop() {
+        if (lifecycle.closed()) {
+            return;
+        }
+        super.stop();
+    }
+
     @Override
     protected void doStart() {
         logger.debug("Starting DataFusion service");
@@ -79,7 +93,7 @@ public class DataFusionService extends AbstractLifecycleComponent {
 
         long ptr = NativeBridge.createGlobalRuntime(memoryPoolLimit, cacheManagerPtr, spillDirectory, spillMemoryLimit);
         this.runtimeHandle = new NativeRuntimeHandle(ptr);
-        this.rootAllocator = new RootAllocator(memoryPoolLimit);
+        this.rootAllocator = new RootAllocator(memoryPoolLimit <= 0 ? Long.MAX_VALUE : Math.abs(memoryPoolLimit));
 
         if (clusterSettings != null) {
             this.cacheManager = new CacheManager(runtimeHandle);
@@ -187,8 +201,8 @@ public class DataFusionService extends AbstractLifecycleComponent {
      * Builder for {@link DataFusionService}.
      */
     public static class Builder {
-        private long memoryPoolLimit = Runtime.getRuntime().maxMemory() / 4;
-        private long spillMemoryLimit = Runtime.getRuntime().maxMemory() / 8;
+        private long memoryPoolLimit = 32L * 1024 * 1024 * 1024; // 32GB GreedyMemoryPool
+        private long spillMemoryLimit = 100L * 1024 * 1024 * 1024; // 100GB — disk space, not memory
         private String spillDirectory = System.getProperty("java.io.tmpdir");
         private int cpuThreads = Runtime.getRuntime().availableProcessors();
         private ClusterSettings clusterSettings;

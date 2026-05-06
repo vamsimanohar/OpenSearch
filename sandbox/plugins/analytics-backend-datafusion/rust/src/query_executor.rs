@@ -65,7 +65,7 @@ pub async fn execute_query(
     let mut runtime_env_builder = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
         .with_cache_manager(
             CacheManagerConfig::default()
-                .with_list_files_cache(Some(list_file_cache))
+                .with_list_files_cache(Some(list_file_cache.clone()))
                 .with_file_metadata_cache(Some(
                     runtime.runtime_env.cache_manager.get_file_metadata_cache(),
                 ))
@@ -146,10 +146,14 @@ pub async fn execute_query(
     // Wrap in CrossRtStream — CPU work runs on DedicatedExecutor
     let cross_rt_stream =
         CrossRtStream::new_with_df_error_stream(df_stream, cpu_executor);
-    let wrapped = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-        cross_rt_stream.schema(),
-        cross_rt_stream,
-    );
+    let wrapped = crate::api::MemoryTrackingStream {
+        inner: datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+            cross_rt_stream.schema(),
+            cross_rt_stream,
+        ),
+        memory_pool: runtime.runtime_env.memory_pool.clone(),
+        peak_memory: std::sync::atomic::AtomicUsize::new(runtime.runtime_env.memory_pool.reserved()),
+    };
 
     Ok(Box::into_raw(Box::new(wrapped)) as i64)
 }

@@ -23,6 +23,7 @@ import org.opensearch.analytics.spi.ScalarFunction;
 import org.opensearch.analytics.spi.ScalarFunctionAdapter;
 import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.analytics.spi.SearchExecEngineProvider;
+import org.opensearch.be.datafusion.exchange.DataFusionExchangeSinkProvider;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 
 import java.util.HashSet;

@@ -32,6 +32,7 @@ datafusion-physical-expr = "52.1.0"
 datafusion-substrait = "52.1.0"
 
 # Async
+async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.3"
 tokio-stream = "0.1.17"
@@ -49,9 +50,10 @@ log = "0.4"
 mimalloc = { version = "0.1.48", default-features = false }
 
 # Misc
+bytes = "1"
 dashmap = "5.5"
 num_cpus = "1.16"
-object_store = "0.12.5"
+object_store = { version = "0.12.5", features = ["aws"] }
 url = "2.0"
 tempfile = "3.0"
 chrono = "0.4"
@@ -61,8 +63,6 @@ parking_lot = "0.12.5"
 lazy_static = "1.4.0"
 rayon = "1.10"
 thiserror = "1.0"
-async-trait = "0.1"
-bytes = "1"
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 # Internal

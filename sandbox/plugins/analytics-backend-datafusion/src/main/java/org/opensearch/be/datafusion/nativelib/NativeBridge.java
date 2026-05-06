@@ -50,6 +50,8 @@ public final class NativeBridge {
     private static final MethodHandle STREAM_GET_SCHEMA;
     private static final MethodHandle STREAM_NEXT;
     private static final MethodHandle STREAM_CLOSE;
+    private static final MethodHandle EXECUTE_ICEBERG_QUERY;
+    private static final MethodHandle EXECUTE_FROM_IPC;
     private static final MethodHandle SQL_TO_SUBSTRAIT;
     private static final MethodHandle REGISTER_FILTER_TREE_CALLBACKS;
     private static final MethodHandle CREATE_LOCAL_SESSION;
@@ -144,6 +146,39 @@ public final class NativeBridge {
         );
 
         STREAM_CLOSE = linker.downcallHandle(lib.find("df_stream_close").orElseThrow(), FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG));
+
+        // i64 df_execute_iceberg_query(s3_region, s3_region_len, s3_bucket, s3_bucket_len,
+        //   s3_access_key, s3_access_key_len, s3_secret_key, s3_secret_key_len,
+        //   s3_session_token, s3_session_token_len, s3_endpoint, s3_endpoint_len,
+        //   file_paths_ptr, file_paths_lens, file_sizes, files_count,
+        //   table_name, table_name_len, sql_query, sql_query_len, runtime_ptr) -> i64
+        EXECUTE_ICEBERG_QUERY = linker.downcallHandle(
+            lib.find("df_execute_iceberg_query").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_region
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_bucket
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_access_key
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_secret_key
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_session_token
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // s3_endpoint
+                ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,  // files
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // table_name
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // sql_query
+                ValueLayout.JAVA_LONG                          // runtime_ptr
+            )
+        );
+
+        // i64 df_execute_from_ipc(ipc_bytes, ipc_len, sql_ptr, sql_len, runtime_ptr) -> i64
+        EXECUTE_FROM_IPC = linker.downcallHandle(
+            lib.find("df_execute_from_ipc").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // ipc_bytes
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,    // sql
+                ValueLayout.JAVA_LONG                          // runtime_ptr
+            )
+        );
 
         // i64 df_sql_to_substrait(shard_ptr, table_ptr, table_len, sql_ptr, sql_len, runtime_ptr, out_ptr, out_cap, out_len)
         SQL_TO_SUBSTRAIT = linker.downcallHandle(
@@ -571,10 +606,6 @@ public final class NativeBridge {
 
     // ---- Coordinator-reduce exports ----
 
-    /**
-     * Creates a local DataFusion session tied to the given global runtime. Returns an opaque
-     * native pointer freed by {@link #closeLocalSession}.
-     */
     public static long createLocalSession(long runtimePtr) {
         NativeHandle.validatePointer(runtimePtr, "runtime");
         try (var call = new NativeCall()) {
@@ -582,15 +613,10 @@ public final class NativeBridge {
         }
     }
 
-    /** Frees the native local session. Tolerates a zero pointer for idempotent close. */
     public static void closeLocalSession(long sessionPtr) {
         NativeCall.invokeVoid(CLOSE_LOCAL_SESSION, sessionPtr);
     }
 
-    /**
-     * Registers an input partition stream on the session under {@code inputId}, with the given
-     * Arrow IPC-encoded schema. Returns an opaque sender pointer freed by {@link #senderClose}.
-     */
     public static long registerPartitionStream(long sessionPtr, String inputId, byte[] schemaIpc) {
         NativeHandle.validatePointer(sessionPtr, "session");
         try (var call = new NativeCall()) {
@@ -606,10 +632,6 @@ public final class NativeBridge {
         }
     }
 
-    /**
-     * Executes a Substrait plan on the session, returning an opaque stream pointer. The stream is
-     * drained via {@link #streamNext} and freed by {@link #streamClose}.
-     */
     public static long executeLocalPlan(long sessionPtr, byte[] substrait) {
         NativeHandle.validatePointer(sessionPtr, "session");
         try (var call = new NativeCall()) {
@@ -617,14 +639,8 @@ public final class NativeBridge {
         }
     }
 
-    /**
-     * Pushes one Arrow C Data-exported batch (array + schema addresses) into the sender. The
-     * native side takes ownership of both FFI structs.
-     */
     public static long senderSend(long senderPtr, long arrayPtr, long schemaPtr) {
         NativeHandle.validatePointer(senderPtr, "sender");
-        // arrayPtr/schemaPtr come from Arrow Java's C Data export (ArrowArray.memoryAddress()),
-        // NOT from our NativeHandle lifecycle — validate as non-zero rather than live-handle.
         if (arrayPtr == 0) {
             throw new IllegalArgumentException("arrayPtr must be non-zero");
         }
@@ -636,16 +652,10 @@ public final class NativeBridge {
         }
     }
 
-    /** Closes the sender, signalling end-of-input. Tolerates a zero pointer. */
     public static void senderClose(long senderPtr) {
         NativeCall.invokeVoid(SENDER_CLOSE, senderPtr);
     }
 
-    /**
-     * Memtable variant of {@link #registerPartitionStream}: hands across a list of
-     * already-exported Arrow C Data batches in two parallel pointer arrays so the native side can
-     * build a {@code MemTable} in one shot. Native takes ownership of all FFI structs on success.
-     */
     public static long registerMemtable(long sessionPtr, String inputId, byte[] schemaIpc, long[] arrayPtrs, long[] schemaPtrs) {
         NativeHandle.validatePointer(sessionPtr, "session");
         if (arrayPtrs.length != schemaPtrs.length) {
@@ -669,6 +679,86 @@ public final class NativeBridge {
         }
     }
 
+    // ---- Iceberg / S3 query execution ----
+
+    public static void executeIcebergQueryAsync(
+        String s3Region,
+        String s3Bucket,
+        String s3AccessKeyId,
+        String s3SecretAccessKey,
+        String s3SessionToken,
+        String s3Endpoint,
+        String[] filePaths,
+        long[] fileSizes,
+        String tableName,
+        String sqlQuery,
+        long runtimePtr,
+        ActionListener<Long> listener
+    ) {
+        try {
+            NativeHandle.validatePointer(runtimePtr, "runtime");
+        } catch (Exception e) {
+            listener.onFailure(e);
+            return;
+        }
+        try (var call = new NativeCall()) {
+            var region = call.str(s3Region != null ? s3Region : "");
+            var bucket = call.str(s3Bucket != null ? s3Bucket : "");
+            var accessKey = call.str(s3AccessKeyId != null ? s3AccessKeyId : "");
+            var secretKey = call.str(s3SecretAccessKey != null ? s3SecretAccessKey : "");
+            var sessionToken = call.str(s3SessionToken != null ? s3SessionToken : "");
+            var endpoint = call.str(s3Endpoint != null ? s3Endpoint : "");
+            var paths = call.strArray(filePaths);
+            var sizes = call.buf(fileSizes.length * Long.BYTES);
+            for (int i = 0; i < fileSizes.length; i++) {
+                sizes.setAtIndex(ValueLayout.JAVA_LONG, i, fileSizes[i]);
+            }
+            var table = call.str(tableName);
+            var sql = call.str(sqlQuery);
+
+            long result = call.invoke(
+                EXECUTE_ICEBERG_QUERY,
+                region.segment(), region.len(),
+                bucket.segment(), bucket.len(),
+                accessKey.segment(), accessKey.len(),
+                secretKey.segment(), secretKey.len(),
+                sessionToken.segment(), sessionToken.len(),
+                endpoint.segment(), endpoint.len(),
+                paths.ptrs(), paths.lens(), sizes, paths.count(),
+                table.segment(), table.len(),
+                sql.segment(), sql.len(),
+                runtimePtr
+            );
+            listener.onResponse(result);
+        } catch (Throwable t) {
+            listener.onFailure(t instanceof Exception ? (Exception) t : new RuntimeException(t));
+        }
+    }
+
+    // ---- Execute SQL over accumulated Arrow IPC bytes (exchange-sink path) ----
+
+    public static void executeFromIpcAsync(byte[] ipc, String sql, long runtimePtr, ActionListener<Long> listener) {
+        try {
+            NativeHandle.validatePointer(runtimePtr, "runtime");
+        } catch (Exception e) {
+            listener.onFailure(e);
+            return;
+        }
+        try (var call = new NativeCall()) {
+            var ipcBuf = call.bytes(ipc);
+            var sqlStr = call.str(sql != null ? sql : "");
+            long result = call.invoke(
+                EXECUTE_FROM_IPC,
+                ipcBuf, (long) ipc.length,
+                sqlStr.segment(), sqlStr.len(),
+                runtimePtr
+            );
+            listener.onResponse(result);
+        } catch (Throwable t) {
+            listener.onFailure(t instanceof Exception ? (Exception) t : new RuntimeException(t));
+        }
+    }
+
     public static long createCustomCacheManager() {
         try {
             return NativeLibraryLoader.checkResult((long) CREATE_CUSTOM_CACHE_MANAGER.invokeExact());
@@ -676,6 +766,7 @@ public final class NativeBridge {
             throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
         }
     }
+
     // ---- SessionContext decomposition ----
 
     /**
