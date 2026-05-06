@@ -36,23 +36,16 @@ repositories {
 }
 
 // Guava comes transitively from calcite-core and unified-query — forbidden on
-// compile classpaths by OpenSearch. Bypass via custom config for both main and test.
+// compile classpaths by OpenSearch. Main sources don't need it; test sources do
+// (Calcite API exposes ImmutableList, Predicate). Bypass via custom config.
 configurations {
   calciteCompile
   calciteTestCompile
-  // Jackson jars needed at runtime by Arrow C Data (SchemaImporter) but excluded from
-  // bundlePlugin because server's compileOnly BOM constraint causes Gradle set-subtraction
-  // to remove them. Custom config bypasses this.
-  arrowJackson
   compileClasspath { exclude group: 'com.google.guava' }
   testCompileClasspath { exclude group: 'com.google.guava' }
 }
 sourceSets.main.compileClasspath += configurations.calciteCompile
 sourceSets.test.compileClasspath += configurations.calciteTestCompile
-
-tasks.named('bundlePlugin').configure {
-  from configurations.arrowJackson
-}
 
 tasks.named('missingJavadoc').configure {
   classpath += configurations.calciteCompile
@@ -68,6 +61,7 @@ dependencies {
   // zero-copy Arrow transfer requires.
   compileOnly "org.apache.arrow:arrow-vector:${versions.arrow}"
   compileOnly "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+
 
   // Arrow Flight RPC — compile-only; arrow-flight-rpc is our extendedPlugins parent and
   // provides these classes at runtime. transitive = false prevents arrow-flight-rpc's
@@ -136,7 +130,7 @@ dependencies {
   testRuntimeOnly "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
   testRuntimeOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
 
-  // SQL Unified Query API for PPL parsing
+  // SQL Unified Query API for PPL parsing/planning (main sources use these)
   implementation("org.opensearch.query:unified-query-api:${sqlUnifiedQueryVersion}") {
     exclude group: 'org.opensearch'
   }
@@ -150,11 +144,12 @@ dependencies {
   // Arrow Flight streaming transport for ITs
   internalClusterTestImplementation project(':plugins:arrow-flight-rpc')
 
-  // Calcite bytecode references @Immutable from immutables — resolve at compile time
-  compileOnly 'org.immutables:value-annotations:2.8.8'
+  // Calcite bytecode references @Immutable from immutables — resolve at test compile time
+  testCompileOnly 'org.immutables:value-annotations:2.8.8'
 }
 
 tasks.withType(JavaCompile).configureEach {
+  // Arrow's Schema.class references Jackson annotations we don't pull in — harmless warnings
   options.compilerArgs -= '-Werror'
 }
 
@@ -163,12 +158,15 @@ tasks.named('thirdPartyAudit').configure {
   // its Unsafe violations no longer apply here and listing them would trip forbiddenApis
   // ("All excluded classes seem to have no issues").
   ignoreMissingClasses(
+    // Optional brotli compression support pulled in by httpclient5 — not used by analytics
     'com.aayushatharva.brotli4j.decoder.DecoderJNI$Status',
     'com.aayushatharva.brotli4j.decoder.DecoderJNI$Wrapper',
     'com.aayushatharva.brotli4j.encoder.Encoder$Mode',
     'com.aayushatharva.brotli4j.encoder.EncoderJNI$Operation',
     'com.aayushatharva.brotli4j.encoder.EncoderJNI$Wrapper',
+    // Optional Apache Commons Compress reference — gated by runtime classpath probe
     'org.apache.commons.compress.compressors.CompressorStreamFactory',
+    // Optional Conscrypt provider — TLS support fallback path
     'org.conscrypt.Conscrypt'
   )
 }
@@ -195,7 +193,6 @@ configurations.all {
     force 'com.google.guava:failureaccess:1.0.1'
     force 'com.google.errorprone:error_prone_annotations:2.36.0'
     force 'org.checkerframework:checker-qual:3.43.0'
-    force "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
     force "com.fasterxml.jackson:jackson-bom:${versions.jackson}"
     force "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
     force "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
@@ -204,6 +201,7 @@ configurations.all {
     force "com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:${versions.jackson}"
     force "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${versions.jackson}"
     force "org.slf4j:slf4j-api:${versions.slf4j}"
+    force "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
     force "org.locationtech.jts:jts-core:${versions.jts}"
     force "commons-codec:commons-codec:${versions.commonscodec}"
     force "joda-time:joda-time:2.12.7"
@@ -227,37 +225,12 @@ configurations.all {
   }
 }
 
-tasks.withType(JavaCompile).configureEach {
-  options.compilerArgs -= '-Werror'
-}
-
+// Arrow needs these --add-opens for direct-memory access via reflection.
+// Applied to both unit test and internal cluster test tasks.
 test {
   jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
-  jvmArgs '--add-opens=java.base/java.lang=ALL-UNNAMED'
   jvmArgs '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED'
   jvmArgs '-Darrow.memory.debug.allocator=false'
-}
-
-tasks.named('thirdPartyAudit').configure {
-  ignoreViolations(
-    'org.apache.arrow.memory.util.MemoryUtil',
-    'org.apache.arrow.memory.util.MemoryUtil$1',
-    'com.google.common.cache.Striped64',
-    'com.google.common.cache.Striped64$1',
-    'com.google.common.cache.Striped64$Cell',
-    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray',
-    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$1',
-    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$2',
-    'com.google.common.hash.Striped64',
-    'com.google.common.hash.Striped64$1',
-    'com.google.common.hash.Striped64$Cell',
-    'com.google.common.primitives.UnsignedBytes$LexicographicalComparatorHolder$UnsafeComparator',
-    'com.google.common.primitives.UnsignedBytes$LexicographicalComparatorHolder$UnsafeComparator$1',
-    'com.google.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper',
-    'com.google.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper$1'
-  )
-  ignoreMissingClasses(
-  )
 }
 
 // Arrow/Flight requires these JVM flags

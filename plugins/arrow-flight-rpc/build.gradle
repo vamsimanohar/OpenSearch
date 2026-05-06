@@ -23,6 +23,9 @@ dependencies {
   api "org.apache.arrow:arrow-memory-netty:${versions.arrow}"
   api "org.apache.arrow:arrow-memory-core:${versions.arrow}"
   api "org.apache.arrow:arrow-memory-netty-buffer-patch:${versions.arrow}"
+  // arrow-memory-unsafe — needed when -Darrow.allocation.manager.type=Unsafe is set
+  // (workaround for Arrow 18.1.0 / Netty 4.2.13 EmptyByteBuf.memoryAddress() crash)
+  api "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"
   api "io.netty:netty-buffer:${versions.netty}"
   api "io.netty:netty-common:${versions.netty}"
   api "io.netty:netty-codec-base:${versions.netty}"
@@ -287,6 +290,7 @@ tasks.named('thirdPartyAudit').configure {
     'io.netty.util.internal.shaded.org.jctools.util.UnsafeLongArrayAccess',
     'io.netty.util.internal.shaded.org.jctools.util.UnsafeRefArrayAccess',
     'org.apache.arrow.memory.util.MemoryUtil',
-    'org.apache.arrow.memory.util.MemoryUtil$1'
+    'org.apache.arrow.memory.util.MemoryUtil$1',
+    'org.apache.arrow.memory.unsafe.UnsafeAllocationManager'
   )
 }

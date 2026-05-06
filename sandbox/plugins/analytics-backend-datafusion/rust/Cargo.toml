@@ -40,7 +40,6 @@ mimalloc = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 native-bridge-common = { workspace = true }
-async-trait = { workspace = true }
 chrono = { workspace = true }
 roaring = "0.10"
 thiserror = { workspace = true }
