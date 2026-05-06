@@ -1,0 +1,1 @@
+SELECT DATE_TRUNC('minute', to_timestamp_seconds(eventtime)) AS M, COUNT(*) AS PageViews FROM hits WHERE counterid = 62 AND eventdate >= '2013-07-14' AND eventdate <= '2013-07-15' AND isrefresh = 0 AND dontcounthits = 0 GROUP BY DATE_TRUNC('minute', to_timestamp_seconds(eventtime)) ORDER BY DATE_TRUNC('minute', M) LIMIT 10 OFFSET 1000;

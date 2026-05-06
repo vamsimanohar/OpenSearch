@@ -1,0 +1,1 @@
+SELECT windowclientwidth, windowclientheight, COUNT(*) AS PageViews FROM hits WHERE counterid = 62 AND eventdate >= '2013-07-01' AND eventdate <= '2013-07-31' AND isrefresh = 0 AND dontcounthits = 0 AND urlhash = 2868770270353813622 GROUP BY windowclientwidth, windowclientheight ORDER BY PageViews DESC, windowclientwidth, windowclientheight LIMIT 10 OFFSET 10000;

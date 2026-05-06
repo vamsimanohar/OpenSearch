@@ -1,0 +1,1 @@
+SELECT regionid, COUNT(DISTINCT userid) AS u FROM hits GROUP BY regionid ORDER BY u DESC LIMIT 10;

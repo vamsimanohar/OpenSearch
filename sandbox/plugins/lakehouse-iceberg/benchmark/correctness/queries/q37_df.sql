@@ -1,0 +1,1 @@
+SELECT url, COUNT(*) AS PageViews FROM hits WHERE counterid = 62 AND eventdate >= '2013-07-01' AND eventdate <= '2013-07-31' AND dontcounthits = 0 AND isrefresh = 0 AND url <> '' GROUP BY url ORDER BY PageViews DESC LIMIT 10;

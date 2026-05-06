@@ -1,0 +1,1 @@
+SELECT userid, COUNT(*) FROM hits GROUP BY userid ORDER BY COUNT(*) DESC LIMIT 10;

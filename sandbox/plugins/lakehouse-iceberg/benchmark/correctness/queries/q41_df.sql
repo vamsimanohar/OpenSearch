@@ -1,0 +1,1 @@
+SELECT urlhash, eventdate, COUNT(*) AS PageViews FROM hits WHERE counterid = 62 AND eventdate >= '2013-07-01' AND eventdate <= '2013-07-31' AND isrefresh = 0 AND traficsourceid IN (-1, 6) AND refererhash = 3594120000172545465 GROUP BY urlhash, eventdate ORDER BY PageViews DESC, urlhash, eventdate LIMIT 10 OFFSET 100;
