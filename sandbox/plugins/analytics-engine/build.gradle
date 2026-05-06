@@ -20,10 +20,9 @@ def sqlUnifiedQueryVersion = '3.6.0.0-SNAPSHOT'
 opensearchplugin {
   description = 'Analytics engine hub: discovers and wires query extensions via ExtensiblePlugin SPI.'
   classname = 'org.opensearch.analytics.AnalyticsPlugin'
-  // Extend arrow-flight-rpc so analytics-engine and arrow-flight-rpc share one classloader.
-  // Cross-plugin Arrow types (VectorSchemaRoot, ArrowBatchResponse) only work when loaded
-  // by the same classloader, and zero-copy transfer requires identical class identity on both sides.
-  extendedPlugins = ['arrow-flight-rpc']
+  // NOTE: arrow-flight-rpc is the intended extendedPlugin parent for production deployments,
+  // but is temporarily disabled due to Arrow 18.1.0 / Netty 4.2.13 incompatibility.
+  // extendedPlugins = ['arrow-flight-rpc']
 }
 
 java { sourceCompatibility = JavaVersion.toVersion(25); targetCompatibility = JavaVersion.toVersion(25) }
@@ -63,16 +62,10 @@ dependencies {
   // Also provides calcite-core transitively via api.
   api project(':sandbox:libs:analytics-framework')
 
-  // Arrow — provided at runtime by the extended arrow-flight-rpc plugin (same classloader).
-  // compileOnly here to avoid duplicate bundling; the parent plugin's single copy is what
-  // zero-copy Arrow transfer requires.
-  compileOnly "org.apache.arrow:arrow-vector:${versions.arrow}"
-  compileOnly "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+  // Arrow
+  implementation "org.apache.arrow:arrow-vector:${versions.arrow}"
+  implementation "org.apache.arrow:arrow-memory-core:${versions.arrow}"
 
-  // Arrow Flight RPC — compile-only; arrow-flight-rpc is our extendedPlugins parent and
-  // provides these classes at runtime. transitive = false prevents arrow-flight-rpc's
-  // transitives from landing on resolveableCompileOnly and being subtracted from our
-  // runtimeClasspath (bundlePlugin does this subtraction).
   compileOnly(project(':plugins:arrow-flight-rpc')) {
     transitive = false
   }
@@ -80,9 +73,9 @@ dependencies {
     transitive = false
   }
 
-  // Provided by arrow-flight-rpc at runtime (api deps in its build.gradle).
-  compileOnly "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
-  compileOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+  // Jackson — needed at runtime by arrow-vector
+  implementation "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
+  implementation "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
 
   // Guava — required at compile time because Calcite base classes expose guava types.
   // Uses custom config to bypass forbidden-dependencies.gradle check on compileClasspath.
@@ -91,26 +84,22 @@ dependencies {
   // Guava for test compilation — Calcite API exposes guava types
   calciteTestCompile "com.google.guava:guava:${versions.guava}"
 
-  // Guava — provided at runtime by the arrow-flight-rpc parent plugin (33.3.1-jre).
-  // Declared compileOnly here only to satisfy the calcite-derived runtime references;
-  // the runtimeClasspath exclude block below removes it from the bundled zip.
+  // Guava at runtime — Calcite static initializers use com.google.common classes.
+  runtimeOnly "com.google.guava:guava:${versions.guava}"
+  runtimeOnly 'com.google.guava:failureaccess:1.0.2'
 
-  // SLF4J — provided by arrow-flight-rpc at runtime (its api dep).
-  compileOnly "org.slf4j:slf4j-api:${versions.slf4j}"
+  // SLF4J — Arrow's BaseAllocator requires it at runtime.
+  runtimeOnly "org.slf4j:slf4j-api:${versions.slf4j}"
 
   // Calcite code generation (optional in calcite-core POM, needed at runtime for Enumerable pipeline)
   runtimeOnly "org.codehaus.janino:janino:3.1.12"
   runtimeOnly "org.codehaus.janino:commons-compiler:3.1.12"
 
-  // arrow-memory-netty comes from arrow-flight-rpc (api dep) and provides the
-  // AllocationManager that arrow-memory-core's BaseAllocator discovers via ServiceLoader.
-  // We deliberately do NOT bundle arrow-memory-unsafe here — with a single shared classloader,
-  // arrow-memory-netty's NettyAllocationManager wins the ServiceLoader lookup, which is
-  // required for gRPC's zero-copy Netty buffer path to work.
-
-  // Provided by arrow-flight-rpc at runtime (api deps).
-  compileOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
-  compileOnly "org.apache.arrow:arrow-format:${versions.arrow}"
+  // Arrow memory-unsafe provides DefaultAllocationManager via ServiceLoader at runtime.
+  runtimeOnly "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"
+  // Required at runtime by arrow-vector
+  runtimeOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
+  runtimeOnly "org.apache.arrow:arrow-format:${versions.arrow}"
 
   // commons-math3 — Calcite's TimeFrames.<clinit> references
   // org.apache.commons.math3.fraction.BigFraction. Not provided by arrow-flight-rpc,
@@ -123,18 +112,8 @@ dependencies {
   runtimeOnly "org.apache.httpcomponents.core5:httpcore5-h2:${versions.httpcore5}"
   runtimeOnly "org.apache.httpcomponents.client5:httpclient5:${versions.httpclient5}"
 
-  // Unit tests run on a flat classpath (no plugin classloader), so arrow-flight-rpc's
-  // runtime jars must be pulled back in for tests. The bundled plugin is unaffected.
-  // arrow-memory-unsafe is used here (not -netty) because unit tests don't exercise
-  // the Netty allocator path.
-  testRuntimeOnly "org.apache.arrow:arrow-vector:${versions.arrow}"
-  testRuntimeOnly "org.apache.arrow:arrow-memory-core:${versions.arrow}"
-  testRuntimeOnly "org.apache.arrow:arrow-memory-unsafe:${versions.arrow}"
-  testRuntimeOnly "org.apache.arrow:arrow-format:${versions.arrow}"
-  testRuntimeOnly "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
-  testRuntimeOnly "org.slf4j:slf4j-api:${versions.slf4j}"
-  testRuntimeOnly "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
-  testRuntimeOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+  // jackson-annotations — required at runtime by jackson-databind (transitive via Calcite).
+  runtimeOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
 
   // SQL Unified Query API for PPL parsing
   implementation("org.opensearch.query:unified-query-api:${sqlUnifiedQueryVersion}") {
@@ -159,9 +138,24 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 tasks.named('thirdPartyAudit').configure {
-  // Guava is excluded from runtimeClasspath (see configurations.runtimeClasspath block below) —
-  // its Unsafe violations no longer apply here and listing them would trip forbiddenApis
-  // ("All excluded classes seem to have no issues").
+  ignoreViolations(
+    'org.apache.arrow.memory.util.MemoryUtil',
+    'org.apache.arrow.memory.util.MemoryUtil$1',
+    'com.google.common.cache.Striped64',
+    'com.google.common.cache.Striped64$1',
+    'com.google.common.cache.Striped64$Cell',
+    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray',
+    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$1',
+    'com.google.common.hash.LittleEndianByteArray$UnsafeByteArray$2',
+    'com.google.common.hash.Striped64',
+    'com.google.common.hash.Striped64$1',
+    'com.google.common.hash.Striped64$Cell',
+    'com.google.common.primitives.UnsignedBytes$LexicographicalComparatorHolder$UnsafeComparator',
+    'com.google.common.primitives.UnsignedBytes$LexicographicalComparatorHolder$UnsafeComparator$1',
+    'com.google.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper',
+    'com.google.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper$1'
+  )
+
   ignoreMissingClasses(
     'com.aayushatharva.brotli4j.decoder.DecoderJNI$Status',
     'com.aayushatharva.brotli4j.decoder.DecoderJNI$Wrapper',
@@ -173,13 +167,8 @@ tasks.named('thirdPartyAudit').configure {
   )
 }
 
-// Jars provided by the arrow-flight-rpc parent plugin at runtime — strip from the bundled
-// zip to avoid jar hell. Calcite drags guava, slf4j, jackson, commons-codec in transitively.
 configurations.runtimeClasspath {
-  exclude group: 'com.google.guava'
-  exclude group: 'org.slf4j', module: 'slf4j-api'
   exclude group: 'commons-codec', module: 'commons-codec'
-  exclude group: 'com.fasterxml.jackson.core'
 }
 
 configurations.all {

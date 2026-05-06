@@ -22,7 +22,7 @@ import org.opensearch.analytics.spi.BackendExecutionContext;
 import org.opensearch.analytics.spi.FragmentInstructionHandler;
 import org.opensearch.analytics.spi.FragmentInstructionHandlerFactory;
 import org.opensearch.analytics.spi.InstructionNode;
-import org.opensearch.arrow.flight.transport.ArrowAllocatorProvider;
+import org.apache.arrow.memory.RootAllocator;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.core.tasks.TaskCancelledException;
@@ -46,8 +46,7 @@ import java.util.Map;
  * <p>Does NOT hold {@code IndicesService} — receives an already-resolved
  * {@link IndexShard} from the transport action.
  *
- * <p>Owns a service-lifetime {@link BufferAllocator} shared by every fragment, obtained as a child of the
- * node-level root via {@link ArrowAllocatorProvider}. One allocator per service means memory accounting is
+ * <p>Owns a service-lifetime {@link BufferAllocator} shared by every fragment. One allocator per service means memory accounting is
  * reported at the service level. For the streaming path, Arrow Flight's outbound handler co-locates its
  * transfer target on the same root (see {@code FlightOutboundHandler#processBatchTask}), keeping transfers
  * same-root and avoiding the known cross-allocator bug with foreign-backed buffers from the C Data Interface.
@@ -67,7 +66,7 @@ public class AnalyticsSearchService implements AutoCloseable {
     public AnalyticsSearchService(Map<String, AnalyticsSearchBackendPlugin> backends, List<AnalyticsOperationListener> listeners) {
         this.backends = backends;
         this.listener = new AnalyticsOperationListener.CompositeListener(listeners);
-        this.allocator = ArrowAllocatorProvider.newChildAllocator("analytics-search-service", Long.MAX_VALUE);
+        this.allocator = new RootAllocator(Long.MAX_VALUE);
     }
 
     @Override
